@@ -6,6 +6,7 @@ from pathlib import Path
 from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError
 
 from src.facebook.errors import FacebookPostingError
+from src.facebook.network import MarketplaceItemCapture
 from src.facebook.photos import download_vehicle_photos
 from src.facebook.ui import (
     PUBLISH_LABELS,
@@ -39,10 +40,20 @@ def create_vehicle_listing(
     _ensure_vehicle_create_flow(page)
 
     photo_paths = download_vehicle_photos(vehicle, max_photos=max_photos)
+    capture = MarketplaceItemCapture()
+    capture.attach(page)
     try:
         _upload_photos(page, photo_paths, log_dir, vehicle.autosell_id)
-        _fill_vehicle_form(page, vehicle, fb_config)
-        listing_url = _publish_and_capture_url(page, vehicle, log_dir, vehicle.autosell_id)
+        filled = _fill_vehicle_form(page, vehicle, fb_config, log_dir, vehicle.autosell_id)
+        print(f"Form fields filled: {filled}")
+        if filled < 2:
+            _save_debug(page, log_dir, vehicle.autosell_id, "form_incomplete")
+            raise FacebookPostingError(
+                f"Only {filled} form fields filled — vehicle form selectors may need tuning"
+            )
+        listing_url = _publish_and_capture_url(
+            page, vehicle, log_dir, vehicle.autosell_id, capture=capture
+        )
         if not listing_url:
             raise FacebookPostingError(
                 "Publish flow finished but listing URL was not found. "
@@ -66,7 +77,9 @@ def create_vehicle_listing(
 
 
 def _ensure_vehicle_create_flow(page: Page) -> None:
-    """Handle category pickers if FB does not land directly on the vehicle form."""
+    """Handle category pickers only when not already on the vehicle composer."""
+    if re.search(r"/marketplace/create/(vehicle|item)", page.url, re.I):
+        return
     for label in (
         "Vehículo",
         "Vehicle",
@@ -130,29 +143,44 @@ def _upload_photos(page: Page, photo_paths: list[Path], log_dir: Path, autosell_
     log_page_state(page, "after_photo_next")
 
 
-def _fill_vehicle_form(page: Page, vehicle: Vehicle, fb_config: dict) -> None:
+def _fill_vehicle_form(
+    page: Page,
+    vehicle: Vehicle,
+    fb_config: dict,
+    log_dir: Path,
+    autosell_id: str,
+) -> int:
     page.wait_for_timeout(2_000)
     dismiss_overlays(page)
     log_page_state(page, "vehicle_form")
+    _save_debug(page, log_dir, autosell_id, "vehicle_form")
 
-    _fill_text(page, re.compile(r"title|t[ií]tulo", re.I), vehicle.marketplace_title)
-    _fill_text(page, re.compile(r"price|precio", re.I), parse_mxn_price(vehicle.price))
-
+    filled = 0
     city = fb_config.get("location_city", "Chihuahua")
-    _fill_text(page, re.compile(r"location|ubicaci[oó]n|ciudad", re.I), city)
 
-    _fill_text(page, re.compile(r"year|a[nñ]o|model year", re.I), vehicle.year)
-    _fill_text(page, re.compile(r"make|marca", re.I), vehicle.brand)
-    _fill_text(page, re.compile(r"model|modelo", re.I), vehicle.title)
+    fields: list[tuple[str, str, tuple[str, ...]]] = [
+        ("title", vehicle.marketplace_title, ("Title", "Título")),
+        ("price", parse_mxn_price(vehicle.price), ("Price", "Precio")),
+        ("location", city, ("Location", "Ubicación", "Ciudad")),
+        ("year", vehicle.year, ("Year", "Año")),
+        ("make", vehicle.brand, ("Make", "Marca")),
+        ("model", vehicle.title, ("Model", "Modelo")),
+        ("mileage", parse_mileage_km(vehicle.mileage), ("Mileage", "Kilometraje", "Odometro", "Odómetro")),
+        ("description", vehicle_description(vehicle), ("Description", "Descripción")),
+    ]
 
-    mileage = parse_mileage_km(vehicle.mileage)
-    _fill_text(page, re.compile(r"mileage|kilometraje|odometer", re.I), mileage)
-
-    description = vehicle_description(vehicle)
-    _fill_text(page, re.compile(r"description|descripci[oó]n", re.I), description, multiline=True)
+    for name, value, labels in fields:
+        if not value:
+            continue
+        if _fill_vehicle_field(page, labels, value, multiline=name == "description"):
+            filled += 1
+            print(f"  filled {name}")
+        else:
+            print(f"  MISSING {name}")
 
     click_labeled_action(page, NEXT_LABELS, timeout_ms=60_000)
     log_page_state(page, "after_form_next")
+    return filled
 
 
 def _publish_and_capture_url(
@@ -160,6 +188,8 @@ def _publish_and_capture_url(
     vehicle: Vehicle,
     log_dir: Path,
     autosell_id: str,
+    *,
+    capture: MarketplaceItemCapture,
 ) -> str | None:
     try:
         click_labeled_action(page, PUBLISH_LABELS, timeout_ms=30_000)
@@ -173,6 +203,12 @@ def _publish_and_capture_url(
     page.wait_for_timeout(8_000)
     log_page_state(page, "after_publish")
     _save_debug(page, log_dir, autosell_id, "after_publish")
+    _log_publish_errors(page)
+
+    listing_url = capture.latest_url()
+    if listing_url:
+        print(f"Captured listing from network: {listing_url}")
+        return listing_url
 
     listing_url = _capture_listing_url(page, vehicle)
     if listing_url:
@@ -188,6 +224,11 @@ def _publish_and_capture_url(
         if listing_url:
             print(f"Found listing on {listing_page}: {listing_url}")
             return listing_url
+
+    listing_url = _open_listing_by_clicking_card(page, vehicle)
+    if listing_url:
+        print(f"Found listing by clicking card: {listing_url}")
+        return listing_url
 
     return None
 
@@ -450,9 +491,89 @@ def _normalize_fb_url(href: str) -> str | None:
     return href.split("?")[0]
 
 
-def _fill_text(page: Page, label_pattern: re.Pattern[str], value: str, *, multiline: bool = False) -> None:
+def _fill_vehicle_field(
+    page: Page,
+    labels: tuple[str, ...],
+    value: str,
+    *,
+    multiline: bool = False,
+) -> bool:
     if not value:
+        return False
+
+    tag = "textarea" if multiline else "input"
+    for label in labels:
+        for locator in (
+            page.get_by_label(label),
+            page.get_by_placeholder(label),
+            page.locator(f'{tag}[aria-label="{label}"]'),
+            page.locator(f'{tag}[aria-label*="{label}" i]'),
+            page.locator(f'[contenteditable="true"][aria-label*="{label}" i]'),
+        ):
+            try:
+                if locator.count() == 0:
+                    continue
+                target = locator.first
+                if not target.is_visible():
+                    continue
+                target.click()
+                target.fill(value)
+                return True
+            except Exception:
+                continue
+
+    pattern = re.compile("|".join(re.escape(label) for label in labels), re.I)
+    return _fill_text(page, pattern, value, multiline=multiline)
+
+
+def _log_publish_errors(page: Page) -> None:
+    try:
+        body = page.locator("body").inner_text(timeout=3_000).lower()
+    except Exception:
         return
+    for phrase in (
+        "something went wrong",
+        "algo salió mal",
+        "try again",
+        "inténtalo de nuevo",
+        "required",
+        "obligatorio",
+        "couldn't publish",
+        "no se pudo publicar",
+    ):
+        if phrase in body:
+            print(f"  FB page message detected: {phrase!r}")
+
+
+def _open_listing_by_clicking_card(page: Page, vehicle: Vehicle) -> str | None:
+    for term in (vehicle.marketplace_title, f"{vehicle.year} {vehicle.brand}", vehicle.brand):
+        if not term:
+            continue
+        locator = page.get_by_text(term, exact=False)
+        try:
+            if locator.count() == 0:
+                continue
+            target = locator.first
+            if not target.is_visible():
+                continue
+            target.click(timeout=5_000)
+            page.wait_for_timeout(4_000)
+            if "/marketplace/item/" in page.url:
+                return page.url.split("?")[0]
+        except Exception:
+            continue
+    return None
+
+
+def _fill_text(
+    page: Page,
+    label_pattern: re.Pattern[str],
+    value: str,
+    *,
+    multiline: bool = False,
+) -> bool:
+    if not value:
+        return False
 
     candidates: list[Locator] = [
         page.get_by_label(label_pattern),
@@ -470,11 +591,12 @@ def _fill_text(page: Page, label_pattern: re.Pattern[str], value: str, *, multil
                 continue
             target.click()
             target.fill(value)
-            return
+            return True
         except PlaywrightTimeoutError:
             continue
         except Exception:
             continue
+    return False
 
 
 def _first_visible(*locators: Locator) -> Locator | None:
