@@ -1,0 +1,87 @@
+name: Sync autosell → Facebook
+
+on:
+  schedule:
+    # 08:00 and 12:00 America/Chihuahua (UTC-6). Adjust if DST differs.
+    - cron: "0 14 * * *"
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    name: Scrape catalog (GitHub cloud)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Scrape autosell.mx public catalog
+        env:
+          AUTOSELL_BASE_URL: ${{ secrets.AUTOSELL_BASE_URL }}
+        run: python run_sync.py --scrape-only --output data/catalog_latest.json
+
+      - name: Upload catalog artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: catalog-latest
+          path: data/catalog_latest.json
+          retention-days: 14
+
+  facebook-sync:
+    name: Diff + Facebook (fb-worker)
+    needs: scrape
+    runs-on: [self-hosted, fb-worker]
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Download catalog artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: catalog-latest
+          path: data
+
+      - name: Link persistent data (sync.db, sessions, snapshots)
+        run: |
+          mkdir -p ~/auto-upload-data/data/snapshots ~/auto-upload-data/sessions
+          cp -f data/catalog_latest.json ~/auto-upload-data/data/catalog_latest.json
+          rm -rf data sessions
+          ln -s ~/auto-upload-data/data data
+          ln -s ~/auto-upload-data/sessions sessions
+
+      - name: Diff and sync (Phase 2 adds Facebook actions here)
+        env:
+          AUTOSELL_BASE_URL: ${{ secrets.AUTOSELL_BASE_URL }}
+          DRY_RUN: ${{ secrets.DRY_RUN }}
+          MAX_POSTS_PER_ACCOUNT_PER_RUN: ${{ secrets.MAX_POSTS_PER_ACCOUNT_PER_RUN }}
+          DB_PATH: data/sync.db
+          SNAPSHOT_DIR: data/snapshots
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python run_sync.py --from-snapshot data/catalog_latest.json

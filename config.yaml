@@ -1,0 +1,24 @@
+autosell:
+  base_url: https://www.autosell.mx
+  catalog_path: /catalogo
+  request_timeout_sec: 30
+  delay_between_pages_sec: 0.5
+  delay_between_details_sec: 0.3
+
+sync:
+  timezone: America/Chihuahua
+  max_posts_per_account_per_run: 10
+  removal_action: mark_sold  # mark_sold | delete
+
+facebook:
+  location_city: Chihuahua
+  location_state: Chihuahua
+  country: MX
+
+accounts:
+  - id: account_1
+    session_dir: sessions/account_1
+  - id: account_2
+    session_dir: sessions/account_2
+  - id: account_3
+    session_dir: sessions/account_3

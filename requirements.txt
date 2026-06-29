@@ -1,0 +1,7 @@
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+python-dotenv>=1.0.0
+PyYAML>=6.0.0
+
+# Phase 2+ (Facebook automation on VPS)
+# playwright>=1.40.0
