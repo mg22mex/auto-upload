@@ -171,8 +171,8 @@ def _fill_vehicle_form(
         ("model", vehicle.title, ("Model", "Modelo"), "combobox"),
         ("mileage", mileage_for_listing(vehicle.mileage), (
             "Mileage", "Kilometraje", "Odometer", "Odometro", "Odómetro",
-            "Kilometers", "Kilómetros", "Kilometros",
-        ), "numeric"),
+            "Kilometers", "Kilómetros", "Kilometros", "Vehicle mileage",
+        ), "mileage"),
         ("price", parse_mxn_price(vehicle.price), ("Price", "Precio"), "text"),
         ("description", vehicle_description(vehicle), ("Description", "Descripción"), "multiline"),
     ]
@@ -186,6 +186,8 @@ def _fill_vehicle_form(
             ok = _fill_combobox(page, labels, value)
         elif mode == "numeric":
             ok = _fill_numeric_field(page, labels, value)
+        elif mode == "mileage":
+            ok = _fill_mileage(page, value)
         elif mode == "multiline":
             ok = _fill_vehicle_field(page, labels, value, multiline=True)
         else:
@@ -590,6 +592,111 @@ def _fill_numeric_field(page: Page, labels: tuple[str, ...], value: str) -> bool
             continue
 
     return _fill_vehicle_field(page, labels, digits)
+
+
+def _fill_mileage(page: Page, value: str) -> bool:
+    digits = re.sub(r"[^\d]", "", value) or "12345"
+    labels = (
+        "Mileage", "Kilometraje", "Odometer", "Vehicle mileage",
+        "Kilometers", "Kilómetros",
+    )
+
+    if _fill_numeric_field(page, labels, digits):
+        return True
+    if _fill_mileage_via_js(page, digits):
+        return True
+    if _fill_mileage_after_model(page, digits):
+        return True
+
+    return _fill_vehicle_field(page, labels, digits)
+
+
+def _fill_mileage_via_js(page: Page, digits: str) -> bool:
+    try:
+        result = page.evaluate(
+            """(digits) => {
+                const keywords = [
+                  'kilometraje', 'mileage', 'odometer', 'kilometers',
+                  'kilómetros', 'kilometros', 'vehicle mileage',
+                ];
+                const setter = Object.getOwnPropertyDescriptor(
+                  window.HTMLInputElement.prototype, 'value'
+                )?.set;
+                const visible = (el) => {
+                  const r = el.getBoundingClientRect();
+                  return r.width > 20 && r.height > 10;
+                };
+                const apply = (el) => {
+                  el.focus();
+                  if (setter && el instanceof HTMLInputElement) {
+                    setter.call(el, digits);
+                  } else {
+                    el.value = digits;
+                  }
+                  el.dispatchEvent(new Event('input', { bubbles: true }));
+                  el.dispatchEvent(new Event('change', { bubbles: true }));
+                  return true;
+                };
+                const inputs = [
+                  ...document.querySelectorAll('input, [role="spinbutton"]'),
+                ];
+                for (const input of inputs) {
+                  if (!visible(input)) continue;
+                  let node = input.parentElement;
+                  for (let depth = 0; depth < 14 && node; depth++) {
+                    const text = (node.textContent || '').toLowerCase().slice(0, 800);
+                    if (keywords.some((k) => text.includes(k))) {
+                      apply(input);
+                      return { ok: true, id: input.id || '' };
+                    }
+                    node = node.parentElement;
+                  }
+                }
+                for (const label of document.querySelectorAll('label, span, div')) {
+                  const raw = (label.textContent || '').trim().toLowerCase();
+                  if (!raw || raw.length > 40) continue;
+                  if (!keywords.some((k) => raw === k || raw.startsWith(k))) continue;
+                  const container = label.closest('div');
+                  if (!container) continue;
+                  const input = container.querySelector('input, [role="spinbutton"]');
+                  if (input && visible(input)) {
+                    apply(input);
+                    return { ok: true, id: input.id || '' };
+                  }
+                }
+                return { ok: false };
+            }""",
+            digits,
+        )
+    except Exception:
+        return False
+    if result and result.get("ok"):
+        print(f"  mileage via JS (id={result.get('id', '?')})")
+        return True
+    return False
+
+
+def _fill_mileage_after_model(page: Page, digits: str) -> bool:
+    """Tab from the model combobox into the next field (often mileage)."""
+    for label in ("Model", "Modelo"):
+        try:
+            box = page.get_by_role("combobox", name=label)
+            if box.count() == 0:
+                box = page.locator(f'[role="combobox"][aria-label*="{label}" i]')
+            if box.count() == 0 or not box.first.is_visible():
+                continue
+            box.first.click()
+            page.wait_for_timeout(300)
+            page.keyboard.press("Tab")
+            page.wait_for_timeout(300)
+            page.keyboard.type(digits, delay=30)
+            page.keyboard.press("Tab")
+            page.wait_for_timeout(300)
+            print("  mileage via Tab after model")
+            return True
+        except Exception:
+            continue
+    return False
 
 
 def _fill_vehicle_field(
