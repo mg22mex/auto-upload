@@ -11,6 +11,8 @@ LISTING_ID_PATTERNS = (
     re.compile(r'"story_id"\s*:\s*"?(\d+)"?'),
     re.compile(r'"product_item_id"\s*:\s*"?(\d+)"?'),
     re.compile(r'"for_sale_item_id"\s*:\s*"?(\d+)"?'),
+    re.compile(r'"marketplace_listing_id"\s*:\s*"?(\d+)"?'),
+    re.compile(r'"listing"\s*:\s*\{[^}]*"id"\s*:\s*"?(\d+)"?'),
 )
 
 
@@ -29,8 +31,7 @@ class MarketplaceItemCapture:
         try:
             if response.status < 200 or response.status >= 400:
                 return
-            url = response.url.lower()
-            if not any(token in url for token in ("graphql", "marketplace", "commerce")):
+            if "facebook.com" not in response.url:
                 return
             body = response.text()
         except Exception:
@@ -39,8 +40,11 @@ class MarketplaceItemCapture:
         for pattern in (ITEM_URL_PATTERN, *LISTING_ID_PATTERNS):
             for match in pattern.finditer(body):
                 item_id = match.group(1)
-                if item_id and item_id not in self.item_ids:
+                if item_id and len(item_id) >= 8 and item_id not in self.item_ids:
                     self.item_ids.append(item_id)
+
+    def all_urls(self) -> list[str]:
+        return [f"https://www.facebook.com/marketplace/item/{item_id}/" for item_id in self.item_ids]
 
     def latest_url(self) -> str | None:
         if not self.item_ids:

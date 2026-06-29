@@ -203,6 +203,7 @@ def _fill_vehicle_form(
 
     click_labeled_action(page, NEXT_LABELS, timeout_ms=60_000)
     log_page_state(page, "after_form_next")
+    _save_debug(page, log_dir, autosell_id, "before_publish")
     return filled_names
 
 
@@ -214,45 +215,121 @@ def _publish_and_capture_url(
     *,
     capture: MarketplaceItemCapture,
 ) -> str | None:
+    _dismiss_vehicle_category_prompts(page)
+
     try:
         click_labeled_action(page, PUBLISH_LABELS, timeout_ms=30_000)
     except FacebookPostingError:
         click_labeled_action(page, PUBLISH_LABELS, timeout_ms=30_000, allow_force=True)
 
     try:
-        page.wait_for_url(re.compile(r"facebook\.com/marketplace"), timeout=30_000)
+        page.wait_for_url(re.compile(r"facebook\.com/marketplace"), timeout=45_000)
     except PlaywrightTimeoutError:
         pass
-    page.wait_for_timeout(8_000)
+
+    for wait_sec in (5, 10, 15):
+        page.wait_for_timeout(wait_sec * 1000)
+        _dismiss_vehicle_category_prompts(page)
+        listing_url = capture.latest_url()
+        if listing_url:
+            print(f"Captured listing from network: {listing_url}")
+            return listing_url
+        if _publish_succeeded(page):
+            break
+
     log_page_state(page, "after_publish")
     _save_debug(page, log_dir, autosell_id, "after_publish")
     _log_publish_errors(page)
 
-    listing_url = capture.latest_url()
-    if listing_url:
-        print(f"Captured listing from network: {listing_url}")
-        return listing_url
+    if capture.item_ids:
+        print(f"Network saw item ids: {', '.join(capture.item_ids)}")
 
     listing_url = _capture_listing_url(page, vehicle)
     if listing_url:
         return listing_url
 
     for listing_page in (
-        "https://www.facebook.com/marketplace/you/dashboard",
         "https://www.facebook.com/marketplace/you/selling",
+        "https://www.facebook.com/marketplace/you/dashboard",
     ):
-        page.goto(listing_page, wait_until="domcontentloaded", timeout=60_000)
-        page.wait_for_timeout(4_000)
-        listing_url = _capture_listing_url(page, vehicle, scroll=True)
-        if listing_url:
-            print(f"Found listing on {listing_page}: {listing_url}")
-            return listing_url
+        for attempt in range(3):
+            page.goto(listing_page, wait_until="domcontentloaded", timeout=60_000)
+            page.wait_for_timeout(4_000)
+            _dismiss_vehicle_category_prompts(page)
+            listing_url = _capture_listing_url(page, vehicle, scroll=True)
+            if listing_url:
+                print(f"Found listing on {listing_page}: {listing_url}")
+                return listing_url
+            listing_url = _find_top_matching_listing(page, vehicle)
+            if listing_url:
+                print(f"Found top matching listing on {listing_page}: {listing_url}")
+                return listing_url
+            page.wait_for_timeout(5_000)
 
     listing_url = _open_listing_by_clicking_card(page, vehicle)
     if listing_url:
         print(f"Found listing by clicking card: {listing_url}")
         return listing_url
 
+    if capture.item_ids:
+        url = capture.latest_url()
+        print(f"Using network item id without page verification: {url}")
+        return url
+
+    return None
+
+
+def _publish_succeeded(page: Page) -> bool:
+    try:
+        body = page.locator("body").inner_text(timeout=5_000).lower()
+    except Exception:
+        return False
+    phrases = (
+        "listing is live",
+        "has been listed",
+        "your listing",
+        "publicación publicada",
+        "publicación está activa",
+        "se publicó",
+        "view listing",
+        "ver anuncio",
+    )
+    return any(phrase in body for phrase in phrases)
+
+
+def _dismiss_vehicle_category_prompts(page: Page) -> None:
+    for pattern in (
+        re.compile(r"list in vehicles", re.I),
+        re.compile(r"listar en veh[ií]culos", re.I),
+        re.compile(r"did you mean to list", re.I),
+    ):
+        try:
+            link = page.get_by_text(pattern)
+            if link.count() and link.first.is_visible():
+                link.first.click(timeout=3_000)
+                page.wait_for_timeout(1_500)
+        except Exception:
+            continue
+
+
+def _find_top_matching_listing(page: Page, vehicle: Vehicle) -> str | None:
+    price_digits = parse_mxn_price(vehicle.price)
+    needles = [
+        vehicle.brand.lower(),
+        vehicle.year,
+        price_digits,
+        vehicle.marketplace_title.lower(),
+    ]
+    for entry in _collect_marketplace_links(page)[:15]:
+        haystack = entry.get("text", "").lower()
+        hits = sum(1 for n in needles if n and n in haystack)
+        if hits >= 2 or (vehicle.brand.lower() in haystack and vehicle.year in haystack):
+            normalized = _normalize_fb_url(entry.get("href", ""))
+            if normalized:
+                return normalized
+    links = _collect_marketplace_links(page)
+    if len(links) == 1:
+        return _normalize_fb_url(links[0].get("href", ""))
     return None
 
 
