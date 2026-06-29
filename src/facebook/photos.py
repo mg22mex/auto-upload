@@ -8,6 +8,21 @@ import requests
 
 from src.models import Vehicle
 
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+    "Accept-Language": "es-MX,es;q=0.9,en;q=0.8",
+}
+
+
+def vehicle_image_urls(vehicle: Vehicle) -> list[str]:
+    """Keep only images that belong to this vehicle's autosell_id."""
+    needle = f"/{vehicle.autosell_id}/"
+    return [url for url in vehicle.image_urls if needle in url]
+
 
 def download_vehicle_photos(
     vehicle: Vehicle,
@@ -19,11 +34,18 @@ def download_vehicle_photos(
     if max_photos <= 0:
         return []
 
+    urls = vehicle_image_urls(vehicle)
+    if not urls:
+        raise RuntimeError(f"No image URLs for {vehicle.autosell_id}")
+
     tmp_dir = Path(tempfile.mkdtemp(prefix=f"autosell_{vehicle.autosell_id}_"))
     saved: list[Path] = []
     seen_names: set[str] = set()
 
-    for index, url in enumerate(vehicle.image_urls):
+    session = requests.Session()
+    session.headers.update(BROWSER_HEADERS)
+
+    for index, url in enumerate(urls):
         if len(saved) >= max_photos:
             break
         if not url:
@@ -37,7 +59,11 @@ def download_vehicle_photos(
         seen_names.add(stem)
         dest = tmp_dir / f"{stem}{suffix}"
 
-        response = requests.get(url, timeout=timeout_sec)
+        response = session.get(
+            url,
+            timeout=timeout_sec,
+            headers={"Referer": vehicle.url},
+        )
         response.raise_for_status()
         dest.write_bytes(response.content)
         saved.append(dest)

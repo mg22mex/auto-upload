@@ -119,7 +119,7 @@ class AutosellScraper:
         brand = re.sub(r"^marca:\s*", "", brand_raw, flags=re.I).strip()
 
         specs = self._extract_specs(soup)
-        image_urls = self._extract_images(html)
+        image_urls = self._extract_images(html, autosell_id)
 
         return Vehicle(
             autosell_id=autosell_id,
@@ -151,10 +151,13 @@ class AutosellScraper:
                 specs[label] = value
         return specs
 
-    def _extract_images(self, html: str) -> list[str]:
+    def _extract_images(self, html: str, autosell_id: str) -> list[str]:
         seen: set[str] = set()
         ordered: list[str] = []
+        needle = f"/{autosell_id}/"
         for url in IMAGE_PATTERN.findall(html):
+            if needle not in url:
+                continue
             normalized = url.split("?", 1)[0]
             if normalized in seen:
                 continue
