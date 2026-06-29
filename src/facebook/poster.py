@@ -20,6 +20,9 @@ from src.facebook.util import parse_mileage_km, parse_mxn_price, vehicle_descrip
 from src.models import Vehicle
 
 
+ITEM_URL_PATTERN = re.compile(r"/marketplace/item/(\d+)")
+
+
 def create_vehicle_listing(
     page: Page,
     vehicle: Vehicle,
@@ -43,7 +46,7 @@ def create_vehicle_listing(
         if not listing_url:
             raise FacebookPostingError(
                 "Publish flow finished but listing URL was not found. "
-                "Check Marketplace → Your listings for the new post."
+                "Check Marketplace → Your listings; run scripts/fb_find_listing.py if needed."
             )
         return listing_url
     except Exception as exc:
@@ -171,7 +174,7 @@ def _publish_and_capture_url(
     log_page_state(page, "after_publish")
     _save_debug(page, log_dir, autosell_id, "after_publish")
 
-    listing_url = _extract_item_url_from_page(page)
+    listing_url = _capture_listing_url(page, vehicle)
     if listing_url:
         return listing_url
 
@@ -181,7 +184,7 @@ def _publish_and_capture_url(
     ):
         page.goto(listing_page, wait_until="domcontentloaded", timeout=60_000)
         page.wait_for_timeout(4_000)
-        listing_url = _find_listing_url_by_vehicle(page, vehicle)
+        listing_url = _capture_listing_url(page, vehicle, scroll=True)
         if listing_url:
             print(f"Found listing on {listing_page}: {listing_url}")
             return listing_url
@@ -189,19 +192,192 @@ def _publish_and_capture_url(
     return None
 
 
+def _capture_listing_url(page: Page, vehicle: Vehicle, *, scroll: bool = False) -> str | None:
+    listing_url = _extract_item_url_from_page(page)
+    if listing_url:
+        return listing_url
+
+    listing_url = _find_view_listing_link(page)
+    if listing_url:
+        return listing_url
+
+    listing_url = _find_item_url_in_html(page, vehicle, single_only=True)
+    if listing_url:
+        return listing_url
+
+    listing_url = _find_listing_url_by_vehicle(page, vehicle)
+    if listing_url:
+        return listing_url
+
+    if scroll:
+        for _ in range(10):
+            page.mouse.wheel(0, 2_000)
+            page.wait_for_timeout(1_500)
+            listing_url = _find_listing_url_by_vehicle(page, vehicle)
+            if listing_url:
+                return listing_url
+            listing_url = _find_item_url_near_text(page, vehicle.brand)
+            if listing_url:
+                return listing_url
+
+    listing_url = _find_item_url_near_text(page, vehicle.brand)
+    if listing_url:
+        return listing_url
+
+    return _find_item_url_in_html(page, vehicle, single_only=False)
+
+
+def _find_view_listing_link(page: Page) -> str | None:
+    for label in (
+        "View listing",
+        "View your listing",
+        "See listing",
+        "Ver anuncio",
+        "Ver publicación",
+        "Ver tu publicación",
+    ):
+        for locator in (
+            page.locator(f'a[aria-label="{label}"]'),
+            page.locator(f'[role="link"][aria-label="{label}"]'),
+            page.get_by_role("link", name=label),
+        ):
+            try:
+                if locator.count() and locator.first.is_visible():
+                    href = locator.first.get_attribute("href") or ""
+                    normalized = _normalize_fb_url(href)
+                    if normalized:
+                        return normalized
+                    locator.first.click(timeout=5_000)
+                    page.wait_for_timeout(3_000)
+                    if "/marketplace/item/" in page.url:
+                        return page.url.split("?")[0]
+            except Exception:
+                continue
+    return None
+
+
+def _find_item_url_in_html(page: Page, vehicle: Vehicle, *, single_only: bool) -> str | None:
+    try:
+        html = page.content()
+    except Exception:
+        return None
+
+    item_ids = []
+    for match in ITEM_URL_PATTERN.finditer(html):
+        item_id = match.group(1)
+        if item_id not in item_ids:
+            item_ids.append(item_id)
+
+    if single_only and len(item_ids) == 1:
+        return f"https://www.facebook.com/marketplace/item/{item_ids[0]}/"
+
+    if not item_ids:
+        return None
+
+    price_digits = parse_mxn_price(vehicle.price)
+    needles = [
+        vehicle.marketplace_title.lower(),
+        vehicle.brand.lower(),
+        vehicle.year,
+        price_digits,
+        vehicle.price.lower(),
+    ]
+    html_lower = html.lower()
+    for item_id in item_ids:
+        window_start = max(0, html_lower.find(f"/marketplace/item/{item_id}") - 400)
+        window_end = min(len(html_lower), html_lower.find(f"/marketplace/item/{item_id}") + 400)
+        window = html_lower[window_start:window_end]
+        if any(needle in window for needle in needles if needle):
+            return f"https://www.facebook.com/marketplace/item/{item_id}/"
+
+    return None
+
+
+def _find_item_url_near_text(page: Page, text: str) -> str | None:
+    if not text:
+        return None
+    try:
+        href = page.evaluate(
+            """(needle) => {
+                const lower = needle.toLowerCase();
+                const links = [...document.querySelectorAll(
+                  'a[href*="/marketplace/item/"], [role="link"][href*="/marketplace/item/"]'
+                )];
+                for (const link of links) {
+                  const href = link.href || link.getAttribute('href') || '';
+                  if (!href.includes('/marketplace/item/')) continue;
+                  const block = (link.innerText || link.getAttribute('aria-label') || '').toLowerCase();
+                  if (block.includes(lower)) return href.split('?')[0];
+                }
+                const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+                while (walker.nextNode()) {
+                  const node = walker.currentNode;
+                  if (!node.textContent || !node.textContent.toLowerCase().includes(lower)) continue;
+                  let el = node.parentElement;
+                  for (let i = 0; i < 10 && el; i++) {
+                    const link = el.querySelector('a[href*="/marketplace/item/"]');
+                    if (link) {
+                      const href = link.href || link.getAttribute('href') || '';
+                      return href.split('?')[0];
+                    }
+                    el = el.parentElement;
+                  }
+                }
+                return null;
+            }""",
+            text,
+        )
+    except Exception:
+        return None
+    return _normalize_fb_url(href or "")
+
+
 def _extract_item_url_from_page(page: Page) -> str | None:
     if "/marketplace/item/" in page.url:
         return page.url.split("?")[0]
 
-    for link in page.locator('a[href*="/marketplace/item/"]').all()[:20]:
+    for selector in (
+        'a[href*="/marketplace/item/"]',
+        '[role="link"][href*="/marketplace/item/"]',
+    ):
         try:
-            href = link.get_attribute("href") or ""
-            normalized = _normalize_fb_url(href)
-            if normalized:
-                return normalized
+            links = page.locator(selector).all()[:30]
         except Exception:
             continue
+        for link in links:
+            try:
+                href = link.get_attribute("href") or ""
+                normalized = _normalize_fb_url(href)
+                if normalized:
+                    return normalized
+            except Exception:
+                continue
     return None
+
+
+def _collect_marketplace_links(page: Page) -> list[dict[str, str]]:
+    try:
+        return page.evaluate(
+            """() => {
+                const out = [];
+                const seen = new Set();
+                const nodes = document.querySelectorAll(
+                  'a[href*="/marketplace/item/"], [role="link"][href*="/marketplace/item/"]'
+                );
+                for (const node of nodes) {
+                  const href = (node.href || node.getAttribute('href') || '').split('?')[0];
+                  if (!href || !href.includes('/marketplace/item/') || seen.has(href)) continue;
+                  seen.add(href);
+                  out.push({
+                    href,
+                    text: (node.innerText || node.getAttribute('aria-label') || '').trim(),
+                  });
+                }
+                return out;
+            }"""
+        )
+    except Exception:
+        return []
 
 
 def _find_listing_url_by_vehicle(page: Page, vehicle: Vehicle) -> str | None:
@@ -216,7 +392,14 @@ def _find_listing_url_by_vehicle(page: Page, vehicle: Vehicle) -> str | None:
     ]
     needles = [n.strip() for n in needles if n and n.strip()]
 
-    item_links = page.locator('a[href*="/marketplace/item/"]')
+    for entry in _collect_marketplace_links(page):
+        haystack = entry.get("text", "").lower()
+        if any(needle.lower() in haystack for needle in needles):
+            normalized = _normalize_fb_url(entry.get("href", ""))
+            if normalized:
+                return normalized
+
+    item_links = page.locator('a[href*="/marketplace/item/"], [role="link"][href*="/marketplace/item/"]')
     try:
         count = min(item_links.count(), 80)
     except Exception:
