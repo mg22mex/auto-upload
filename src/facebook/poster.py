@@ -11,8 +11,10 @@ from src.facebook.photos import download_vehicle_photos
 from src.facebook.ui import (
     PUBLISH_LABELS,
     NEXT_LABELS,
+    advance_composer_next,
     advance_past_photo_step,
     click_labeled_action,
+    disable_promote_listing,
     dismiss_overlays,
     log_page_state,
     wait_for_photo_previews,
@@ -216,6 +218,7 @@ def _publish_and_capture_url(
     capture: MarketplaceItemCapture,
 ) -> str | None:
     _dismiss_vehicle_category_prompts(page)
+    _complete_review_step(page)
 
     try:
         click_labeled_action(page, PUBLISH_LABELS, timeout_ms=30_000)
@@ -277,6 +280,42 @@ def _publish_and_capture_url(
         return url
 
     return None
+
+
+def _complete_review_step(page: Page) -> None:
+    """Review page: Model/Price/Description + Promote toggle. Next is disabled until promote is off."""
+    try:
+        body = page.locator("body").inner_text(timeout=5_000).lower()
+    except Exception:
+        return
+
+    if "promote listing" not in body and "promocionar" not in body and "promover" not in body:
+        return
+
+    log_page_state(page, "review_page")
+    disable_promote_listing(page)
+    page.wait_for_timeout(1_500)
+
+    try:
+        page.wait_for_function(
+            """() => {
+                const labels = ['Next', 'Siguiente'];
+                for (const label of labels) {
+                  for (const node of document.querySelectorAll(`[aria-label="${label}"]`)) {
+                    if (node.getAttribute('aria-disabled') === 'true') continue;
+                    const r = node.getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0) return true;
+                  }
+                }
+                return false;
+            }""",
+            timeout=30_000,
+        )
+    except Exception:
+        disable_promote_listing(page)
+
+    advance_composer_next(page, timeout_ms=60_000)
+    log_page_state(page, "after_review_next")
 
 
 def _publish_succeeded(page: Page) -> bool:

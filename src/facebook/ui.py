@@ -8,7 +8,14 @@ from playwright.sync_api import Locator, Page
 from src.facebook.errors import FacebookPostingError
 
 NEXT_LABELS = ("Siguiente", "Next", "Continuar", "Continue")
-PUBLISH_LABELS = ("Publicar", "Publish", "Publicar artículo", "List item")
+PUBLISH_LABELS = (
+    "Publicar",
+    "Publish",
+    "Publicar artículo",
+    "List item",
+    "Publish listing",
+    "Publicar anuncio",
+)
 DISMISS_LABELS = (
     "Ahora no",
     "Not now",
@@ -216,6 +223,76 @@ def log_page_state(page: Page, step: str) -> None:
     except Exception:
         title = "?"
     print(f"FB step [{step}]: {page.url} | {title}")
+
+
+def disable_promote_listing(page: Page) -> bool:
+    """Turn off 'Promote listing after publish' — it blocks the Next button."""
+    try:
+        turned_off = page.evaluate(
+            """() => {
+                const words = ['promote listing', 'promocionar', 'promover'];
+                for (const sw of document.querySelectorAll('[role="switch"]')) {
+                  if (sw.getAttribute('aria-checked') !== 'true') continue;
+                  let el = sw.parentElement;
+                  for (let depth = 0; depth < 10 && el; depth++) {
+                    const text = (el.textContent || '').toLowerCase();
+                    if (words.some((w) => text.includes(w))) {
+                      sw.click();
+                      return true;
+                    }
+                    el = el.parentElement;
+                  }
+                }
+                return false;
+            }"""
+        )
+    except Exception:
+        return False
+    if turned_off:
+        print("  disabled Promote listing toggle")
+        page.wait_for_timeout(1_000)
+    return bool(turned_off)
+
+
+def advance_composer_next(page: Page, *, timeout_ms: int = 90_000) -> None:
+    """Click Next/Siguiente on composer steps (review, etc.)."""
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    last_state = "no click attempted"
+
+    while time.monotonic() < deadline:
+        disable_promote_listing(page)
+        for label in NEXT_LABELS:
+            for locator in _next_button_locators(page, label):
+                try:
+                    if locator.count() == 0:
+                        continue
+                    button = locator.last
+                    if not button.is_visible():
+                        continue
+                    if button.get_attribute("aria-disabled") == "true":
+                        last_state = f"{label} disabled"
+                        continue
+                    if not button.is_enabled():
+                        last_state = f"{label} not enabled"
+                        continue
+                    button.scroll_into_view_if_needed()
+                    button.click(timeout=5_000)
+                    page.wait_for_timeout(2_000)
+                    return
+                except Exception as exc:
+                    last_state = str(exc)
+                    try:
+                        button.click(timeout=5_000, force=True)
+                        page.wait_for_timeout(2_000)
+                        return
+                    except Exception:
+                        pass
+        if _js_click_next(page):
+            page.wait_for_timeout(2_000)
+            return
+        page.wait_for_timeout(2_000)
+
+    raise FacebookPostingError(f"Could not click composer Next: {last_state}")
 
 
 def _labeled_button_locators(page: Page, label: str) -> list[Locator]:
