@@ -10,7 +10,7 @@
 
 Your daily PC can stay off. Only **fb-worker** must be always on and registered before workflows can run.
 
-Phase 0–1 (current): scrape + diff planning. Facebook automation is Phase 2.
+Phase 0–1: scrape + diff planning. **Phase 2 (Facebook):** Playwright posting is implemented and verified manually on `account_1` (test vehicle `obj969` — 2020 Audi A3). Scheduled sync still uses `DRY_RUN=true` until you enable live posting for all accounts.
 
 ---
 
@@ -21,7 +21,7 @@ Phase 0–1 (current): scrape + diff planning. Facebook automation is Phase 2.
 | `data/catalog_latest.json` | Written on fb-worker each run; optional GitHub artifact | No |
 | `data/sync.db` | **`~/auto-upload-data/data/` on fb-worker** | No |
 | `sessions/account_*` | **`~/auto-upload-data/sessions/` on fb-worker** | No |
-| `data/snapshots/` | Archived on fb-worker after each run | No |
+| `data/logs/facebook/` | Debug screenshots on fb-worker (`obj969_*.png`, etc.) | No |
 
 The scrape step must run on fb-worker because autosell.mx blocks GitHub-hosted datacenter IPs.
 
@@ -165,21 +165,33 @@ Schedule: ~08:00 and ~12:00 America/Chihuahua (`0 14` and `0 18` UTC; adjust for
 
 ---
 
-## Part E — Phase 2 Facebook (on fb-worker only)
+## Part E — Facebook Marketplace (Playwright on fb-worker)
 
-On the fb-worker machine (Ubuntu 24.04 — use a venv, not system `pip`):
+Facebook runs **only on fb-worker** (same machine as scrape). Use a persistent clone for manual work — not the ephemeral Actions checkout:
 
 ```bash
-cd ~/actions-runner/_work/auto-upload/auto-upload   # or your clone path
+# Oracle VM example
+ssh ubuntu@YOUR_VPS_IP
+git clone https://github.com/YOUR_USER/auto-upload.git ~/auto-upload
+cd ~/auto-upload
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 playwright install chromium
-# sudo does not see venv binaries — use the full path:
 sudo .venv/bin/playwright install-deps chromium
 ```
 
-Log in once per Facebook account (headed browser; SSH with X11 forwarding or run from a machine that can open a display):
+Symlink persistent data (same layout as CI):
+
+```bash
+mkdir -p ~/auto-upload-data/data/snapshots ~/auto-upload-data/sessions
+ln -snf ~/auto-upload-data/data ~/auto-upload/data
+ln -snf ~/auto-upload-data/sessions ~/auto-upload/sessions
+```
+
+### E1. Log in once per account
+
+Run on a machine with a display (local Arch/Mac) or X11-forwarded SSH. Headed login saves cookies to `sessions/account_N/`.
 
 ```bash
 source .venv/bin/activate
@@ -187,15 +199,72 @@ python scripts/fb_login.py --account account_1
 python scripts/fb_test_session.py --account account_1
 ```
 
-Sessions persist under `~/auto-upload-data/sessions/account_1` (symlinked as `sessions/` in CI).
-
-Test one listing before enabling live sync:
+Copy sessions to fb-worker if login was local:
 
 ```bash
-python scripts/fb_post_test.py --account account_1 --autosell-id obj969
+scp -r sessions/account_1 ubuntu@YOUR_VPS_IP:~/auto-upload-data/sessions/
 ```
 
-Set `DRY_RUN=false` in GitHub Secrets only after a manual post succeeds.
+Repeat for `account_2` and `account_3`.
+
+### E2. Test one listing (before live sync)
+
+```bash
+cd ~/auto-upload && source .venv/bin/activate
+git pull origin main
+python scripts/fb_post_test.py --account account_1 --autosell-id obj969 --max-photos 3
+```
+
+Expected log lines:
+
+- `categorized: make=Audi, model=A3, ...`
+- `verified make`, `verified model`
+- `Posted: https://www.facebook.com/marketplace/item/...`
+
+Confirm on [Marketplace → Your listings](https://www.facebook.com/marketplace/you/dashboard). New listings may show **“This listing is being reviewed”** for a short time — that is normal.
+
+Find an existing listing URL by vehicle id:
+
+```bash
+python scripts/fb_find_listing.py --account account_1 --autosell-id obj969
+```
+
+Debug screenshots: `data/logs/facebook/{autosell_id}_*.png`
+
+### E3. Autosell → Facebook field mapping
+
+The poster fills FB’s vehicle composer in this order. Values come from the autosell catalog plus `src/facebook/categorize.py` when autosell has no equivalent field.
+
+| Autosell / source | Facebook field | Notes |
+|-------------------|----------------|-------|
+| `brand` (Marca) | **Make** | Searchable dropdown — must click option (e.g. Audi) |
+| `title` | **Model** | Text input; normalized (`A 3` → `A3`) |
+| `year` | **Year** | Dropdown |
+| `mileage` (Kilometraje) | **Mileage** | Digits only (`92,000 kms` → `92000`) |
+| `price` (Precio) | **Price** | Digits only |
+| `location_city` in config | **Location** | Default Chihuahua |
+| inferred | **Vehicle type** | Usually `Car/Truck` |
+| inferred | **Body style** | Sedan, SUV, Truck, Hatchback, … |
+| inferred | **Exterior color** | Default Silver |
+| inferred | **Interior color** | Default Black |
+| inferred | **Fuel type** | Default Gasoline |
+| inferred | **Transmission** | `Automatic transmission` |
+| inferred | **Vehicle condition** | Default Excellent |
+| — | **Clean title** | Checked |
+| generated | **Description** | Title, km, specs, autosell URL |
+
+Make/model/year must verify on the form before **Next** is enabled. The script only reports success after the listing URL matches **brand + price or model** on the item page (not year alone — avoids false matches from “Joined Facebook in 2020”).
+
+### E4. Enable live sync
+
+1. Verify manual post on each account.
+2. Set GitHub secret `DRY_RUN=false`.
+3. Monitor first scheduled runs; default cap is `MAX_POSTS_PER_ACCOUNT_PER_RUN=10` per run (~420 listings total at 3 accounts × ~140 vehicles).
+
+```bash
+# Full pipeline locally (respects DRY_RUN in .env)
+python run_sync.py
+```
 
 ---
 
@@ -228,7 +297,11 @@ python run_sync.py --from-snapshot data/catalog_latest.json --dry-run
 | fb-worker offline | Start runner service on Oracle/Mac Mini |
 | `sync.db` resets each run | Check symlinks to `~/auto-upload-data/data` in workflow |
 | Oracle out of capacity | Retry AD/region; fallback Hetzner ~€4/mo |
-| Facebook checkpoint | Re-login on fb-worker via Screen Sharing (Mac) or SSH (Linux) |
+| Facebook checkpoint | Re-login via `fb_login.py`; copy session to fb-worker |
+| Next disabled on FB form | Check `data/logs/facebook/*_next_disabled*.png`; usually missing Make or vehicle details |
+| Script prints wrong item URL | Dashboard is source of truth; `fb_find_listing.py` uses strict brand+price match |
+| Listing “being reviewed” | Normal for new posts; appears on dashboard before public item page stabilizes |
+| `pip install` blocked (Ubuntu 24.04) | Use project `.venv`, never system pip |
 
 ---
 
