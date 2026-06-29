@@ -34,8 +34,9 @@ def mileage_for_listing(mileage: str) -> str:
 
 def vehicle_description(vehicle: Vehicle) -> str:
     lines = [vehicle.marketplace_title]
+    lines.append(f"Kilometraje: {mileage_for_listing(vehicle.mileage)} km")
     for key, value in vehicle.specs.items():
-        if value:
+        if value and key.lower() not in {"kilometraje", "precio"}:
             lines.append(f"{key}: {value}")
     lines.append(f"Más información: {vehicle.url}")
     return "\n".join(lines)

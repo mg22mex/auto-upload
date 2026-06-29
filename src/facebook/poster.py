@@ -50,13 +50,16 @@ def create_vehicle_listing(
         _upload_photos(page, photo_paths, log_dir, vehicle.autosell_id)
         filled_names = _fill_vehicle_form(page, vehicle, fb_config, log_dir, vehicle.autosell_id)
         print(f"Form fields filled: {len(filled_names)} ({', '.join(sorted(filled_names))})")
-        required = {"year", "price", "make", "mileage"}
+        required = {"year", "price", "make"}
         missing = required - filled_names
         if missing:
             _save_debug(page, log_dir, vehicle.autosell_id, "form_incomplete")
             raise FacebookPostingError(
                 f"Required vehicle fields missing: {', '.join(sorted(missing))}"
             )
+        if "mileage" not in filled_names:
+            km = mileage_for_listing(vehicle.mileage)
+            print(f"  WARN mileage input not found on FB form; using {km} km in description only")
         listing_url = _publish_and_capture_url(
             page, vehicle, log_dir, vehicle.autosell_id, capture=capture
         )
@@ -607,8 +610,65 @@ def _fill_mileage(page: Page, value: str) -> bool:
         return True
     if _fill_mileage_after_model(page, digits):
         return True
+    if _fill_mileage_empty_input_scan(page, digits):
+        return True
 
     return _fill_vehicle_field(page, labels, digits)
+
+
+def _fill_mileage_empty_input_scan(page: Page, digits: str) -> bool:
+    try:
+        result = page.evaluate(
+            """(digits) => {
+                const setter = Object.getOwnPropertyDescriptor(
+                  window.HTMLInputElement.prototype, 'value'
+                )?.set;
+                const skip = (al) => {
+                  al = (al || '').toLowerCase();
+                  return (
+                    al.includes('search') || al.includes('location') ||
+                    al.includes('ubic') || al.includes('price') ||
+                    al.includes('precio') || al.includes('year') ||
+                    al.includes('año') || al.includes('make') ||
+                    al.includes('marca') || al.includes('model') ||
+                    al.includes('modelo')
+                  );
+                };
+                const inputs = [...document.querySelectorAll('input')].filter((el) => {
+                  const r = el.getBoundingClientRect();
+                  if (r.width < 50 || r.height < 10) return false;
+                  const type = (el.type || '').toLowerCase();
+                  if (type === 'file' || type === 'hidden' || type === 'checkbox') return false;
+                  if (skip(el.getAttribute('aria-label'))) return false;
+                  const val = (el.value || '').trim();
+                  return val.length === 0;
+                });
+                inputs.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+                for (const input of inputs) {
+                  input.focus();
+                  if (setter) setter.call(input, digits);
+                  else input.value = digits;
+                  input.dispatchEvent(new Event('input', { bubbles: true }));
+                  input.dispatchEvent(new Event('change', { bubbles: true }));
+                  return {
+                    ok: true,
+                    ariaLabel: input.getAttribute('aria-label') || '',
+                    id: input.id || '',
+                  };
+                }
+                return { ok: false };
+            }""",
+            digits,
+        )
+    except Exception:
+        return False
+    if result and result.get("ok"):
+        print(
+            f"  mileage via empty-input scan "
+            f"(id={result.get('id', '?')}, label={result.get('ariaLabel', '')!r})"
+        )
+        return True
+    return False
 
 
 def _fill_mileage_via_js(page: Page, digits: str) -> bool:
