@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import re
-import time
 from pathlib import Path
 
 from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError
 
 from src.facebook.errors import FacebookPostingError
 from src.facebook.photos import download_vehicle_photos
+from src.facebook.ui import (
+    PUBLISH_LABELS,
+    NEXT_LABELS,
+    click_labeled_action,
+    dismiss_overlays,
+    log_page_state,
+    wait_for_enabled_labeled_button,
+    wait_for_photo_previews,
+)
 from src.facebook.util import parse_mileage_km, parse_mxn_price, vehicle_description
 from src.models import Vehicle
-
-NEXT_PATTERN = re.compile(r"^\s*(next|siguiente)\s*$", re.I)
-PUBLISH_PATTERN = re.compile(r"publish|publicar|list item|publicar art[ií]culo", re.I)
 
 
 def create_vehicle_listing(
@@ -26,11 +31,13 @@ def create_vehicle_listing(
     create_url = fb_config.get("create_url", "https://www.facebook.com/marketplace/create/vehicle")
     page.goto(create_url, wait_until="domcontentloaded", timeout=90_000)
     page.wait_for_timeout(3_000)
-    _dismiss_overlays(page)
+    dismiss_overlays(page)
+    log_page_state(page, "create_opened")
+    _ensure_vehicle_create_flow(page)
 
     photo_paths = download_vehicle_photos(vehicle, max_photos=max_photos)
     try:
-        _upload_photos(page, photo_paths)
+        _upload_photos(page, photo_paths, log_dir, vehicle.autosell_id)
         _fill_vehicle_form(page, vehicle, fb_config)
         listing_url = _publish_and_capture_url(page)
         if not listing_url:
@@ -52,11 +59,49 @@ def create_vehicle_listing(
                 pass
 
 
-def _upload_photos(page: Page, photo_paths: list[Path]) -> None:
+def _ensure_vehicle_create_flow(page: Page) -> None:
+    """Handle category pickers if FB does not land directly on the vehicle form."""
+    for label in (
+        "Vehículo",
+        "Vehicle",
+        "Vehículos",
+        "Vehicles",
+        "Carro",
+        "Car",
+        "Camioneta",
+        "Truck",
+    ):
+        option = page.locator(f'[aria-label="{label}"]').first
+        try:
+            if option.count() and option.is_visible():
+                option.click(timeout=3_000)
+                page.wait_for_timeout(1_500)
+                log_page_state(page, f"selected_{label}")
+                return
+        except Exception:
+            continue
+
+    for pattern in (
+        re.compile(r"veh[ií]culo", re.I),
+        re.compile(r"vehicle", re.I),
+    ):
+        text = page.get_by_text(pattern)
+        try:
+            if text.count() and text.first.is_visible():
+                text.first.click(timeout=3_000)
+                page.wait_for_timeout(1_500)
+                log_page_state(page, "selected_vehicle_text")
+                return
+        except Exception:
+            continue
+
+
+def _upload_photos(page: Page, photo_paths: list[Path], log_dir: Path, autosell_id: str) -> None:
     file_input = page.locator('input[type="file"]').first
     if file_input.count() == 0:
         add_photos = _first_visible(
             page.get_by_role("button", name=re.compile(r"add photos|agregar fotos|a[nñ]adir fotos", re.I)),
+            page.locator('[aria-label*="fotos" i], [aria-label*="photos" i]'),
             page.get_by_text(re.compile(r"add photos|agregar fotos|a[nñ]adir fotos", re.I)),
         )
         if add_photos:
@@ -65,17 +110,25 @@ def _upload_photos(page: Page, photo_paths: list[Path]) -> None:
             file_chooser = fc_info.value
             file_chooser.set_files([str(p) for p in photo_paths])
         else:
+            _save_debug(page, log_dir, autosell_id, "no_file_input")
             raise FacebookPostingError("Photo upload control not found")
     else:
         file_input.set_input_files([str(p) for p in photo_paths])
 
-    print(f"Uploaded {len(photo_paths)} photo(s); waiting for Facebook to process...")
-    _click_action_button(page, NEXT_PATTERN, timeout_ms=180_000)
+    print(f"Uploaded {len(photo_paths)} photo(s); waiting for previews...")
+    wait_for_photo_previews(page, min_count=1, timeout_ms=120_000)
+    _save_debug(page, log_dir, autosell_id, "after_upload")
+    log_page_state(page, "photos_uploaded")
+
+    wait_for_enabled_labeled_button(page, NEXT_LABELS, timeout_ms=180_000)
+    click_labeled_action(page, NEXT_LABELS, timeout_ms=30_000)
+    log_page_state(page, "after_photo_next")
 
 
 def _fill_vehicle_form(page: Page, vehicle: Vehicle, fb_config: dict) -> None:
     page.wait_for_timeout(2_000)
-    _dismiss_overlays(page)
+    dismiss_overlays(page)
+    log_page_state(page, "vehicle_form")
 
     _fill_text(page, re.compile(r"title|t[ií]tulo", re.I), vehicle.marketplace_title)
     _fill_text(page, re.compile(r"price|precio", re.I), parse_mxn_price(vehicle.price))
@@ -93,12 +146,14 @@ def _fill_vehicle_form(page: Page, vehicle: Vehicle, fb_config: dict) -> None:
     description = vehicle_description(vehicle)
     _fill_text(page, re.compile(r"description|descripci[oó]n", re.I), description, multiline=True)
 
-    _click_action_button(page, NEXT_PATTERN, timeout_ms=30_000)
+    click_labeled_action(page, NEXT_LABELS, timeout_ms=60_000)
+    log_page_state(page, "after_form_next")
 
 
 def _publish_and_capture_url(page: Page) -> str | None:
-    _click_action_button(page, PUBLISH_PATTERN, timeout_ms=60_000)
+    click_labeled_action(page, PUBLISH_LABELS, timeout_ms=90_000)
     page.wait_for_timeout(5_000)
+    log_page_state(page, "after_publish")
 
     if "/marketplace/item/" in page.url:
         return page.url.split("?")[0]
@@ -125,46 +180,6 @@ def _publish_and_capture_url(page: Page) -> str | None:
     return None
 
 
-def _click_action_button(page: Page, name_pattern: re.Pattern[str], *, timeout_ms: int) -> None:
-    deadline = time.monotonic() + (timeout_ms / 1000)
-    last_error = "button not found"
-
-    while time.monotonic() < deadline:
-        for locator in _button_candidates(page, name_pattern):
-            try:
-                if locator.count() == 0:
-                    continue
-                for index in range(locator.count()):
-                    button = locator.nth(index)
-                    if not button.is_visible():
-                        continue
-                    if button.get_attribute("aria-disabled") == "true":
-                        continue
-                    if not button.is_enabled():
-                        continue
-                    button.scroll_into_view_if_needed()
-                    button.click(timeout=5_000)
-                    page.wait_for_timeout(1_500)
-                    return
-            except PlaywrightTimeoutError as exc:
-                last_error = str(exc)
-            except Exception as exc:
-                last_error = str(exc)
-        page.wait_for_timeout(2_000)
-
-    raise FacebookPostingError(
-        f"Timed out waiting for enabled button matching {name_pattern.pattern!r}: {last_error}"
-    )
-
-
-def _button_candidates(page: Page, name_pattern: re.Pattern[str]) -> list[Locator]:
-    return [
-        page.get_by_role("button", name=name_pattern),
-        page.locator('[role="button"]').filter(has_text=name_pattern),
-        page.get_by_text(name_pattern),
-    ]
-
-
 def _fill_text(page: Page, label_pattern: re.Pattern[str], value: str, *, multiline: bool = False) -> None:
     if not value:
         return
@@ -188,20 +203,6 @@ def _fill_text(page: Page, label_pattern: re.Pattern[str], value: str, *, multil
             return
         except PlaywrightTimeoutError:
             continue
-        except Exception:
-            continue
-
-
-def _dismiss_overlays(page: Page) -> None:
-    for pattern in (
-        re.compile(r"allow all cookies|permitir todas", re.I),
-        re.compile(r"^accept$|^aceptar$", re.I),
-    ):
-        button = page.get_by_role("button", name=pattern)
-        try:
-            if button.count() and button.first.is_visible():
-                button.first.click(timeout=3_000)
-                page.wait_for_timeout(1_000)
         except Exception:
             continue
 

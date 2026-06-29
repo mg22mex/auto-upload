@@ -69,6 +69,11 @@ def launch_persistent_context(
         headless=headless,
         viewport={"width": 1400, "height": 900},
         locale="es-MX",
+        user_agent=(
+            "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        ),
+        ignore_default_args=["--enable-automation"],
         args=["--disable-blink-features=AutomationControlled"],
     )
 
