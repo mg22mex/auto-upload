@@ -44,12 +44,14 @@ def create_vehicle_listing(
     capture.attach(page)
     try:
         _upload_photos(page, photo_paths, log_dir, vehicle.autosell_id)
-        filled = _fill_vehicle_form(page, vehicle, fb_config, log_dir, vehicle.autosell_id)
-        print(f"Form fields filled: {filled}")
-        if filled < 2:
+        filled_names = _fill_vehicle_form(page, vehicle, fb_config, log_dir, vehicle.autosell_id)
+        print(f"Form fields filled: {len(filled_names)} ({', '.join(sorted(filled_names))})")
+        required = {"year", "price", "make", "mileage"}
+        missing = required - filled_names
+        if missing:
             _save_debug(page, log_dir, vehicle.autosell_id, "form_incomplete")
             raise FacebookPostingError(
-                f"Only {filled} form fields filled — vehicle form selectors may need tuning"
+                f"Required vehicle fields missing: {', '.join(sorted(missing))}"
             )
         listing_url = _publish_and_capture_url(
             page, vehicle, log_dir, vehicle.autosell_id, capture=capture
@@ -149,38 +151,50 @@ def _fill_vehicle_form(
     fb_config: dict,
     log_dir: Path,
     autosell_id: str,
-) -> int:
+) -> set[str]:
     page.wait_for_timeout(2_000)
     dismiss_overlays(page)
     log_page_state(page, "vehicle_form")
     _save_debug(page, log_dir, autosell_id, "vehicle_form")
 
-    filled = 0
+    filled_names: set[str] = set()
     city = fb_config.get("location_city", "Chihuahua")
 
-    fields: list[tuple[str, str, tuple[str, ...]]] = [
-        ("title", vehicle.marketplace_title, ("Title", "Título")),
-        ("price", parse_mxn_price(vehicle.price), ("Price", "Precio")),
-        ("location", city, ("Location", "Ubicación", "Ciudad")),
-        ("year", vehicle.year, ("Year", "Año")),
-        ("make", vehicle.brand, ("Make", "Marca")),
-        ("model", vehicle.title, ("Model", "Modelo")),
-        ("mileage", parse_mileage_km(vehicle.mileage), ("Mileage", "Kilometraje", "Odometro", "Odómetro")),
-        ("description", vehicle_description(vehicle), ("Description", "Descripción")),
+    fields: list[tuple[str, str, tuple[str, ...], str]] = [
+        ("location", city, ("Location", "Ubicación", "Ciudad"), "text"),
+        ("year", vehicle.year, ("Year", "Año", "Model year", "Año del modelo"), "combobox"),
+        ("make", vehicle.brand, ("Make", "Marca"), "combobox"),
+        ("model", vehicle.title, ("Model", "Modelo"), "combobox"),
+        ("mileage", parse_mileage_km(vehicle.mileage), (
+            "Mileage", "Kilometraje", "Odometer", "Odometro", "Odómetro",
+            "Kilometers", "Kilómetros", "Kilometros",
+        ), "numeric"),
+        ("price", parse_mxn_price(vehicle.price), ("Price", "Precio"), "text"),
+        ("description", vehicle_description(vehicle), ("Description", "Descripción"), "multiline"),
     ]
 
-    for name, value, labels in fields:
+    for name, value, labels, mode in fields:
         if not value:
+            print(f"  SKIP {name} (empty)")
             continue
-        if _fill_vehicle_field(page, labels, value, multiline=name == "description"):
-            filled += 1
+        ok = False
+        if mode == "combobox":
+            ok = _fill_combobox(page, labels, value)
+        elif mode == "numeric":
+            ok = _fill_numeric_field(page, labels, value)
+        elif mode == "multiline":
+            ok = _fill_vehicle_field(page, labels, value, multiline=True)
+        else:
+            ok = _fill_vehicle_field(page, labels, value)
+        if ok:
+            filled_names.add(name)
             print(f"  filled {name}")
         else:
             print(f"  MISSING {name}")
 
     click_labeled_action(page, NEXT_LABELS, timeout_ms=60_000)
     log_page_state(page, "after_form_next")
-    return filled
+    return filled_names
 
 
 def _publish_and_capture_url(
@@ -489,6 +503,67 @@ def _normalize_fb_url(href: str) -> str | None:
     if href.startswith("/"):
         return f"https://www.facebook.com{href.split('?')[0]}"
     return href.split("?")[0]
+
+
+def _fill_combobox(page: Page, labels: tuple[str, ...], value: str) -> bool:
+    for label in labels:
+        for locator in (
+            page.get_by_role("combobox", name=label),
+            page.get_by_role("combobox", name=re.compile(re.escape(label), re.I)),
+            page.locator(f'[role="combobox"][aria-label="{label}"]'),
+            page.locator(f'[role="combobox"][aria-label*="{label}" i]'),
+            page.locator(f'[aria-haspopup="listbox"][aria-label*="{label}" i]'),
+        ):
+            try:
+                if locator.count() == 0:
+                    continue
+                box = locator.first
+                if not box.is_visible():
+                    continue
+                box.click()
+                page.wait_for_timeout(600)
+                page.keyboard.press("Control+a")
+                page.keyboard.type(value, delay=40)
+                page.wait_for_timeout(1_200)
+                option = page.get_by_role("option", name=re.compile(rf"^{re.escape(value)}$", re.I))
+                if option.count() and option.first.is_visible():
+                    option.first.click()
+                else:
+                    loose = page.locator(f'[role="option"]:has-text("{value}")')
+                    if loose.count() and loose.first.is_visible():
+                        loose.first.click()
+                    else:
+                        page.keyboard.press("Enter")
+                page.wait_for_timeout(600)
+                return True
+            except Exception:
+                continue
+    return _fill_vehicle_field(page, labels, value)
+
+
+def _fill_numeric_field(page: Page, labels: tuple[str, ...], value: str) -> bool:
+    digits = re.sub(r"[^\d]", "", value)
+    if not digits:
+        return False
+    for label in labels:
+        for locator in (
+            page.get_by_role("spinbutton", name=label),
+            page.locator(f'input[inputmode="numeric"][aria-label*="{label}" i]'),
+            page.locator(f'input[type="text"][aria-label*="{label}" i]'),
+            page.locator(f'[role="spinbutton"][aria-label*="{label}" i]'),
+        ):
+            try:
+                if locator.count() == 0:
+                    continue
+                target = locator.first
+                if not target.is_visible():
+                    continue
+                target.click()
+                target.fill(digits)
+                return True
+            except Exception:
+                continue
+    return _fill_vehicle_field(page, labels, digits)
 
 
 def _fill_vehicle_field(
