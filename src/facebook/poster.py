@@ -10,10 +10,10 @@ from src.facebook.photos import download_vehicle_photos
 from src.facebook.ui import (
     PUBLISH_LABELS,
     NEXT_LABELS,
+    advance_past_photo_step,
     click_labeled_action,
     dismiss_overlays,
     log_page_state,
-    wait_for_enabled_labeled_button,
     wait_for_photo_previews,
 )
 from src.facebook.util import parse_mileage_km, parse_mxn_price, vehicle_description
@@ -120,8 +120,7 @@ def _upload_photos(page: Page, photo_paths: list[Path], log_dir: Path, autosell_
     _save_debug(page, log_dir, autosell_id, "after_upload")
     log_page_state(page, "photos_uploaded")
 
-    wait_for_enabled_labeled_button(page, NEXT_LABELS, timeout_ms=180_000)
-    click_labeled_action(page, NEXT_LABELS, timeout_ms=30_000)
+    advance_past_photo_step(page, timeout_ms=90_000)
     log_page_state(page, "after_photo_next")
 
 
@@ -151,7 +150,10 @@ def _fill_vehicle_form(page: Page, vehicle: Vehicle, fb_config: dict) -> None:
 
 
 def _publish_and_capture_url(page: Page) -> str | None:
-    click_labeled_action(page, PUBLISH_LABELS, timeout_ms=90_000)
+    try:
+        click_labeled_action(page, PUBLISH_LABELS, timeout_ms=30_000)
+    except FacebookPostingError:
+        click_labeled_action(page, PUBLISH_LABELS, timeout_ms=30_000, allow_force=True)
     page.wait_for_timeout(5_000)
     log_page_state(page, "after_publish")
 

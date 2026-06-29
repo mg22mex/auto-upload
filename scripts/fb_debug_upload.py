@@ -88,8 +88,11 @@ def main() -> int:
             print(f"Saved {shot}")
             labels = page.evaluate(
                 """() => [...document.querySelectorAll('[aria-label]')]
-                  .map(n => n.getAttribute('aria-label'))
-                  .filter(Boolean)"""
+                  .map(n => ({
+                    label: n.getAttribute('aria-label'),
+                    disabled: n.getAttribute('aria-disabled'),
+                  }))
+                  .filter(x => x.label)"""
             )
             print(f"aria-labels @ {elapsed}s:", labels[:30])
 
