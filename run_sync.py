@@ -18,7 +18,6 @@ from src.inventory.snapshot import load_catalog_snapshot, save_catalog_snapshot
 from src.sync.engine import plan_sync_actions, split_executable_actions
 from src.store.db import SyncStore
 
-
 def load_config(config_path: Path) -> dict:
     with config_path.open(encoding="utf-8") as handle:
         return yaml.safe_load(handle)
@@ -137,26 +136,46 @@ def run_sync_from_catalog(
         updates = len([a for a in executable if a.action == "update"])
         removals = len([a for a in executable if a.action == "remove"])
 
-        mode = "DRY RUN" if dry_run else "LIVE"
-        notes = (
-            f"{mode}. Facebook automation not implemented yet — diff only on fb-worker. "
-            f"Deferred creates: {len(deferred)}."
-        )
-        store.finish_sync_run(
-            run_id,
-            vehicles_found=len(vehicles),
-            creates=creates,
-            updates=updates,
-            removals=removals,
-            notes=notes,
-        )
+        executed_creates = 0
+        executed_updates = 0
+        executed_removals = 0
+        fb_errors = 0
+        notes = ""
 
         if dry_run:
             print("Dry run complete. No Facebook actions executed.")
+            notes = f"DRY RUN. Deferred creates: {len(deferred)}."
         else:
-            print("Live mode requested, but Facebook executor is not wired up yet.")
+            from src.facebook.executor import execute_actions
 
-        return 0
+            print("Executing Facebook actions...")
+            fb_result = execute_actions(executable, store, config, root=ROOT)
+            executed_creates = fb_result.creates
+            executed_updates = fb_result.updates
+            executed_removals = fb_result.removals
+            fb_errors = len(fb_result.errors)
+            if fb_result.errors:
+                for err in fb_result.errors:
+                    print(f"  FB error: {err}", file=sys.stderr)
+            print(
+                f"Facebook done: {executed_creates} created, "
+                f"{executed_updates} updated, {executed_removals} removed."
+            )
+            notes = (
+                f"LIVE. Executed creates={executed_creates}, updates={executed_updates}, "
+                f"removals={executed_removals}, errors={fb_errors}, deferred={len(deferred)}."
+            )
+
+        store.finish_sync_run(
+            run_id,
+            vehicles_found=len(vehicles),
+            creates=executed_creates if not dry_run else creates,
+            updates=executed_updates if not dry_run else updates,
+            removals=executed_removals if not dry_run else removals,
+            notes=notes,
+        )
+
+        return 1 if (not dry_run and fb_errors) else 0
 
     except Exception as exc:
         store.finish_sync_run(run_id, vehicles_found=0, creates=0, updates=0, removals=0, notes=str(exc))

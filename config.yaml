@@ -14,6 +14,10 @@ facebook:
   location_city: Chihuahua
   location_state: Chihuahua
   country: MX
+  max_photos_per_listing: 20
+  headless: true
+  create_url: https://www.facebook.com/marketplace/create/vehicle
+  selling_url: https://www.facebook.com/marketplace/you/selling
 
 accounts:
   - id: account_1

@@ -1,13 +1,14 @@
 # Setup: GitHub + fb-worker (Oracle VPS or Mac Mini)
 
-Two-job pipeline:
+# Split architecture (updated)
 
-| Job | Runs on | Does |
-|-----|---------|------|
-| **scrape** | GitHub cloud (`ubuntu-latest`) | Fetches autosell.mx → `catalog_latest.json` artifact |
-| **facebook-sync** | **fb-worker** (your machine) | Diff vs `sync.db` → (Phase 2) Playwright → Facebook ×3 |
+**Important:** autosell.mx does **not** respond to GitHub cloud runner IPs (connect timeout). Scrape and Facebook both run on **fb-worker** — not `ubuntu-latest`.
 
-Your daily PC can stay off. Only the **fb-worker** must be always on.
+| Step | Host | Does |
+|------|------|------|
+| **sync** job | **fb-worker** | Scrape → diff → (Phase 2) Facebook |
+
+Your daily PC can stay off. Only **fb-worker** must be always on and registered before workflows can run.
 
 Phase 0–1 (current): scrape + diff planning. Facebook automation is Phase 2.
 
@@ -17,12 +18,12 @@ Phase 0–1 (current): scrape + diff planning. Facebook automation is Phase 2.
 
 | Path | Location | In git? |
 |------|----------|---------|
-| `data/catalog_latest.json` | GitHub artifact between jobs | No |
+| `data/catalog_latest.json` | Written on fb-worker each run; optional GitHub artifact | No |
 | `data/sync.db` | **`~/auto-upload-data/data/` on fb-worker** | No |
 | `sessions/account_*` | **`~/auto-upload-data/sessions/` on fb-worker** | No |
 | `data/snapshots/` | Archived on fb-worker after each run | No |
 
-The scrape job is stateless. All Facebook state stays on one machine.
+The scrape step must run on fb-worker because autosell.mx blocks GitHub-hosted datacenter IPs.
 
 The workflow symlinks `data/` and `sessions/` to `~/auto-upload-data/` so `sync.db` survives each checkout.
 
@@ -47,12 +48,10 @@ The workflow symlinks `data/` and `sessions/` to `~/auto-upload-data/` so `sync.
 ```
 GitHub schedule (8am / 12pm Chihuahua)
         │
-        ├─ Job 1: scrape ──► ubuntu-latest ──► catalog artifact
-        │
-        └─ Job 2: facebook-sync ──► fb-worker ──► ~/auto-upload-data/ + Playwright
+        └─ sync job ──► fb-worker ──► scrape autosell.mx → diff → Playwright (Phase 2)
 ```
 
-If fb-worker is offline: scrape still succeeds; facebook-sync waits or fails (GitHub emails you).
+If fb-worker is offline: workflow queues or fails (GitHub emails you).
 
 ---
 
@@ -158,8 +157,9 @@ To switch later: stop/remove the old runner, register the new one with the same 
 
 Expected:
 
-- **scrape** job: green, uploads artifact (~140 vehicles, ~2 min)
-- **facebook-sync** job: green on fb-worker, prints create/update/remove plan
+- **sync** job: green on fb-worker — scrapes ~140 vehicles, prints create/update/remove plan
+
+Until fb-worker is registered, the workflow will stay **queued** — this is expected.
 
 Schedule: ~08:00 and ~12:00 America/Chihuahua (`0 14` and `0 18` UTC; adjust for DST).
 
@@ -167,18 +167,35 @@ Schedule: ~08:00 and ~12:00 America/Chihuahua (`0 14` and `0 18` UTC; adjust for
 
 ## Part E — Phase 2 Facebook (on fb-worker only)
 
-On the fb-worker machine:
+On the fb-worker machine (Ubuntu 24.04 — use a venv, not system `pip`):
 
 ```bash
-pip install playwright
+cd ~/actions-runner/_work/auto-upload/auto-upload   # or your clone path
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 playwright install chromium
-# Linux only:
-playwright install-deps chromium
+# sudo does not see venv binaries — use the full path:
+sudo .venv/bin/playwright install-deps chromium
 ```
 
-Log in once per Facebook account; save sessions under `~/auto-upload-data/sessions/account_1`, etc.
+Log in once per Facebook account (headed browser; SSH with X11 forwarding or run from a machine that can open a display):
 
-Set `DRY_RUN=false` in GitHub Secrets when ready.
+```bash
+source .venv/bin/activate
+python scripts/fb_login.py --account account_1
+python scripts/fb_test_session.py --account account_1
+```
+
+Sessions persist under `~/auto-upload-data/sessions/account_1` (symlinked as `sessions/` in CI).
+
+Test one listing before enabling live sync:
+
+```bash
+python scripts/fb_post_test.py --account account_1 --autosell-id obj969
+```
+
+Set `DRY_RUN=false` in GitHub Secrets only after a manual post succeeds.
 
 ---
 
@@ -206,8 +223,9 @@ python run_sync.py --from-snapshot data/catalog_latest.json --dry-run
 
 | Problem | Fix |
 |---------|-----|
-| scrape green, facebook-sync queued forever | fb-worker offline — start runner service |
-| Wrong runner picks job | Only machines with label `fb-worker` should register that label |
+| Workflow queued forever | Register fb-worker — autosell.mx cannot be scraped from GitHub cloud |
+| Connect timeout to autosell.mx on ubuntu-latest | Expected — use fb-worker only (see workflow) |
+| fb-worker offline | Start runner service on Oracle/Mac Mini |
 | `sync.db` resets each run | Check symlinks to `~/auto-upload-data/data` in workflow |
 | Oracle out of capacity | Retry AD/region; fallback Hetzner ~€4/mo |
 | Facebook checkpoint | Re-login on fb-worker via Screen Sharing (Mac) or SSH (Linux) |
@@ -218,8 +236,8 @@ python run_sync.py --from-snapshot data/catalog_latest.json --dry-run
 
 | Component | Cost |
 |-----------|------|
-| GitHub scrape job (cloud) | free |
-| Oracle fb-worker | $0 |
+| GitHub Actions (orchestration) | free |
+| Oracle fb-worker (scrape + FB) | $0 |
 | Mac Mini fb-worker | ~$1–3/mo power |
 | Paid VPS fallback | ~$5/mo |
 | Hugging Face / Streamlit | not suitable |

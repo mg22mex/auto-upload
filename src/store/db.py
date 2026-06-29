@@ -132,6 +132,54 @@ class SyncStore:
         )
         return cursor.fetchall()
 
+    def get_fb_listing(self, autosell_id: str, account_id: str) -> sqlite3.Row | None:
+        cursor = self._conn.execute(
+            """
+            SELECT autosell_id, account_id, fb_listing_url, status, content_hash
+            FROM fb_listings
+            WHERE autosell_id = ? AND account_id = ?
+            """,
+            (autosell_id, account_id),
+        )
+        return cursor.fetchone()
+
+    def upsert_fb_listing(
+        self,
+        autosell_id: str,
+        account_id: str,
+        *,
+        fb_listing_url: str | None,
+        content_hash: str,
+        status: str = "live",
+    ) -> None:
+        now = utc_now()
+        self._conn.execute(
+            """
+            INSERT INTO fb_listings (
+                autosell_id, account_id, fb_listing_url, status, content_hash,
+                posted_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(autosell_id, account_id) DO UPDATE SET
+                fb_listing_url = COALESCE(excluded.fb_listing_url, fb_listings.fb_listing_url),
+                status = excluded.status,
+                content_hash = excluded.content_hash,
+                updated_at = excluded.updated_at
+            """,
+            (autosell_id, account_id, fb_listing_url, status, content_hash, now, now),
+        )
+        self._conn.commit()
+
+    def mark_fb_listing_removed(self, autosell_id: str, account_id: str) -> None:
+        self._conn.execute(
+            """
+            UPDATE fb_listings
+            SET status = 'removed', updated_at = ?
+            WHERE autosell_id = ? AND account_id = ?
+            """,
+            (utc_now(), autosell_id, account_id),
+        )
+        self._conn.commit()
+
     def start_sync_run(self, dry_run: bool) -> int:
         cursor = self._conn.execute(
             """

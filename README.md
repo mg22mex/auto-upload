@@ -2,14 +2,15 @@
 
 Sync [autosell.mx](https://www.autosell.mx) public catalog to Facebook Marketplace (Chihuahua, MX) across three personal accounts.
 
-**Current status:** Phase 0–1 — split CI pipeline (scrape on GitHub cloud, diff on fb-worker). Facebook automation is Phase 2.
+**Current status:** Phase 0–1 — scrape + diff on fb-worker (autosell.mx blocks GitHub cloud IPs). Facebook automation is Phase 2.
 
 ## Pipeline
 
-| Job | Host | Command |
-|-----|------|---------|
-| **scrape** | GitHub `ubuntu-latest` | `python run_sync.py --scrape-only` |
-| **facebook-sync** | Self-hosted `fb-worker` | `python run_sync.py --from-snapshot data/catalog_latest.json` |
+| Job | Host | Action |
+|-----|------|--------|
+| **sync** | Self-hosted `fb-worker` | Scrape autosell.mx → diff → (Phase 2) Facebook |
+
+> GitHub cloud runners cannot reach autosell.mx (connect timeout). You must register fb-worker before workflows succeed.
 
 ## Quick start (local)
 
