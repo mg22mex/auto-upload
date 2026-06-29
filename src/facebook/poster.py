@@ -39,9 +39,12 @@ def create_vehicle_listing(
     try:
         _upload_photos(page, photo_paths, log_dir, vehicle.autosell_id)
         _fill_vehicle_form(page, vehicle, fb_config)
-        listing_url = _publish_and_capture_url(page)
+        listing_url = _publish_and_capture_url(page, vehicle, log_dir, vehicle.autosell_id)
         if not listing_url:
-            raise FacebookPostingError("Published but could not capture listing URL")
+            raise FacebookPostingError(
+                "Publish flow finished but listing URL was not found. "
+                "Check Marketplace → Your listings for the new post."
+            )
         return listing_url
     except Exception as exc:
         _save_debug(page, log_dir, vehicle.autosell_id, "create_failed")
@@ -149,37 +152,119 @@ def _fill_vehicle_form(page: Page, vehicle: Vehicle, fb_config: dict) -> None:
     log_page_state(page, "after_form_next")
 
 
-def _publish_and_capture_url(page: Page) -> str | None:
+def _publish_and_capture_url(
+    page: Page,
+    vehicle: Vehicle,
+    log_dir: Path,
+    autosell_id: str,
+) -> str | None:
     try:
         click_labeled_action(page, PUBLISH_LABELS, timeout_ms=30_000)
     except FacebookPostingError:
         click_labeled_action(page, PUBLISH_LABELS, timeout_ms=30_000, allow_force=True)
-    page.wait_for_timeout(5_000)
-    log_page_state(page, "after_publish")
 
+    try:
+        page.wait_for_url(re.compile(r"facebook\.com/marketplace"), timeout=30_000)
+    except PlaywrightTimeoutError:
+        pass
+    page.wait_for_timeout(8_000)
+    log_page_state(page, "after_publish")
+    _save_debug(page, log_dir, autosell_id, "after_publish")
+
+    listing_url = _extract_item_url_from_page(page)
+    if listing_url:
+        return listing_url
+
+    for listing_page in (
+        "https://www.facebook.com/marketplace/you/dashboard",
+        "https://www.facebook.com/marketplace/you/selling",
+    ):
+        page.goto(listing_page, wait_until="domcontentloaded", timeout=60_000)
+        page.wait_for_timeout(4_000)
+        listing_url = _find_listing_url_by_vehicle(page, vehicle)
+        if listing_url:
+            print(f"Found listing on {listing_page}: {listing_url}")
+            return listing_url
+
+    return None
+
+
+def _extract_item_url_from_page(page: Page) -> str | None:
     if "/marketplace/item/" in page.url:
         return page.url.split("?")[0]
 
-    link = page.locator('a[href*="/marketplace/item/"]').first
-    try:
-        if link.count():
+    for link in page.locator('a[href*="/marketplace/item/"]').all()[:20]:
+        try:
             href = link.get_attribute("href") or ""
-            if href.startswith("/"):
-                return f"https://www.facebook.com{href.split('?')[0]}"
-            return href.split("?")[0]
-    except PlaywrightTimeoutError:
+            normalized = _normalize_fb_url(href)
+            if normalized:
+                return normalized
+        except Exception:
+            continue
+    return None
+
+
+def _find_listing_url_by_vehicle(page: Page, vehicle: Vehicle) -> str | None:
+    price_digits = parse_mxn_price(vehicle.price)
+    needles = [
+        vehicle.marketplace_title,
+        f"{vehicle.year} {vehicle.brand}",
+        vehicle.brand,
+        vehicle.title,
+        vehicle.price,
+        price_digits,
+    ]
+    needles = [n.strip() for n in needles if n and n.strip()]
+
+    item_links = page.locator('a[href*="/marketplace/item/"]')
+    try:
+        count = min(item_links.count(), 80)
+    except Exception:
+        return None
+
+    for index in range(count):
+        link = item_links.nth(index)
+        try:
+            href = link.get_attribute("href") or ""
+            normalized = _normalize_fb_url(href)
+            if not normalized:
+                continue
+            texts = [
+                link.inner_text(timeout=1_000) or "",
+                link.get_attribute("aria-label") or "",
+            ]
+            try:
+                texts.append(
+                    link.locator("xpath=ancestor::div[position()<=3]").first.inner_text(timeout=1_000)
+                )
+            except Exception:
+                pass
+            haystack = " ".join(texts).lower()
+            if any(needle.lower() in haystack for needle in needles):
+                return normalized
+        except Exception:
+            continue
+
+    title_link = page.get_by_role("link", name=re.compile(re.escape(vehicle.brand), re.I))
+    try:
+        if title_link.count():
+            for index in range(min(title_link.count(), 10)):
+                link = title_link.nth(index)
+                href = link.get_attribute("href") or ""
+                if "/marketplace/item/" in href:
+                    return _normalize_fb_url(href)
+    except Exception:
         pass
 
-    selling_url = "https://www.facebook.com/marketplace/you/selling"
-    page.goto(selling_url, wait_until="domcontentloaded", timeout=60_000)
-    page.wait_for_timeout(3_000)
-    first_item = page.locator('a[href*="/marketplace/item/"]').first
-    if first_item.count():
-        href = first_item.get_attribute("href") or ""
-        if href.startswith("/"):
-            return f"https://www.facebook.com{href.split('?')[0]}"
-        return href.split("?")[0]
     return None
+
+
+def _normalize_fb_url(href: str) -> str | None:
+    if not href or "/marketplace/item/" not in href:
+        return None
+    if href.startswith("/"):
+        return f"https://www.facebook.com{href.split('?')[0]}"
+    return href.split("?")[0]
 
 
 def _fill_text(page: Page, label_pattern: re.Pattern[str], value: str, *, multiline: bool = False) -> None:
