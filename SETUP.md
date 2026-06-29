@@ -12,6 +12,8 @@ Your daily PC can stay off. Only **fb-worker** must be always on and registered 
 
 Phase 0–1: scrape + diff planning. **Phase 2 (Facebook):** Playwright posting is implemented and verified manually on `account_1` (test vehicle `obj969` — 2020 Audi A3). Scheduled sync still uses `DRY_RUN=true` until you enable live posting for all accounts.
 
+**Extended docs:** [docs/PROJECT_GUIDE.md](./docs/PROJECT_GUIDE.md) — architecture diagrams, user stories, QA checklists, statistics, rollout timeline.
+
 ---
 
 ## Where data lives
@@ -45,13 +47,30 @@ The workflow symlinks `data/` and `sessions/` to `~/auto-upload-data/` so `sync.
 
 ## Architecture
 
+```mermaid
+flowchart TB
+    CRON["GitHub cron<br/>08:00 & 12:00 Chihuahua"]
+    WF["sync.yml"]
+    WORKER["fb-worker<br/>(Oracle / Mac Mini)"]
+    AS["autosell.mx"]
+    FB["Facebook Marketplace"]
+    DATA["~/auto-upload-data/<br/>sync.db + sessions"]
+
+    CRON --> WF --> WORKER
+    WORKER --> AS
+    WORKER --> FB
+    WORKER --> DATA
 ```
-GitHub schedule (8am / 12pm Chihuahua)
-        │
-        └─ sync job ──► fb-worker ──► scrape autosell.mx → diff → Playwright (Phase 2)
+
+ASCII (minimal):
+
+```
+GitHub schedule → sync job → fb-worker → scrape autosell.mx → diff → Playwright (Phase 2)
 ```
 
 If fb-worker is offline: workflow queues or fails (GitHub emails you).
+
+See also: [CI/CD flowchart](./docs/PROJECT_GUIDE.md#end-to-end-sync-flow) · [FB posting flowchart](./docs/PROJECT_GUIDE.md#facebook-create-listing-flow-playwright)
 
 ---
 
@@ -255,7 +274,24 @@ The poster fills FB’s vehicle composer in this order. Values come from the aut
 
 Make/model/year must verify on the form before **Next** is enabled. The script only reports success after the listing URL matches **brand + price or model** on the item page (not year alone — avoids false matches from “Joined Facebook in 2020”).
 
+```mermaid
+flowchart LR
+    AS["autosell.mx<br/>Marca, modelo, km, precio"]
+    CAT["categorize.py<br/>+ defaults"]
+    FB["FB composer<br/>Make, Model, Mileage, …"]
+    AS --> CAT --> FB
+```
+
 ### E4. Enable live sync
+
+```mermaid
+flowchart TD
+    A[Manual post OK account_1] --> B[Sessions account_2 & account_3]
+    B --> C[QA checklist in PROJECT_GUIDE]
+    C --> D[Set DRY_RUN=false secret]
+    D --> E[Monitor 2 scheduled runs]
+    E --> F[~420 listings over ~7 days]
+```
 
 1. Verify manual post on each account.
 2. Set GitHub secret `DRY_RUN=false`.
@@ -314,3 +350,17 @@ python run_sync.py --from-snapshot data/catalog_latest.json --dry-run
 | Mac Mini fb-worker | ~$1–3/mo power |
 | Paid VPS fallback | ~$5/mo |
 | Hugging Face / Streamlit | not suitable |
+
+---
+
+## Quality assurance (summary)
+
+Full checklist: **[docs/PROJECT_GUIDE.md § Quality assurance](./docs/PROJECT_GUIDE.md#quality-assurance)**
+
+| Gate | Requirement |
+|------|-------------|
+| Pre-live | QA-01 … QA-08 passed (scrape, dry-run, session, post, CI) |
+| Per account | `fb_post_test.py` success + dashboard listing visible |
+| Go-live | `DRY_RUN=false` only after all 3 accounts tested |
+
+---
