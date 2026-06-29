@@ -281,18 +281,30 @@ def advance_composer_next(page: Page, *, timeout_ms: int = 90_000) -> None:
                     return
                 except Exception as exc:
                     last_state = str(exc)
-                    try:
-                        button.click(timeout=5_000, force=True)
-                        page.wait_for_timeout(2_000)
-                        return
-                    except Exception:
-                        pass
-        if _js_click_next(page):
-            page.wait_for_timeout(2_000)
-            return
         page.wait_for_timeout(2_000)
 
     raise FacebookPostingError(f"Could not click composer Next: {last_state}")
+
+
+def wait_for_composer_next_enabled(page: Page, *, timeout_ms: int = 60_000) -> None:
+    """Wait until composer Next/Siguiente is enabled (not aria-disabled)."""
+    try:
+        page.wait_for_function(
+            """() => {
+                const labels = ['Next', 'Siguiente'];
+                for (const label of labels) {
+                  for (const node of document.querySelectorAll(`[aria-label="${label}"]`)) {
+                    if (node.getAttribute('aria-disabled') === 'true') continue;
+                    const r = node.getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0) return true;
+                  }
+                }
+                return false;
+            }""",
+            timeout=timeout_ms,
+        )
+    except Exception as exc:
+        raise FacebookPostingError(f"Composer Next stayed disabled: {exc}") from exc
 
 
 def _labeled_button_locators(page: Page, label: str) -> list[Locator]:

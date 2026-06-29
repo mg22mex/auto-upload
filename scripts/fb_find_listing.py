@@ -12,7 +12,10 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.facebook.poster import _capture_listing_url, _find_item_url_near_text
+from src.facebook.poster import (
+    _find_top_matching_listing,
+    _verify_listing_url,
+)
 from src.facebook.session import get_page, is_logged_in, open_account_context
 from src.inventory.snapshot import load_catalog_snapshot
 
@@ -51,12 +54,8 @@ def main() -> int:
         ):
             page.goto(listing_page, wait_until="domcontentloaded", timeout=60_000)
             page.wait_for_timeout(4_000)
-            url = _capture_listing_url(page, vehicle, scroll=True)
-            if url:
-                print(url)
-                return 0
-            url = _find_item_url_near_text(page, vehicle.brand)
-            if url:
+            url = _find_top_matching_listing(page, vehicle)
+            if url and _verify_listing_url(page, url, vehicle):
                 print(url)
                 return 0
 

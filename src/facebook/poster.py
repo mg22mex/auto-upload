@@ -17,8 +17,10 @@ from src.facebook.ui import (
     disable_promote_listing,
     dismiss_overlays,
     log_page_state,
+    wait_for_composer_next_enabled,
     wait_for_photo_previews,
 )
+from src.facebook.categorize import ListingAttributes, categorize_vehicle, fb_model_name
 from src.facebook.util import (
     mileage_for_listing,
     parse_mxn_price,
@@ -52,7 +54,7 @@ def create_vehicle_listing(
         _upload_photos(page, photo_paths, log_dir, vehicle.autosell_id)
         filled_names = _fill_vehicle_form(page, vehicle, fb_config, log_dir, vehicle.autosell_id)
         print(f"Form fields filled: {len(filled_names)} ({', '.join(sorted(filled_names))})")
-        required = {"year", "price", "make"}
+        required = {"year", "price", "make", "model"}
         missing = required - filled_names
         if missing:
             _save_debug(page, log_dir, vehicle.autosell_id, "form_incomplete")
@@ -69,6 +71,12 @@ def create_vehicle_listing(
             raise FacebookPostingError(
                 "Publish flow finished but listing URL was not found. "
                 "Check Marketplace → Your listings; run scripts/fb_find_listing.py if needed."
+            )
+        if not _verify_listing_url(page, listing_url, vehicle):
+            _save_debug(page, log_dir, vehicle.autosell_id, "verify_failed")
+            raise FacebookPostingError(
+                f"Listing URL did not verify as live: {listing_url}. "
+                "Publish likely did not complete — check obj969_after_publish.png."
             )
         return listing_url
     except Exception as exc:
@@ -168,33 +176,37 @@ def _fill_vehicle_form(
 
     filled_names: set[str] = set()
     city = fb_config.get("location_city", "Chihuahua")
+    attrs = categorize_vehicle(vehicle)
+    print(f"  categorized: {attrs.summary()}")
 
-    fields: list[tuple[str, str, tuple[str, ...], str]] = [
+    # Match FB composer order from manual flow:
+    # vehicle type -> location/year/make/model/mileage/price ->
+    # appearance -> vehicle details -> description
+    _fill_vehicle_type(page, attrs)
+
+    core_fields: list[tuple[str, str, tuple[str, ...], str]] = [
         ("location", city, ("Location", "Ubicación", "Ciudad"), "text"),
-        ("year", vehicle.year, ("Year", "Año", "Model year", "Año del modelo"), "combobox"),
-        ("make", vehicle.brand, ("Make", "Marca"), "combobox"),
-        ("model", vehicle.title, ("Model", "Modelo"), "combobox"),
-        ("mileage", mileage_for_listing(vehicle.mileage), (
+        ("year", vehicle.year, ("Year", "Año", "Model year", "Año del modelo"), "listbox"),
+        ("make", attrs.make, ("Make", "Marca"), "make"),
+        ("model", attrs.model, ("Model", "Modelo"), "text"),
+        ("mileage", attrs.mileage_km, (
             "Mileage", "Kilometraje", "Odometer", "Odometro", "Odómetro",
             "Kilometers", "Kilómetros", "Kilometros", "Vehicle mileage",
         ), "mileage"),
         ("price", parse_mxn_price(vehicle.price), ("Price", "Precio"), "text"),
-        ("description", vehicle_description(vehicle), ("Description", "Descripción"), "multiline"),
     ]
 
-    for name, value, labels, mode in fields:
+    for name, value, labels, mode in core_fields:
         if not value:
             print(f"  SKIP {name} (empty)")
             continue
         ok = False
-        if mode == "combobox":
-            ok = _fill_combobox(page, labels, value)
-        elif mode == "numeric":
-            ok = _fill_numeric_field(page, labels, value)
+        if mode == "make":
+            ok = _fill_make_combobox(page, value)
+        elif mode == "listbox":
+            ok = _select_from_combobox_list(page, labels, (value,))
         elif mode == "mileage":
             ok = _fill_mileage(page, value)
-        elif mode == "multiline":
-            ok = _fill_vehicle_field(page, labels, value, multiline=True)
         else:
             ok = _fill_vehicle_field(page, labels, value)
         if ok:
@@ -202,6 +214,38 @@ def _fill_vehicle_form(
             print(f"  filled {name}")
         else:
             print(f"  MISSING {name}")
+
+    _ensure_required_comboboxes(page, vehicle, attrs)
+
+    _scroll_composer_sidebar(page)
+    _fill_appearance_fields(page, attrs)
+    _scroll_composer_sidebar(page)
+    _fill_vehicle_detail_fields(page, attrs)
+
+    description = vehicle_description(vehicle)
+    if _fill_vehicle_field(page, ("Description", "Descripción"), description, multiline=True):
+        filled_names.add("description")
+        print("  filled description")
+    else:
+        print("  MISSING description")
+
+    _scroll_composer_sidebar(page)
+
+    try:
+        wait_for_composer_next_enabled(page, timeout_ms=45_000)
+    except FacebookPostingError:
+        _scroll_composer_sidebar(page)
+        _fill_appearance_fields(page, attrs)
+        _fill_vehicle_detail_fields(page, attrs)
+        page.locator("body").click(position={"x": 400, "y": 400})
+        page.wait_for_timeout(2_000)
+        try:
+            wait_for_composer_next_enabled(page, timeout_ms=20_000)
+        except FacebookPostingError:
+            _save_debug(page, log_dir, autosell_id, "next_disabled_pre_review")
+            _log_composer_comboboxes(page)
+            print("  WARN Next disabled; force-clicking to advance")
+            click_labeled_action(page, NEXT_LABELS, timeout_ms=15_000, allow_force=True)
 
     click_labeled_action(page, NEXT_LABELS, timeout_ms=60_000)
     log_page_state(page, "after_form_next")
@@ -218,7 +262,14 @@ def _publish_and_capture_url(
     capture: MarketplaceItemCapture,
 ) -> str | None:
     _dismiss_vehicle_category_prompts(page)
-    _complete_review_step(page)
+    _complete_review_step(page, vehicle, log_dir, autosell_id)
+
+    if _still_on_review_page(page):
+        _save_debug(page, log_dir, autosell_id, "stuck_on_review")
+        hint = _review_blocker_hint(page)
+        raise FacebookPostingError(
+            f"Still on review page before Publish — {hint}"
+        )
 
     try:
         click_labeled_action(page, PUBLISH_LABELS, timeout_ms=30_000)
@@ -233,10 +284,6 @@ def _publish_and_capture_url(
     for wait_sec in (5, 10, 15):
         page.wait_for_timeout(wait_sec * 1000)
         _dismiss_vehicle_category_prompts(page)
-        listing_url = capture.latest_url()
-        if listing_url:
-            print(f"Captured listing from network: {listing_url}")
-            return listing_url
         if _publish_succeeded(page):
             break
 
@@ -247,54 +294,134 @@ def _publish_and_capture_url(
     if capture.item_ids:
         print(f"Network saw item ids: {', '.join(capture.item_ids)}")
 
+    # Prefer dashboard/selling match by vehicle identity — not the first /item/ link on page.
+    for listing_page in (
+        "https://www.facebook.com/marketplace/you/selling",
+        "https://www.facebook.com/marketplace/you/dashboard",
+    ):
+        page.goto(listing_page, wait_until="domcontentloaded", timeout=60_000)
+        page.wait_for_timeout(4_000)
+        _dismiss_vehicle_category_prompts(page)
+        listing_url = _find_top_matching_listing(page, vehicle)
+        if listing_url and _verify_listing_url(page, listing_url, vehicle):
+            print(f"Found listing on {listing_page}: {listing_url}")
+            return listing_url
+        listing_url = _capture_listing_url(page, vehicle, scroll=True)
+        if listing_url and _verify_listing_url(page, listing_url, vehicle):
+            print(f"Found listing on {listing_page}: {listing_url}")
+            return listing_url
+
     listing_url = _capture_listing_url(page, vehicle)
-    if listing_url:
+    if listing_url and _verify_listing_url(page, listing_url, vehicle):
         return listing_url
 
     for listing_page in (
         "https://www.facebook.com/marketplace/you/selling",
         "https://www.facebook.com/marketplace/you/dashboard",
     ):
-        for attempt in range(3):
+        for attempt in range(2):
             page.goto(listing_page, wait_until="domcontentloaded", timeout=60_000)
             page.wait_for_timeout(4_000)
             _dismiss_vehicle_category_prompts(page)
-            listing_url = _capture_listing_url(page, vehicle, scroll=True)
-            if listing_url:
-                print(f"Found listing on {listing_page}: {listing_url}")
-                return listing_url
             listing_url = _find_top_matching_listing(page, vehicle)
-            if listing_url:
-                print(f"Found top matching listing on {listing_page}: {listing_url}")
+            if listing_url and _verify_listing_url(page, listing_url, vehicle):
+                print(f"Found listing on {listing_page}: {listing_url}")
                 return listing_url
             page.wait_for_timeout(5_000)
 
     listing_url = _open_listing_by_clicking_card(page, vehicle)
-    if listing_url:
+    if listing_url and _verify_listing_url(page, listing_url, vehicle):
         print(f"Found listing by clicking card: {listing_url}")
         return listing_url
 
-    if capture.item_ids:
-        url = capture.latest_url()
-        print(f"Using network item id without page verification: {url}")
-        return url
+    for item_id in capture.item_ids:
+        url = f"https://www.facebook.com/marketplace/item/{item_id}/"
+        if _verify_listing_url(page, url, vehicle):
+            print(f"Verified network item id: {url}")
+            return url
 
     return None
 
 
-def _complete_review_step(page: Page) -> None:
-    """Review page: Model/Price/Description + Promote toggle. Next is disabled until promote is off."""
+def _verify_listing_url(page: Page, url: str, vehicle: Vehicle) -> bool:
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+        page.wait_for_timeout(3_000)
+    except Exception:
+        return False
+
+    if "/marketplace/item/" not in page.url:
+        return False
+
     try:
         body = page.locator("body").inner_text(timeout=5_000).lower()
     except Exception:
-        return
+        return False
 
-    if "promote listing" not in body and "promocionar" not in body and "promover" not in body:
+    unavailable = (
+        "isn't available",
+        "no longer available",
+        "no está disponible",
+        "content isn't available",
+        "contenido no está disponible",
+    )
+    if any(phrase in body for phrase in unavailable):
+        return False
+
+    brand = vehicle.brand.strip().lower()
+    if not brand or brand not in body:
+        return False
+
+    price_digits = parse_mxn_price(vehicle.price)
+    has_price = price_digits in re.sub(r"[^\d]", "", body)
+
+    model = fb_model_name(vehicle.title).lower()
+    has_model = bool(model) and model.replace(" ", "") in body.replace(" ", "")
+
+    title = vehicle.marketplace_title.lower()
+    has_title = title in body or f"{vehicle.year} {brand}" in body
+
+    # Year alone is NOT enough ("Joined Facebook in 2020" appears on every listing).
+    return has_price or has_model or has_title
+
+
+def _complete_review_step(page: Page, vehicle: Vehicle, log_dir: Path, autosell_id: str) -> None:
+    """Review page: vehicle type, promote toggle, then Next."""
+    attrs = categorize_vehicle(vehicle)
+    disable_promote_listing(page)
+    page.wait_for_timeout(1_000)
+
+    if not _still_on_review_page(page):
         return
 
     log_page_state(page, "review_page")
+    _save_debug(page, log_dir, autosell_id, "review_page")
+
+    if _fill_vehicle_type(page, attrs):
+        print("  filled vehicle_type")
+        page.wait_for_timeout(1_000)
+
+    _scroll_composer_sidebar(page)
+    _fill_appearance_fields(page, attrs)
+    _fill_vehicle_detail_fields(page, attrs)
+
     disable_promote_listing(page)
     page.wait_for_timeout(1_500)
+
+    try:
+        wait_for_composer_next_enabled(page, timeout_ms=45_000)
+    except FacebookPostingError:
+        _fill_appearance_fields(page, attrs)
+        _fill_vehicle_detail_fields(page, attrs)
+        disable_promote_listing(page)
+        try:
+            wait_for_composer_next_enabled(page, timeout_ms=15_000)
+        except FacebookPostingError:
+            print("  WARN review Next disabled; force-clicking")
+            click_labeled_action(page, NEXT_LABELS, timeout_ms=15_000, allow_force=True)
+
+    disable_promote_listing(page)
+    page.wait_for_timeout(500)
 
     try:
         page.wait_for_function(
@@ -309,13 +436,49 @@ def _complete_review_step(page: Page) -> None:
                 }
                 return false;
             }""",
-            timeout=30_000,
+            timeout=5_000,
         )
     except Exception:
         disable_promote_listing(page)
 
     advance_composer_next(page, timeout_ms=60_000)
     log_page_state(page, "after_review_next")
+    page.wait_for_timeout(2_000)
+    _save_debug(page, log_dir, autosell_id, "after_review_next")
+
+
+def _still_on_review_page(page: Page) -> bool:
+    try:
+        body = page.locator("body").inner_text(timeout=5_000).lower()
+    except Exception:
+        return False
+
+    final_review_markers = (
+        "promote listing after publish",
+        "promocionar el anuncio después",
+        "promocionar anuncio después",
+        "promover anuncio después",
+    )
+    if any(marker in body for marker in final_review_markers):
+        return True
+
+    if "choose a vehicle category" in body or "elige una categor" in body:
+        return True
+
+    return False
+
+
+def _review_blocker_hint(page: Page) -> str:
+    try:
+        body = page.locator("body").inner_text(timeout=5_000).lower()
+    except Exception:
+        return "complete the review step manually."
+
+    if "choose a vehicle category" in body or "elige una categor" in body:
+        return "Vehicle type is required — pick Sedan/SUV/etc. on the review page."
+    if "promote listing" in body or "promocionar" in body:
+        return "turn off Promote listing and click Next."
+    return "complete the review step manually."
 
 
 def _publish_succeeded(page: Page) -> bool:
@@ -353,22 +516,32 @@ def _dismiss_vehicle_category_prompts(page: Page) -> None:
 
 def _find_top_matching_listing(page: Page, vehicle: Vehicle) -> str | None:
     price_digits = parse_mxn_price(vehicle.price)
-    needles = [
-        vehicle.brand.lower(),
-        vehicle.year,
-        price_digits,
-        vehicle.marketplace_title.lower(),
-    ]
-    for entry in _collect_marketplace_links(page)[:15]:
+    brand = vehicle.brand.lower()
+    model = fb_model_name(vehicle.title).lower()
+    best_url: str | None = None
+    best_score = 0
+
+    for entry in _collect_marketplace_links(page)[:25]:
         haystack = entry.get("text", "").lower()
-        hits = sum(1 for n in needles if n and n in haystack)
-        if hits >= 2 or (vehicle.brand.lower() in haystack and vehicle.year in haystack):
+        if brand not in haystack:
+            continue
+        score = 1
+        if price_digits in re.sub(r"[^\d]", "", haystack):
+            score += 2
+        if model and model.replace(" ", "") in haystack.replace(" ", ""):
+            score += 2
+        if vehicle.year in haystack:
+            score += 1
+        if vehicle.marketplace_title.lower() in haystack:
+            score += 2
+        if score > best_score:
             normalized = _normalize_fb_url(entry.get("href", ""))
             if normalized:
-                return normalized
-    links = _collect_marketplace_links(page)
-    if len(links) == 1:
-        return _normalize_fb_url(links[0].get("href", ""))
+                best_score = score
+                best_url = normalized
+
+    if best_url and best_score >= 3:
+        return best_url
     return None
 
 
@@ -630,6 +803,269 @@ def _normalize_fb_url(href: str) -> str | None:
     return href.split("?")[0]
 
 
+def _fill_vehicle_type(page: Page, attrs: ListingAttributes) -> bool:
+    labels = ("Vehicle type", "Tipo de vehículo", "Tipo")
+    candidates = _field_candidates(attrs.vehicle_type, "Car/Truck", "Car", "Coche")
+    return _select_from_combobox_list(page, labels, candidates)
+
+
+def _fill_appearance_fields(page: Page, attrs: ListingAttributes) -> None:
+    """Vehicle appearance: body style, exterior color, interior color."""
+    appearance: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
+        (("Body style", "Body Style", "Estilo de carrocería"), _field_candidates(
+            attrs.body_style, "Sedan", "SUV", "Truck", "Hatchback", "Coupe", "Minivan", "Small Car", "Other",
+        )),
+        (("Exterior color", "Color exterior", "Exterior Color"), _field_candidates(
+            attrs.exterior_color, "Silver", "Gray", "Black", "White", "Red", "Blue", "Other",
+        )),
+        (("Interior color", "Color interior", "Interior Color"), _field_candidates(
+            attrs.interior_color, "Black", "Gray", "Beige", "White", "Other",
+        )),
+    ]
+    for labels, candidates in appearance:
+        if _select_from_combobox_list(page, labels, candidates):
+            print(f"  filled {labels[0]}")
+
+
+def _fill_vehicle_detail_fields(page: Page, attrs: ListingAttributes) -> None:
+    """Vehicle details: title checkbox, condition, fuel, transmission."""
+    if _check_clean_title(page):
+        print("  checked clean_title")
+
+    details: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
+        (("Vehicle condition", "Condición del vehículo", "Condition"), _field_candidates(
+            attrs.condition, "Excellent", "Good", "Fair", "Poor",
+        )),
+        (("Fuel type", "Fuel Type", "Tipo de combustible", "Combustible"), _field_candidates(
+            attrs.fuel_type, "Gasoline", "Diesel", "Electric", "Hybrid", "Flex", "Other",
+        )),
+        (("Transmission", "Transmisión", "Tipo de transmisión"), _field_candidates(
+            attrs.transmission, "Automatic transmission", "Manual transmission",
+        )),
+    ]
+    for labels, candidates in details:
+        if _select_from_combobox_list(page, labels, candidates):
+            print(f"  filled {labels[0]}")
+        elif labels[0] == "Vehicle condition" and _fill_vehicle_condition(page):
+            print("  filled Vehicle condition (direct)")
+
+
+def _fill_about_vehicle_fields(page: Page, attrs: ListingAttributes) -> None:
+    _fill_appearance_fields(page, attrs)
+    _fill_vehicle_detail_fields(page, attrs)
+
+
+def _field_candidates(primary: str, *extra: str) -> tuple[str, ...]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for candidate in (primary, *extra):
+        if not candidate:
+            continue
+        key = candidate.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(candidate)
+    return tuple(ordered)
+
+
+def _fill_labeled_combobox(
+    page: Page,
+    labels: tuple[str, ...],
+    candidates: tuple[str, ...],
+) -> bool:
+    for label in labels:
+        for locator in (
+            page.get_by_role("combobox", name=label),
+            page.get_by_role("combobox", name=re.compile(re.escape(label), re.I)),
+            page.locator(f'[role="combobox"][aria-label="{label}"]'),
+            page.locator(f'[role="combobox"][aria-label*="{label}" i]'),
+            page.locator(f'[aria-haspopup="listbox"][aria-label*="{label}" i]'),
+            page.locator(f'text={label}').locator('xpath=following::*[@role="combobox"][1]'),
+        ):
+            try:
+                if locator.count() == 0:
+                    continue
+                box = locator.first
+                if not box.is_visible():
+                    continue
+                if _combobox_is_filled(box, labels):
+                    return True
+                box.scroll_into_view_if_needed()
+                box.click()
+                page.wait_for_timeout(700)
+                for candidate in candidates:
+                    if _pick_listbox_option(page, candidate):
+                        page.wait_for_timeout(600)
+                        if _combobox_is_filled(box, labels):
+                            page.keyboard.press("Escape")
+                            return True
+                if _pick_first_listbox_option(page):
+                    page.wait_for_timeout(600)
+                    if _combobox_is_filled(box, labels):
+                        page.keyboard.press("Escape")
+                        return True
+                page.keyboard.press("Escape")
+            except Exception:
+                continue
+    return False
+
+
+def _combobox_is_filled(box: Locator, labels: tuple[str, ...]) -> bool:
+    try:
+        current = (box.inner_text(timeout=1_000) or "").strip().lower()
+    except Exception:
+        return False
+    if len(current) < 2:
+        return False
+    for label in labels:
+        if current == label.lower():
+            return False
+    placeholders = ("select", "seleccionar", "choose", "elige")
+    if any(current.startswith(p) for p in placeholders):
+        return False
+    return True
+
+
+def _log_composer_comboboxes(page: Page) -> None:
+    try:
+        fields = page.evaluate(
+            """() => {
+                const out = [];
+                for (const el of document.querySelectorAll('[role="combobox"]')) {
+                  const rect = el.getBoundingClientRect();
+                  if (rect.width <= 0 || rect.height <= 0) continue;
+                  out.push({
+                    label: el.getAttribute('aria-label') || '',
+                    value: (el.innerText || '').trim(),
+                    disabled: el.getAttribute('aria-disabled'),
+                  });
+                }
+                return out;
+            }"""
+        )
+        print(f"  comboboxes: {fields}")
+    except Exception as exc:
+        print(f"  combobox dump failed: {exc}")
+
+
+def _fill_vehicle_condition(page: Page) -> bool:
+    locators = [
+        page.locator('[role="combobox"][aria-label*="condition" i]'),
+        page.locator('[role="combobox"][aria-label*="condición" i]'),
+        page.get_by_role("combobox", name=re.compile(r"condition|condición", re.I)),
+        page.locator('text=Vehicle condition').locator('xpath=following::*[@role="combobox"][1]'),
+        page.locator('text=Condición del vehículo').locator('xpath=following::*[@role="combobox"][1]'),
+    ]
+    labels = ("Vehicle condition", "Condición del vehículo", "Condition")
+    for locator in locators:
+        try:
+            if locator.count() == 0:
+                continue
+            box = locator.first
+            if not box.is_visible():
+                continue
+            if _combobox_is_filled(box, labels):
+                return True
+            box.scroll_into_view_if_needed()
+            box.click()
+            page.wait_for_timeout(900)
+            options = page.locator('[role="option"]')
+            count = options.count()
+            for index in range(count):
+                option = options.nth(index)
+                try:
+                    if not option.is_visible():
+                        continue
+                    option.click()
+                    page.wait_for_timeout(700)
+                    if _combobox_is_filled(box, labels):
+                        return True
+                except Exception:
+                    continue
+            page.keyboard.press("Escape")
+        except Exception:
+            continue
+    return False
+
+
+def _check_clean_title(page: Page) -> bool:
+    try:
+        checked = page.evaluate(
+            """() => {
+                const words = ['clean title', 'título limpio', 'titulo limpio'];
+                for (const el of document.querySelectorAll('[role="checkbox"], input[type="checkbox"]')) {
+                  let node = el;
+                  for (let depth = 0; depth < 6 && node; depth++) {
+                    const text = (node.textContent || '').toLowerCase();
+                    if (words.some((word) => text.includes(word))) {
+                      if (el.getAttribute('aria-checked') === 'true' || el.checked) return true;
+                      el.click();
+                      return true;
+                    }
+                    node = node.parentElement;
+                  }
+                }
+                return false;
+            }"""
+        )
+    except Exception:
+        return False
+    if checked:
+        page.wait_for_timeout(500)
+    return bool(checked)
+
+
+def _scroll_composer_sidebar(page: Page) -> None:
+    try:
+        page.evaluate(
+            """() => {
+                const scrollers = [
+                  ...document.querySelectorAll('[role="complementary"], [role="dialog"], form'),
+                ];
+                for (const el of scrollers) {
+                  const style = window.getComputedStyle(el);
+                  if (!/(auto|scroll)/.test(style.overflowY)) continue;
+                  const r = el.getBoundingClientRect();
+                  if (r.width <= 0 || r.height <= 0) continue;
+                  for (let y = 0; y <= el.scrollHeight; y += 220) {
+                    el.scrollTop = y;
+                  }
+                  el.scrollTop = 0;
+                }
+            }"""
+        )
+        page.wait_for_timeout(800)
+    except Exception:
+        pass
+
+
+def _pick_listbox_option(page: Page, text: str) -> bool:
+    for locator in (
+        page.get_by_role("option", name=re.compile(rf"^{re.escape(text)}$", re.I)),
+        page.get_by_role("option", name=re.compile(re.escape(text), re.I)),
+        page.locator(f'[role="option"]:has-text("{text}")'),
+    ):
+        try:
+            if locator.count() and locator.first.is_visible():
+                locator.first.click()
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _pick_first_listbox_option(page: Page) -> bool:
+    options = page.locator('[role="option"]')
+    try:
+        if options.count() and options.first.is_visible():
+            options.first.click()
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _fill_combobox(page: Page, labels: tuple[str, ...], value: str) -> bool:
     for label in labels:
         for locator in (
@@ -638,6 +1074,7 @@ def _fill_combobox(page: Page, labels: tuple[str, ...], value: str) -> bool:
             page.locator(f'[role="combobox"][aria-label="{label}"]'),
             page.locator(f'[role="combobox"][aria-label*="{label}" i]'),
             page.locator(f'[aria-haspopup="listbox"][aria-label*="{label}" i]'),
+            page.locator(f'text={label}').locator('xpath=ancestor::*[@role="combobox"][1]'),
         ):
             try:
                 if locator.count() == 0:
@@ -645,25 +1082,194 @@ def _fill_combobox(page: Page, labels: tuple[str, ...], value: str) -> bool:
                 box = locator.first
                 if not box.is_visible():
                     continue
+                if _combobox_contains_value(box, value):
+                    return True
+                box.scroll_into_view_if_needed()
                 box.click()
                 page.wait_for_timeout(600)
                 page.keyboard.press("Control+a")
                 page.keyboard.type(value, delay=40)
-                page.wait_for_timeout(1_200)
-                option = page.get_by_role("option", name=re.compile(rf"^{re.escape(value)}$", re.I))
-                if option.count() and option.first.is_visible():
-                    option.first.click()
-                else:
-                    loose = page.locator(f'[role="option"]:has-text("{value}")')
-                    if loose.count() and loose.first.is_visible():
-                        loose.first.click()
-                    else:
-                        page.keyboard.press("Enter")
-                page.wait_for_timeout(600)
-                return True
+                page.wait_for_timeout(1_500)
+                if _pick_listbox_option(page, value):
+                    page.wait_for_timeout(800)
+                    if _combobox_contains_value(box, value):
+                        return True
+                loose = page.locator(f'[role="option"]:has-text("{value}")')
+                if loose.count() and loose.first.is_visible():
+                    loose.first.click()
+                    page.wait_for_timeout(800)
+                    if _combobox_contains_value(box, value):
+                        return True
+                page.keyboard.press("Enter")
+                page.wait_for_timeout(800)
+                if _combobox_contains_value(box, value):
+                    return True
+                page.keyboard.press("Escape")
             except Exception:
                 continue
     return _fill_vehicle_field(page, labels, value)
+
+
+def _combobox_contains_value(box: Locator, value: str) -> bool:
+    try:
+        text = (box.inner_text(timeout=1_000) or "").strip()
+    except Exception:
+        return False
+    if not text or not value:
+        return False
+    parts = [part.strip() for part in text.split("\n") if part.strip()]
+    needle = value.strip().lower()
+    return any(needle in part.lower() for part in parts)
+
+
+def _fill_make_combobox(page: Page, make: str) -> bool:
+    return _select_from_combobox_list(page, ("Make", "Marca"), (make,))
+
+
+def _select_from_combobox_list(
+    page: Page,
+    labels: tuple[str, ...],
+    candidates: tuple[str, ...],
+) -> bool:
+    box = _find_combobox(page, labels)
+    if box is None:
+        return False
+
+    for candidate in candidates:
+        if candidate and _combobox_contains_value(box, candidate):
+            return True
+
+    try:
+        box.scroll_into_view_if_needed()
+        box.click()
+        page.wait_for_timeout(800)
+        for candidate in candidates:
+            if not candidate:
+                continue
+            if labels[0] in ("Make", "Marca", "Year", "Año"):
+                page.keyboard.press("Control+a")
+                page.keyboard.press("Backspace")
+                page.keyboard.type(candidate, delay=35)
+                page.wait_for_timeout(1_200)
+            if _pick_option_from_list(page, candidate):
+                page.wait_for_timeout(700)
+                if _combobox_contains_value(box, candidate):
+                    page.keyboard.press("Escape")
+                    return True
+        page.keyboard.press("Escape")
+    except Exception:
+        page.keyboard.press("Escape")
+    return False
+
+
+def _pick_option_from_list(page: Page, value: str) -> bool:
+    needle = value.strip().lower()
+    if not needle:
+        return False
+    options = page.locator('[role="option"]')
+    try:
+        count = options.count()
+    except Exception:
+        return False
+    for index in range(count):
+        option = options.nth(index)
+        try:
+            if not option.is_visible():
+                continue
+            text = (option.inner_text(timeout=500) or "").strip()
+            if text.lower() == needle or needle in text.lower():
+                option.scroll_into_view_if_needed()
+                option.click()
+                return True
+        except Exception:
+            continue
+    return _pick_listbox_option(page, value)
+
+
+def _find_combobox(page: Page, labels: tuple[str, ...]) -> Locator | None:
+    for label in labels:
+        for locator in (
+            page.get_by_role("combobox", name=label),
+            page.get_by_role("combobox", name=re.compile(re.escape(label), re.I)),
+            page.locator(f'[role="combobox"][aria-label="{label}"]'),
+            page.locator(f'[role="combobox"][aria-label*="{label}" i]'),
+            page.locator(f'[aria-haspopup="listbox"][aria-label*="{label}" i]'),
+            page.locator('[role="combobox"]').filter(
+                has_text=re.compile(rf"^{re.escape(label)}(?:\n|$)", re.I)
+            ),
+            page.locator('[role="combobox"]').filter(
+                has_text=re.compile(rf"^{re.escape(label)}\b", re.I)
+            ),
+            page.locator(f'text={label}').locator('xpath=ancestor::*[@role="combobox"][1]'),
+        ):
+            try:
+                if locator.count() and locator.first.is_visible():
+                    return locator.first
+            except Exception:
+                continue
+    return None
+
+
+def _ensure_required_comboboxes(
+    page: Page, vehicle: Vehicle, attrs: ListingAttributes
+) -> None:
+    if not _combobox_has_value(page, ("Year", "Año", "Model year"), vehicle.year):
+        _select_from_combobox_list(page, ("Year", "Año", "Model year"), (vehicle.year,))
+    if not _combobox_has_value(page, ("Make", "Marca"), attrs.make):
+        _fill_make_combobox(page, attrs.make)
+    if not _text_field_has_value(page, ("Model", "Modelo"), attrs.model):
+        _fill_vehicle_field(page, ("Model", "Modelo"), attrs.model)
+
+    for name, labels, value in (
+        ("year", ("Year", "Año", "Model year"), vehicle.year),
+        ("make", ("Make", "Marca"), attrs.make),
+    ):
+        if not value:
+            continue
+        ok = _combobox_has_value(page, labels, value)
+        if ok:
+            print(f"  verified {name}")
+        else:
+            print(f"  WARN {name} still missing after retries ({value})")
+
+    if _text_field_has_value(page, ("Model", "Modelo"), attrs.model):
+        print("  verified model")
+    else:
+        print(f"  WARN model still missing after retries ({attrs.model})")
+
+
+def _text_field_has_value(page: Page, labels: tuple[str, ...], value: str) -> bool:
+    needle = value.strip().lower()
+    if not needle:
+        return False
+    for label in labels:
+        for locator in (
+            page.get_by_label(re.compile(re.escape(label), re.I)),
+            page.locator(f'input[aria-label*="{label}" i]'),
+            page.locator(f'textarea[aria-label*="{label}" i]'),
+        ):
+            try:
+                if locator.count() == 0:
+                    continue
+                field = locator.first
+                if not field.is_visible():
+                    continue
+                current = (field.input_value(timeout=1_000) or field.inner_text(timeout=1_000) or "").strip()
+                if needle in current.lower():
+                    return True
+            except Exception:
+                continue
+    return False
+
+
+def _combobox_has_value(page: Page, labels: tuple[str, ...], value: str) -> bool:
+    box = _find_combobox(page, labels)
+    if box is None:
+        return False
+    try:
+        return box.is_visible() and _combobox_contains_value(box, value)
+    except Exception:
+        return False
 
 
 def _fill_numeric_field(page: Page, labels: tuple[str, ...], value: str) -> bool:
