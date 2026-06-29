@@ -38,13 +38,21 @@ def main() -> int:
     parser.add_argument("--catalog", default="data/catalog_latest.json")
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--headed", action="store_true")
+    parser.add_argument(
+        "--max-photos",
+        type=int,
+        default=None,
+        help="Limit photos for this test (default: MAX_PHOTOS_PER_LISTING or config)",
+    )
     args = parser.parse_args()
 
     load_dotenv(ROOT / ".env")
     config = load_config(ROOT / args.config)
     fb_config = config.get("facebook", {})
     headless = not args.headed and env_bool("FB_HEADLESS", fb_config.get("headless", True))
-    max_photos = int(os.getenv("MAX_PHOTOS_PER_LISTING", fb_config.get("max_photos_per_listing", 20)))
+    max_photos = args.max_photos if args.max_photos is not None else int(
+        os.getenv("MAX_PHOTOS_PER_LISTING", fb_config.get("max_photos_per_listing", 20))
+    )
 
     vehicles = load_catalog_snapshot(ROOT / args.catalog)
     vehicle = next((v for v in vehicles if v.autosell_id == args.autosell_id), None)
