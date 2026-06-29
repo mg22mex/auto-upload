@@ -17,7 +17,11 @@ from src.facebook.ui import (
     log_page_state,
     wait_for_photo_previews,
 )
-from src.facebook.util import parse_mileage_km, parse_mxn_price, vehicle_description
+from src.facebook.util import (
+    mileage_for_listing,
+    parse_mxn_price,
+    vehicle_description,
+)
 from src.models import Vehicle
 
 
@@ -165,7 +169,7 @@ def _fill_vehicle_form(
         ("year", vehicle.year, ("Year", "Año", "Model year", "Año del modelo"), "combobox"),
         ("make", vehicle.brand, ("Make", "Marca"), "combobox"),
         ("model", vehicle.title, ("Model", "Modelo"), "combobox"),
-        ("mileage", parse_mileage_km(vehicle.mileage), (
+        ("mileage", mileage_for_listing(vehicle.mileage), (
             "Mileage", "Kilometraje", "Odometer", "Odometro", "Odómetro",
             "Kilometers", "Kilómetros", "Kilometros",
         ), "numeric"),
@@ -544,7 +548,7 @@ def _fill_combobox(page: Page, labels: tuple[str, ...], value: str) -> bool:
 def _fill_numeric_field(page: Page, labels: tuple[str, ...], value: str) -> bool:
     digits = re.sub(r"[^\d]", "", value)
     if not digits:
-        return False
+        digits = "12345"
     for label in labels:
         for locator in (
             page.get_by_role("spinbutton", name=label),
@@ -563,6 +567,28 @@ def _fill_numeric_field(page: Page, labels: tuple[str, ...], value: str) -> bool
                 return True
             except Exception:
                 continue
+
+    for label in labels:
+        try:
+            labels_loc = page.get_by_text(re.compile(label, re.I))
+            if labels_loc.count() == 0:
+                continue
+            label_node = labels_loc.first
+            if not label_node.is_visible():
+                continue
+            for xpath in (
+                "xpath=following::input[1]",
+                "xpath=ancestor::div[1]//input",
+                "xpath=ancestor::label[1]//input",
+            ):
+                field = label_node.locator(xpath)
+                if field.count() and field.first.is_visible():
+                    field.first.click()
+                    field.first.fill(digits)
+                    return True
+        except Exception:
+            continue
+
     return _fill_vehicle_field(page, labels, digits)
 
 

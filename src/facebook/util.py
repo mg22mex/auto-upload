@@ -15,11 +15,21 @@ def parse_mxn_price(price: str) -> str:
     return digits
 
 
+DEFAULT_MILEAGE_KM = "12345"
+
+
 def parse_mileage_km(mileage: str) -> str:
     match = re.search(r"[\d,]+", mileage or "")
     if not match:
-        return "0"
-    return match.group(0).replace(",", "")
+        return DEFAULT_MILEAGE_KM
+    digits = match.group(0).replace(",", "")
+    if not digits or digits == "0":
+        return DEFAULT_MILEAGE_KM
+    return digits
+
+
+def mileage_for_listing(mileage: str) -> str:
+    return parse_mileage_km(mileage)
 
 
 def vehicle_description(vehicle: Vehicle) -> str:
