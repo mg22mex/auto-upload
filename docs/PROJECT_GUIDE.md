@@ -247,8 +247,9 @@ flowchart TD
 | Inventory FB dashboard (discover untracked listings) | Low | Avoids manual wipe; complex / fragile |
 | One-off `fb_clear_listings.py` (mark sold) | Low | Only if inventory is huge; prefer manual |
 | Unit tests for `categorize.py` / price parse | Medium | No `tests/` package yet |
-| Faster post-publish URL capture | Medium | Dashboard polling can hang; listing may already be live |
+| Faster post-publish URL capture | Medium | Often hangs after live post; listing may already be on dashboard |
 | Exterior color reliability on all locales | Low | Occasional `MISSING Color del exterior` but publish still succeeds |
+| Powersport field set (Todoterreno) | Done | Can-Am → Todoterreno + free-text Marca |
 
 ---
 
@@ -272,6 +273,7 @@ flowchart TD
 |----|-------|---------------------|--------|
 | US-10 | As a developer, I want to test one vehicle without full sync. | `fb_post_test.py --autosell-id obj969` succeeds. | Done (all 3 accounts) |
 | US-11 | As a developer, I want EN and ES Marketplace UIs supported. | Labels like Marca, Carrocería, Estado del vehículo. | Done |
+| US-13 | As a developer, I want Can-Am / UTV posted under Todoterreno. | Vehicle type Todoterreno; Marca free-text (any brand). | Done |
 | US-12 | As a developer, I want false-positive “posted” URLs rejected. | Verify requires brand + price/model on item page. | Done |
 
 ### End buyer (indirect)
@@ -324,6 +326,7 @@ stateDiagram-v2
 |----------|-------|-------------------|
 | Spanish UI (es-MX) | Audi, `A 3` | Marca Audi, Modelo A3, Carrocería Sedán |
 | English UI | Audi, `A 3` | Make Audi, Model A3, Body style Sedan |
+| Can-Am / UTV (es-MX) | Maverick XRC | Tipo **Todoterreno**, Marca free-text **Can-Am** |
 | SUV slug | `cx-50`, Mazda | Body style SUV |
 | Pickup | Ram 1500 | Body style Truck / Camioneta |
 | Mercedes naming | `Mercedes Benz` | Make **Mercedes-Benz** |

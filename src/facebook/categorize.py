@@ -36,6 +36,12 @@ MAKE_ALIASES: dict[str, str] = {
     "volkswagen": "Volkswagen",
 }
 
+# Extra Marca dropdown spellings to try (order matters)
+MAKE_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "can-am": ("Can-Am", "Can Am", "Can-am", "BRP", "Otro", "Other"),
+    "can am": ("Can-Am", "Can Am", "Can-am", "BRP", "Otro", "Other"),
+}
+
 # English defaults (account_1 / EN UI). Spanish aliases are applied at fill time.
 DEFAULT_EXTERIOR = "Silver"
 DEFAULT_INTERIOR = "Black"
@@ -48,6 +54,16 @@ DEFAULT_BODY_STYLE = "Sedan"
 # Spanish Marketplace option labels (es-MX UI)
 # Exact option text from es-MX Marketplace (case-sensitive in UI)
 ES_VEHICLE_TYPE = ("Auto/camioneta", "Auto/Camioneta", "Coche", "Camioneta", "Auto")
+# Can-Am / UTV / ATV — Spanish Marketplace uses "Todoterreno" (not Auto/camioneta)
+ES_POWERSPORT_TYPE = (
+    "Todoterreno",
+    "Powersport",
+    "Off-road vehicle",
+    "Motocicleta",
+    "Motorcycle",
+    "Otro",
+    "Other",
+)
 ES_BODY_STYLE = {
     "Sedan": ("Sedán", "Sedan"),
     "SUV": ("SUV", "Camioneta SUV"),
@@ -139,7 +155,7 @@ class ListingAttributes:
     def summary(self) -> str:
         return (
             f"make={self.make}, model={self.model}, km={self.mileage_km}, "
-            f"body={self.body_style}, ext={self.exterior_color}, "
+            f"type={self.vehicle_type}, body={self.body_style}, ext={self.exterior_color}, "
             f"fuel={self.fuel_type}, trans={self.transmission}, cond={self.condition}"
         )
 
@@ -178,12 +194,29 @@ def fb_make_name(brand: str) -> str:
     return alias or cleaned
 
 
+def fb_make_candidates(brand: str) -> tuple[str, ...]:
+    primary = fb_make_name(brand)
+    extras = MAKE_CANDIDATES.get((brand or "").strip().lower(), ())
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for candidate in (primary, *extras, brand.strip() if brand else ""):
+        if not candidate:
+            continue
+        key = candidate.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(candidate)
+    return tuple(ordered)
+
+
 def fb_model_name(title: str) -> str:
-    """Normalize autosell model titles for FB (e.g. 'A 3' -> 'A3')."""
+    """Normalize autosell model titles for FB (e.g. 'A 3' -> 'A3', keep 'Traverse LT')."""
     text = (title or "").strip()
     if not text:
         return text
-    compact = re.sub(r"(?<=[A-Za-z])\s+(?=[A-Za-z0-9])", "", text)
+    # Only collapse single-letter + space + digit/letter (A 3, Q 5, C 180)
+    compact = re.sub(r"\b([A-Za-z])\s+(?=[A-Za-z0-9]\b)", r"\1", text)
     return re.sub(r"\s{2,}", " ", compact).strip()
 
 
@@ -206,6 +239,9 @@ def _infer_body_style(vehicle: Vehicle, haystack: str, specs: dict[str, str]) ->
         value = specs.get(key)
         if value:
             return _normalize_body_style(value)
+    # Can-Am / UTV / ATV — not a road truck (avoid matching "maverick" as Ford pickup)
+    if any(marker in haystack for marker in ("can-am", "can am", "atv", "utv", "rzr", "xrc", "xrs")):
+        return "Other"
     if any(marker in haystack for marker in TRUCK_BODY_MARKERS):
         return "Truck"
     if any(marker in haystack for marker in VAN_BODY_MARKERS):
@@ -345,7 +381,10 @@ def _infer_condition(specs: dict[str, str]) -> str:
 
 
 def _infer_vehicle_type(haystack: str) -> str:
-    if any(marker in haystack for marker in ("can-am", "can am", "atv", "cuatrimoto")):
+    if any(
+        marker in haystack
+        for marker in ("can-am", "can am", "atv", "utv", "cuatrimoto", "rzr", "xrc", "xrs")
+    ):
         return "Powersport"
     return DEFAULT_VEHICLE_TYPE
 
@@ -361,7 +400,11 @@ def spanish_candidates(field: str, primary: str) -> tuple[str, ...]:
         "condition": ES_CONDITION,
     }
     if field == "vehicle_type":
-        aliases = (*ES_VEHICLE_TYPE, primary, "Car/Truck", "Car")
+        if primary == "Powersport":
+            # Never fall back to Auto/camioneta — FB defaults there and we must override.
+            aliases = (*ES_POWERSPORT_TYPE, primary)
+        else:
+            aliases = (*ES_VEHICLE_TYPE, primary, "Car/Truck", "Car")
     else:
         aliases = (*tables.get(field, {}).get(primary, ()), primary)
     seen: set[str] = set()

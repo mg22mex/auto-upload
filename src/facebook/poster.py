@@ -23,6 +23,7 @@ from src.facebook.ui import (
 from src.facebook.categorize import (
     ListingAttributes,
     categorize_vehicle,
+    fb_make_candidates,
     fb_model_name,
     spanish_candidates,
 )
@@ -193,7 +194,7 @@ def _fill_vehicle_form(
     core_fields: list[tuple[str, str, tuple[str, ...], str]] = [
         ("location", city, ("Ubicación", "Location", "Ciudad"), "text"),
         ("year", vehicle.year, ("Año", "Year", "Año del modelo", "Model year"), "listbox"),
-        ("make", attrs.make, ("Marca", "Make"), "make"),
+        ("make", vehicle.brand, ("Marca", "Make"), "make"),
         ("model", attrs.model, ("Modelo", "Model"), "text"),
         ("mileage", attrs.mileage_km, (
             "Kilometraje", "Mileage", "Odómetro", "Odometro", "Odometer",
@@ -202,13 +203,16 @@ def _fill_vehicle_form(
         ("price", parse_mxn_price(vehicle.price), ("Precio", "Price"), "text"),
     ]
 
+    free_text_make = attrs.vehicle_type == "Powersport"
+
     for name, value, labels, mode in core_fields:
         if not value:
             print(f"  SKIP {name} (empty)")
             continue
         ok = False
         if mode == "make":
-            ok = _fill_make_combobox(page, value)
+            # Todoterreno / Powersport: Marca is free text (any brand). Cars: dropdown.
+            ok = _fill_make_field(page, value, free_text=free_text_make)
         elif mode == "listbox":
             ok = _select_from_combobox_list(page, labels, (value,))
         elif mode == "mileage":
@@ -222,6 +226,12 @@ def _fill_vehicle_form(
             print(f"  MISSING {name}")
 
     _ensure_required_comboboxes(page, vehicle, attrs)
+    if _make_is_filled(page, vehicle.brand, free_text=free_text_make):
+        filled_names.add("make")
+    if _text_field_has_value(page, ("Modelo", "Model"), attrs.model):
+        filled_names.add("model")
+    if _combobox_has_value(page, ("Año", "Year", "Año del modelo", "Model year"), vehicle.year):
+        filled_names.add("year")
 
     _scroll_composer_sidebar(page)
     _fill_appearance_fields(page, attrs)
@@ -815,10 +825,27 @@ def _normalize_fb_url(href: str) -> str | None:
 
 
 def _fill_vehicle_type(page: Page, attrs: ListingAttributes) -> bool:
-    # Live es-MX label text from combobox dump: "Tipo de vehículo\nAuto/camioneta"
+    # Live es-MX: Can-Am / UTV → "Todoterreno"; cars → "Auto/camioneta"
     labels = ("Tipo de vehículo", "Vehicle type", "Tipo")
     candidates = spanish_candidates("vehicle_type", attrs.vehicle_type)
-    return _select_from_combobox_list(page, labels, candidates)
+    # Powersport must not keep FB's default Auto/camioneta
+    if attrs.vehicle_type == "Powersport":
+        box = _find_combobox(page, labels)
+        if box is not None and _combobox_contains_value(box, "Auto/camioneta"):
+            try:
+                box.click()
+                page.wait_for_timeout(700)
+                if _pick_option_from_list(page, "Todoterreno"):
+                    page.wait_for_timeout(800)
+                    print("  set vehicle_type=Todoterreno")
+                    return True
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+    ok = _select_from_combobox_list(page, labels, candidates)
+    if ok:
+        print(f"  filled vehicle_type ({candidates[0] if candidates else '?'})")
+    return ok
 
 
 def _fill_appearance_fields(page: Page, attrs: ListingAttributes) -> None:
@@ -1186,40 +1213,64 @@ def _combobox_contains_value(box: Locator, value: str) -> bool:
     return any(needle in part.lower() for part in parts)
 
 
-def _fill_make_combobox(page: Page, make: str) -> bool:
-    """Fill Marca / Make — searchable listbox on Spanish and English UI."""
+def _fill_make_field(page: Page, brand: str, *, free_text: bool = False) -> bool:
+    """Fill Marca / Make.
+
+    Under Todoterreno (Powersport) Marca is a free-text input — type any brand.
+    Under Auto/camioneta it is a searchable dropdown.
+    """
     labels = ("Marca", "Make")
-    if _select_from_combobox_list(page, labels, (make,)):
+    candidates = fb_make_candidates(brand)
+
+    if free_text:
+        for candidate in candidates:
+            if _fill_vehicle_field(page, labels, candidate):
+                print(f"  marca free-text: {candidate}")
+                return True
+        return False
+
+    if _select_from_combobox_list(page, labels, candidates):
         return True
     # Fallback: click visible "Marca" label, type brand, pick option.
-    for label in labels:
-        try:
-            label_node = page.get_by_text(label, exact=True)
-            if not label_node.count():
-                continue
-            target = label_node.first
-            if not target.is_visible():
-                continue
-            target.scroll_into_view_if_needed()
-            target.click()
-            page.wait_for_timeout(600)
-            page.keyboard.press("Control+a")
-            page.keyboard.press("Backspace")
-            page.keyboard.type(make, delay=40)
-            page.wait_for_timeout(1_500)
-            if _pick_option_from_list(page, make):
+    for candidate in candidates:
+        for label in labels:
+            try:
+                label_node = page.get_by_text(label, exact=True)
+                if not label_node.count():
+                    continue
+                target = label_node.first
+                if not target.is_visible():
+                    continue
+                target.scroll_into_view_if_needed()
+                target.click()
+                page.wait_for_timeout(600)
+                page.keyboard.press("Control+a")
+                page.keyboard.press("Backspace")
+                page.keyboard.type(candidate, delay=40)
+                page.wait_for_timeout(1_500)
+                if _pick_option_from_list(page, candidate):
+                    page.wait_for_timeout(700)
+                    if _combobox_has_value(page, labels, candidate):
+                        return True
+                page.keyboard.press("Enter")
                 page.wait_for_timeout(700)
-                if _combobox_has_value(page, labels, make):
+                if _combobox_has_value(page, labels, candidate):
                     return True
-            page.keyboard.press("Enter")
-            page.wait_for_timeout(700)
-            if _combobox_has_value(page, labels, make):
-                return True
-            page.keyboard.press("Escape")
-        except Exception:
-            continue
-    # Last resort: treat as plain text input (some locales).
-    return _fill_vehicle_field(page, labels, make)
+                page.keyboard.press("Escape")
+            except Exception:
+                continue
+    # Last resort: free text (some locales / categories)
+    return any(_fill_vehicle_field(page, labels, c) for c in candidates)
+
+
+def _make_is_filled(page: Page, brand: str, *, free_text: bool = False) -> bool:
+    candidates = fb_make_candidates(brand)
+    labels = ("Marca", "Make")
+    if free_text:
+        return any(_text_field_has_value(page, labels, c) for c in candidates)
+    return any(_combobox_has_value(page, labels, c) for c in candidates) or any(
+        _text_field_has_value(page, labels, c) for c in candidates
+    )
 
 
 def _select_from_combobox_list(
@@ -1367,24 +1418,23 @@ def _ensure_required_comboboxes(
 
     if not _combobox_has_value(page, year_labels, vehicle.year):
         _select_from_combobox_list(page, year_labels, (vehicle.year,))
-    if not _combobox_has_value(page, make_labels, attrs.make):
-        _fill_make_combobox(page, attrs.make)
+    free_text_make = attrs.vehicle_type == "Powersport"
+    if not _make_is_filled(page, vehicle.brand, free_text=free_text_make):
+        _fill_make_field(page, vehicle.brand, free_text=free_text_make)
     if not _text_field_has_value(page, model_labels, attrs.model):
         _fill_vehicle_field(page, model_labels, attrs.model)
 
-    for name, labels, value in (
-        ("year", year_labels, vehicle.year),
-        ("make", make_labels, attrs.make),
-    ):
-        if not value:
-            continue
-        ok = _combobox_has_value(page, labels, value)
-        if ok:
-            print(f"  verified {name}")
-        else:
-            print(f"  WARN {name} still missing after retries ({value})")
+    if _combobox_has_value(page, year_labels, vehicle.year):
+        print("  verified year")
+    else:
+        print(f"  WARN year still missing after retries ({vehicle.year})")
 
-    if _text_field_has_value(page, ("Model", "Modelo"), attrs.model):
+    if _make_is_filled(page, vehicle.brand, free_text=free_text_make):
+        print("  verified make")
+    else:
+        print(f"  WARN make still missing after retries ({vehicle.brand})")
+
+    if _text_field_has_value(page, model_labels, attrs.model):
         print("  verified model")
     else:
         print(f"  WARN model still missing after retries ({attrs.model})")

@@ -268,14 +268,14 @@ The poster is **bilingual**: Spanish labels first (es-MX UI), English fallback. 
 
 | Autosell / source | EN label | ES label (live UI) | Notes |
 |-------------------|----------|--------------------|-------|
-| `brand` | Make | **Marca** | Searchable list — click option (Audi, …) |
-| `title` | Model | **Modelo** | Text; `A 3` → `A3` |
+| `brand` | Make | **Marca** | Cars: searchable list (Audi, …). **Todoterreno / Powersport: free-text** — type any brand (e.g. Can-Am) |
+| `title` | Model | **Modelo** | Text; `A 3` → `A3`, keep spaces in `Traverse LT` |
 | `year` | Year | **Año** | Dropdown |
 | `mileage` | Mileage | **Kilometraje** | Digits only |
 | `price` | Price | **Precio** | Digits only |
 | config city | Location | **Ubicación** | Default Chihuahua |
-| inferred | Vehicle type | **Tipo de vehículo** | `Auto/camioneta` / `Car/Truck` |
-| inferred | Body style | **Carrocería** | Sedán / Sedan, … |
+| inferred | Vehicle type | **Tipo de vehículo** | Cars: `Auto/camioneta`. **Can-Am / UTV / ATV: `Todoterreno`** (never leave default Auto/camioneta) |
+| inferred | Body style | **Carrocería** | Sedán / Sedan, … (optional under Todoterreno) |
 | inferred | Exterior color | **Color del exterior** | Plata / Silver |
 | inferred | Interior color | **Color del interior** | Negro / Black |
 | inferred | Fuel type | **Tipo de combustible** | Gasolina / Gasoline |
@@ -284,7 +284,9 @@ The poster is **bilingual**: Spanish labels first (es-MX UI), English fallback. 
 | — | Clean title | título limpio | Checked |
 | generated | Description | **Descripción** | Title, km, specs, autosell URL |
 
-Success requires a listing URL that matches **brand + price or model** (year alone is not enough).
+**Powersport example:** Can-am Maverick XRC → Tipo de vehículo **Todoterreno**, Marca free-text **Can-Am**, Modelo **Maverick XRC**.
+
+Success requires a listing URL that matches **brand + price or model** (year alone is not enough). Post-publish URL capture can hang; the listing may already be live on **Your listings**.
 
 ```mermaid
 flowchart LR

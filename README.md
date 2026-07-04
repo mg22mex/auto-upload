@@ -52,7 +52,7 @@ The planner only manages listings **recorded in `sync.db`**. It does **not** sca
 | `scripts/fb_post_test.py` | Post one vehicle (e.g. `--autosell-id obj969`) |
 | `scripts/fb_find_listing.py` | Resolve listing URL from dashboard |
 
-Facebook logic: `src/facebook/` (`poster.py`, `categorize.py`, bilingual EN/ES labels).
+Facebook logic: `src/facebook/` (`poster.py`, `categorize.py`, bilingual EN/ES labels; Can-Am/UTV → **Todoterreno** + free-text Marca).
 
 ## Quick start (local)
 
