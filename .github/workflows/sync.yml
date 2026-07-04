@@ -36,12 +36,21 @@ jobs:
           python -c "import playwright; print('playwright', playwright.__version__)"
           python -m playwright install chromium
 
-      - name: Install Playwright system dependencies
+      # OS libraries for Chromium are machine-wide and must be installed once on
+      # fb-worker (see SETUP.md). Do NOT run `sudo python -m playwright install-deps`
+      # here: under sudo, setup-python's site-packages are often invisible, which
+      # fails with "No module named playwright" even when the prior step succeeded.
+      - name: Verify Chromium can launch
         run: |
           set -eux
-          PYTHON_BIN="$(command -v python)"
-          # sudo must invoke the same interpreter that has playwright installed
-          sudo "$PYTHON_BIN" -m playwright install-deps chromium
+          python - <<'PY'
+          from playwright.sync_api import sync_playwright
+
+          with sync_playwright() as p:
+              browser = p.chromium.launch(headless=True)
+              browser.close()
+          print("Chromium launch OK")
+          PY
 
       - name: Link persistent data (sync.db, sessions, snapshots)
         run: |
