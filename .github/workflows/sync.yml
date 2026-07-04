@@ -28,12 +28,20 @@ jobs:
 
       - name: Install dependencies
         run: |
+          set -eux
+          # Always use python -m pip so packages land in setup-python's interpreter
+          # (bare `pip` on self-hosted runners often targets a different Python).
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install -r requirements.txt
+          python -c "import playwright; print('playwright', playwright.__version__)"
           python -m playwright install chromium
 
       - name: Install Playwright system dependencies
-        run: sudo env PATH="$PATH" python -m playwright install-deps chromium
+        run: |
+          set -eux
+          PYTHON_BIN="$(command -v python)"
+          # sudo must invoke the same interpreter that has playwright installed
+          sudo "$PYTHON_BIN" -m playwright install-deps chromium
 
       - name: Link persistent data (sync.db, sessions, snapshots)
         run: |
