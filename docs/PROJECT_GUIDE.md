@@ -19,7 +19,8 @@ Visual reference for architecture, flows, user stories, quality checks, and roll
 | Estimated days to initial backlog drain | **~7** | 420 ÷ 60 ≈ 7 days at full cap |
 | Playwright photos per listing (default test) | **3** | `fb_post_test.py --max-photos 3` |
 | CI job timeout | **120 min** | `.github/workflows/sync.yml` |
-| Verified manual test vehicle | **obj969** | 2020 Audi A3, $349,000, account_1 |
+| Verified manual test vehicle | **obj969** | 2020 Audi A3 on account_1, _2, and _3 |
+| Live scheduled posting | **Off** | `DRY_RUN=true` until go-live checklist |
 
 ```mermaid
 pie title Target listing distribution (steady state)
@@ -180,16 +181,74 @@ timeline
         : catalog artifacts in CI
     section Phase 2 — Facebook
         Playwright : session.py, poster.py, categorize.py
-        : Manual verify obj969 on account_1
-        : URL verification + dashboard matching
-    section Phase 2b — Production (next)
-        account_2 & account_3 sessions : pending
-        DRY_RUN=false : enable after all accounts tested
-        Backlog drain : ~420 listings over ~7 days
+        : EN + ES Marketplace UI labels
+        : Manual verify obj969 on all 3 accounts
+        : Sessions on fb-worker
+    section Phase 2b — Go-live (next)
+        Clear old FB listings : manual mark sold / delete
+        Mini live test : cap 1-2 posts/account - later
+        DRY_RUN=false : full backlog drain ~7 days
     section Phase 3 — Steady state
-        Twice-daily sync : new cars posted, sold removed
-        : mark_sold on FB when off public catalog
+        Twice-daily sync : create / update / remove
+        : price updates on all accounts
 ```
+
+---
+
+## How sync decides stay / go / add / update
+
+Each run compares **autosell.mx** (scrape) to **`fb_listings` in `sync.db`** (what the app already posted), **per account**.
+
+| Situation | Action |
+|-----------|--------|
+| On website, not in DB for that account | **create** (capped per run) |
+| On website and in DB, same `content_hash` | **stay** (no action) |
+| On website and in DB, hash changed | **update** |
+| In DB as live, gone from public catalog | **remove** (`mark_sold` by default) |
+
+**Important limits:**
+
+- The app does **not** inventory Facebook’s “Your listings.” Manual or pre-app listings are invisible to the planner.
+- Leaving old manual listings while the app posts the same cars causes **duplicates** (and FB may suppress similar posts).
+- **`update` today** only edits **price** and **description** on the existing listing (not full re-post of photos/make/model). Price changes are fully supported once live.
+- With **`DRY_RUN=true`**, actions are planned and logged only.
+
+```mermaid
+flowchart TD
+    AS[autosell.mx scrape] --> PLAN[plan_sync_actions]
+    DB[(fb_listings in sync.db)] --> PLAN
+    PLAN --> C[create]
+    PLAN --> U[update price/description]
+    PLAN --> R[remove mark_sold]
+    PLAN --> S[stay]
+```
+
+---
+
+## Go-live checklist
+
+1. [x] Sessions for `account_1`, `account_2`, `account_3` on fb-worker (`fb_test_session.py` → Logged in: True).
+2. [x] Manual `fb_post_test.py` succeeds on each account (Spanish UI labels supported).
+3. [ ] Inform other account holders (clear old listings).
+4. [ ] On each FB account: **mark sold or delete** active listings. Facebook has **no reliable mass-delete API**; do this manually (or mark sold). Prefer not to automate mass wipe (account risk).
+5. [ ] Optional: reset `fb_listings` in `~/auto-upload-data/data/sync.db` for a clean tracker.
+6. [ ] **Later — mini live test:** set `MAX_POSTS_PER_ACCOUNT_PER_RUN=1` or `2`, `DRY_RUN=false`, run workflow once, verify ~3–6 new listings + DB rows, then set `DRY_RUN=true` again if needed.
+7. [ ] Full live: `DRY_RUN=false`, cap 10, monitor backlog drain (~7 days).
+
+---
+
+## Planned / to be implemented
+
+| Item | Priority | Notes |
+|------|----------|-------|
+| Mini live sync test (cap 1–2) | High | One workflow run before full drain |
+| Enable `DRY_RUN=false` full backlog | High | After old listings cleared |
+| Richer **update** (photos, title, mileage) | Medium | Today: price + description only |
+| Inventory FB dashboard (discover untracked listings) | Low | Avoids manual wipe; complex / fragile |
+| One-off `fb_clear_listings.py` (mark sold) | Low | Only if inventory is huge; prefer manual |
+| Unit tests for `categorize.py` / price parse | Medium | No `tests/` package yet |
+| Faster post-publish URL capture | Medium | Dashboard polling can hang; listing may already be live |
+| Exterior color reliability on all locales | Low | Occasional `MISSING Color del exterior` but publish still succeeds |
 
 ---
 
@@ -200,18 +259,19 @@ timeline
 | ID | Story | Acceptance criteria | Status |
 |----|-------|---------------------|--------|
 | US-01 | As an operator, I want the public autosell catalog scraped twice daily so FB stays in sync without manual copy-paste. | Workflow green on fb-worker; ~140 vehicles in snapshot; diff logged. | Done |
-| US-02 | As an operator, I want each new public vehicle posted to **3 FB accounts** in Chihuahua. | Same vehicle on account_1/2/3; location Chihuahua; photos from autosell. | In progress (1/3 accounts) |
+| US-02 | As an operator, I want each new public vehicle posted to **3 FB accounts** in Chihuahua. | Same vehicle on account_1/2/3; location Chihuahua; photos from autosell. | Posting verified; live backlog pending |
 | US-03 | As an operator, I want sold/removed autosell vehicles marked sold on FB. | `remove` action in diff; `remover.py` executes when `DRY_RUN=false`. | Implemented, not live |
-| US-04 | As an operator, I want price/title changes on autosell reflected on FB. | `update` action when content hash changes. | Implemented, not live |
+| US-04 | As an operator, I want **price** changes on autosell reflected on all FB accounts. | `update` when `content_hash` changes; price field + description. | Implemented, not live |
 | US-05 | As an operator, I want failed FB runs to leave debug screenshots. | PNG under `data/logs/facebook/{autosell_id}_*.png`. | Done |
 | US-06 | As an operator, I want listing URLs stored per account×vehicle. | Row in `fb_listings` with verified URL. | Done |
+| US-07 | As an operator, I want to avoid duplicate listings when enabling the app. | Clear old FB inventory before `DRY_RUN=false`. | Documented; manual step |
 
 ### Developer / maintainer
 
 | ID | Story | Acceptance criteria | Status |
 |----|-------|---------------------|--------|
-| US-10 | As a developer, I want to test one vehicle without full sync. | `fb_post_test.py --autosell-id obj969` succeeds. | Done (account_1) |
-| US-11 | As a developer, I want autosell fields mapped when FB requires extra dropdowns. | `categorize.py` fills body style, colors, fuel, etc. | Done |
+| US-10 | As a developer, I want to test one vehicle without full sync. | `fb_post_test.py --autosell-id obj969` succeeds. | Done (all 3 accounts) |
+| US-11 | As a developer, I want EN and ES Marketplace UIs supported. | Labels like Marca, Carrocería, Estado del vehículo. | Done |
 | US-12 | As a developer, I want false-positive “posted” URLs rejected. | Verify requires brand + price/model on item page. | Done |
 
 ### End buyer (indirect)
@@ -251,19 +311,21 @@ stateDiagram-v2
 | QA-01 | Scrape | `python run_sync.py --scrape-only` | ≥130 vehicles, no timeout |
 | QA-02 | Dry-run diff | `python run_sync.py --dry-run` | Actions listed; no FB browser |
 | QA-03 | Session | `scripts/fb_test_session.py --account account_N` | Logged-in marketplace page |
-| QA-04 | Single post | `scripts/fb_post_test.py --account account_1 --autosell-id obj969` | `Posted:` URL; dashboard shows Audi A3 |
-| QA-05 | URL lookup | `scripts/fb_find_listing.py --account account_1 --autosell-id obj969` | URL contains correct brand/price on item page |
+| QA-04 | Single post (each account) | `scripts/fb_post_test.py --account account_N --autosell-id obj969` | `Posted:` URL; dashboard shows Audi A3 |
+| QA-05 | URL lookup | `scripts/fb_find_listing.py --account account_N --autosell-id obj969` | URL contains correct brand/price on item page |
 | QA-06 | Categorization | `python -c "from src.facebook.categorize import categorize_vehicle; …"` | Sensible body/color/fuel for sample vehicles |
 | QA-07 | CI workflow | Manual **Run workflow** on GitHub | Green on `fb-worker`; artifact uploaded |
 | QA-08 | Persistence | Re-run workflow | `sync.db` row counts grow; sessions unchanged |
+| QA-09 | Mini live (later) | Cap 1–2, `DRY_RUN=false`, one run | Few creates on all accounts; no flood |
 
 ### Regression scenarios (Facebook form)
 
 | Scenario | Input | Expected FB values |
 |----------|-------|-------------------|
-| Sedan, Spanish marca | Audi, `A 3`, 92k km | Make Audi, Model A3, Sedan, Silver |
+| Spanish UI (es-MX) | Audi, `A 3` | Marca Audi, Modelo A3, Carrocería Sedán |
+| English UI | Audi, `A 3` | Make Audi, Model A3, Body style Sedan |
 | SUV slug | `cx-50`, Mazda | Body style SUV |
-| Pickup | Ram 1500 | Body style Truck, type Car/Truck |
+| Pickup | Ram 1500 | Body style Truck / Camioneta |
 | Mercedes naming | `Mercedes Benz` | Make **Mercedes-Benz** |
 | KIA casing | `KIA` | Make **Kia** |
 
@@ -271,10 +333,11 @@ stateDiagram-v2
 
 | Area | Status | Notes |
 |------|--------|-------|
-| Unit: `categorize.py` | Planned | No `tests/` package yet — run inline checks |
-| Unit: `parse_mxn_price`, mileage | Planned | Pure functions in `util.py` / `categorize.py` |
+| Unit: `categorize.py` | Planned | No `tests/` package yet |
+| Unit: `parse_mxn_price`, mileage | Planned | Pure functions |
 | Integration: scrape | Manual | Requires autosell reachability |
-| E2E: FB post | Manual | `fb_post_test.py` on fb-worker only |
+| E2E: FB post | Manual | `fb_post_test.py` local or on fb-worker |
+| Mini live sync | Planned | Cap 1–2 before full `DRY_RUN=false` |
 
 **Suggested local categorization smoke test:**
 
@@ -332,6 +395,8 @@ mindmap
 | Wrong listing URL returned | Dashboard match + strict `_verify_listing_url` |
 | Form UI changes | Debug PNGs; labeled button helpers in `ui.py` |
 | Rate limits / spam flags | Delays between actions; 10 posts/account/run cap |
+| Duplicate listings at go-live | Clear old FB inventory before `DRY_RUN=false` |
+| Mass-delete on Facebook | Not reliable via API; mark sold / delete manually |
 
 ---
 
@@ -342,5 +407,6 @@ mindmap
 | **fb-worker** | Self-hosted GitHub Actions runner (label) on Oracle or Mac Mini |
 | **DRY_RUN** | When `true`, plan FB actions but do not execute |
 | **autosell_id** | Internal id e.g. `obj969` |
-| **content_hash** | Detects catalog changes for update actions |
-| **Being reviewed** | FB moderation state for new listings — normal short-term |
+| **content_hash** | Detects catalog changes (price, photos, title, …) for update actions |
+| **Being reviewed** / **Se está revisando** | FB moderation for new listings — normal short-term |
+| **Lean session** | Session copy without browser Cache/GPUCache (few MB vs 100MB+) |

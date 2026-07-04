@@ -20,7 +20,12 @@ from src.facebook.ui import (
     wait_for_composer_next_enabled,
     wait_for_photo_previews,
 )
-from src.facebook.categorize import ListingAttributes, categorize_vehicle, fb_model_name
+from src.facebook.categorize import (
+    ListingAttributes,
+    categorize_vehicle,
+    fb_model_name,
+    spanish_candidates,
+)
 from src.facebook.util import (
     mileage_for_listing,
     parse_mxn_price,
@@ -184,16 +189,17 @@ def _fill_vehicle_form(
     # appearance -> vehicle details -> description
     _fill_vehicle_type(page, attrs)
 
+    # Spanish (es-MX) labels first — account_2+ often use Spanish Marketplace UI.
     core_fields: list[tuple[str, str, tuple[str, ...], str]] = [
-        ("location", city, ("Location", "Ubicación", "Ciudad"), "text"),
-        ("year", vehicle.year, ("Year", "Año", "Model year", "Año del modelo"), "listbox"),
-        ("make", attrs.make, ("Make", "Marca"), "make"),
-        ("model", attrs.model, ("Model", "Modelo"), "text"),
+        ("location", city, ("Ubicación", "Location", "Ciudad"), "text"),
+        ("year", vehicle.year, ("Año", "Year", "Año del modelo", "Model year"), "listbox"),
+        ("make", attrs.make, ("Marca", "Make"), "make"),
+        ("model", attrs.model, ("Modelo", "Model"), "text"),
         ("mileage", attrs.mileage_km, (
-            "Mileage", "Kilometraje", "Odometer", "Odometro", "Odómetro",
-            "Kilometers", "Kilómetros", "Kilometros", "Vehicle mileage",
+            "Kilometraje", "Mileage", "Odómetro", "Odometro", "Odometer",
+            "Kilómetros", "Kilometros", "Kilometers", "Vehicle mileage",
         ), "mileage"),
-        ("price", parse_mxn_price(vehicle.price), ("Price", "Precio"), "text"),
+        ("price", parse_mxn_price(vehicle.price), ("Precio", "Price"), "text"),
     ]
 
     for name, value, labels, mode in core_fields:
@@ -223,13 +229,16 @@ def _fill_vehicle_form(
     _fill_vehicle_detail_fields(page, attrs)
 
     description = vehicle_description(vehicle)
-    if _fill_vehicle_field(page, ("Description", "Descripción"), description, multiline=True):
+    if _fill_vehicle_field(page, ("Descripción", "Description"), description, multiline=True):
         filled_names.add("description")
         print("  filled description")
     else:
         print("  MISSING description")
 
     _scroll_composer_sidebar(page)
+    # Second pass for fields that only appear after scrolling / prior fills
+    _fill_appearance_fields(page, attrs)
+    _fill_vehicle_detail_fields(page, attrs)
 
     try:
         wait_for_composer_next_enabled(page, timeout_ms=45_000)
@@ -244,8 +253,10 @@ def _fill_vehicle_form(
         except FacebookPostingError:
             _save_debug(page, log_dir, autosell_id, "next_disabled_pre_review")
             _log_composer_comboboxes(page)
-            print("  WARN Next disabled; force-clicking to advance")
-            click_labeled_action(page, NEXT_LABELS, timeout_ms=15_000, allow_force=True)
+            raise FacebookPostingError(
+                "Composer Next stayed disabled — required fields still empty "
+                "(check Carrocería / Color del exterior / Estado del vehículo)."
+            )
 
     click_labeled_action(page, NEXT_LABELS, timeout_ms=60_000)
     log_page_state(page, "after_form_next")
@@ -804,27 +815,50 @@ def _normalize_fb_url(href: str) -> str | None:
 
 
 def _fill_vehicle_type(page: Page, attrs: ListingAttributes) -> bool:
-    labels = ("Vehicle type", "Tipo de vehículo", "Tipo")
-    candidates = _field_candidates(attrs.vehicle_type, "Car/Truck", "Car", "Coche")
+    # Live es-MX label text from combobox dump: "Tipo de vehículo\nAuto/camioneta"
+    labels = ("Tipo de vehículo", "Vehicle type", "Tipo")
+    candidates = spanish_candidates("vehicle_type", attrs.vehicle_type)
     return _select_from_combobox_list(page, labels, candidates)
 
 
 def _fill_appearance_fields(page: Page, attrs: ListingAttributes) -> None:
     """Vehicle appearance: body style, exterior color, interior color."""
+    # Labels from live es-MX dump: Carrocería, Color del exterior, Color del interior
     appearance: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
-        (("Body style", "Body Style", "Estilo de carrocería"), _field_candidates(
-            attrs.body_style, "Sedan", "SUV", "Truck", "Hatchback", "Coupe", "Minivan", "Small Car", "Other",
-        )),
-        (("Exterior color", "Color exterior", "Exterior Color"), _field_candidates(
-            attrs.exterior_color, "Silver", "Gray", "Black", "White", "Red", "Blue", "Other",
-        )),
-        (("Interior color", "Color interior", "Interior Color"), _field_candidates(
-            attrs.interior_color, "Black", "Gray", "Beige", "White", "Other",
-        )),
+        (
+            (
+                "Carrocería",
+                "Estilo de carrocería",
+                "Estilo",
+                "Body style",
+                "Body Style",
+            ),
+            spanish_candidates("body_style", attrs.body_style),
+        ),
+        (
+            (
+                "Color del exterior",
+                "Color exterior",
+                "Exterior color",
+                "Exterior Color",
+            ),
+            spanish_candidates("exterior_color", attrs.exterior_color),
+        ),
+        (
+            (
+                "Color del interior",
+                "Color interior",
+                "Interior color",
+                "Interior Color",
+            ),
+            spanish_candidates("interior_color", attrs.interior_color),
+        ),
     ]
     for labels, candidates in appearance:
         if _select_from_combobox_list(page, labels, candidates):
             print(f"  filled {labels[0]}")
+        else:
+            print(f"  MISSING {labels[0]}")
 
 
 def _fill_vehicle_detail_fields(page: Page, attrs: ListingAttributes) -> None:
@@ -832,22 +866,37 @@ def _fill_vehicle_detail_fields(page: Page, attrs: ListingAttributes) -> None:
     if _check_clean_title(page):
         print("  checked clean_title")
 
+    # Live es-MX: Estado del vehículo (not Condición del vehículo)
     details: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
-        (("Vehicle condition", "Condición del vehículo", "Condition"), _field_candidates(
-            attrs.condition, "Excellent", "Good", "Fair", "Poor",
-        )),
-        (("Fuel type", "Fuel Type", "Tipo de combustible", "Combustible"), _field_candidates(
-            attrs.fuel_type, "Gasoline", "Diesel", "Electric", "Hybrid", "Flex", "Other",
-        )),
-        (("Transmission", "Transmisión", "Tipo de transmisión"), _field_candidates(
-            attrs.transmission, "Automatic transmission", "Manual transmission",
-        )),
+        (
+            (
+                "Estado del vehículo",
+                "Condición del vehículo",
+                "Condición",
+                "Vehicle condition",
+                "Condition",
+            ),
+            spanish_candidates("condition", attrs.condition),
+        ),
+        (
+            ("Tipo de combustible", "Combustible", "Fuel type", "Fuel Type"),
+            spanish_candidates("fuel_type", attrs.fuel_type),
+        ),
+        (
+            ("Transmisión", "Tipo de transmisión", "Transmission"),
+            spanish_candidates("transmission", attrs.transmission),
+        ),
     ]
     for labels, candidates in details:
         if _select_from_combobox_list(page, labels, candidates):
             print(f"  filled {labels[0]}")
-        elif labels[0] == "Vehicle condition" and _fill_vehicle_condition(page):
-            print("  filled Vehicle condition (direct)")
+        elif any("estado" in label.lower() or "condici" in label.lower() or "condition" in label.lower() for label in labels):
+            if _fill_vehicle_condition(page):
+                print("  filled Vehicle condition (direct)")
+            else:
+                print(f"  MISSING {labels[0]}")
+        else:
+            print(f"  MISSING {labels[0]}")
 
 
 def _fill_about_vehicle_fields(page: Page, attrs: ListingAttributes) -> None:
@@ -951,13 +1000,22 @@ def _log_composer_comboboxes(page: Page) -> None:
 
 def _fill_vehicle_condition(page: Page) -> bool:
     locators = [
-        page.locator('[role="combobox"][aria-label*="condition" i]'),
+        page.locator('[role="combobox"][aria-label*="estado" i]'),
         page.locator('[role="combobox"][aria-label*="condición" i]'),
-        page.get_by_role("combobox", name=re.compile(r"condition|condición", re.I)),
-        page.locator('text=Vehicle condition').locator('xpath=following::*[@role="combobox"][1]'),
+        page.locator('[role="combobox"][aria-label*="condition" i]'),
+        page.get_by_role("combobox", name=re.compile(r"estado|condición|condition", re.I)),
+        page.locator('[role="combobox"]').filter(has_text=re.compile(r"^Estado del vehículo", re.I)),
+        page.locator('text=Estado del vehículo').locator('xpath=following::*[@role="combobox"][1]'),
         page.locator('text=Condición del vehículo').locator('xpath=following::*[@role="combobox"][1]'),
+        page.locator('text=Vehicle condition').locator('xpath=following::*[@role="combobox"][1]'),
     ]
-    labels = ("Vehicle condition", "Condición del vehículo", "Condition")
+    labels = (
+        "Estado del vehículo",
+        "Condición del vehículo",
+        "Vehicle condition",
+        "Condición",
+        "Condition",
+    )
     for locator in locators:
         try:
             if locator.count() == 0:
@@ -993,7 +1051,13 @@ def _check_clean_title(page: Page) -> bool:
     try:
         checked = page.evaluate(
             """() => {
-                const words = ['clean title', 'título limpio', 'titulo limpio'];
+                const words = [
+                  'clean title',
+                  'título limpio',
+                  'titulo limpio',
+                  'tiene un título limpio',
+                  'tiene un titulo limpio',
+                ];
                 for (const el of document.querySelectorAll('[role="checkbox"], input[type="checkbox"]')) {
                   let node = el;
                   for (let depth = 0; depth < 6 && node; depth++) {
@@ -1123,7 +1187,39 @@ def _combobox_contains_value(box: Locator, value: str) -> bool:
 
 
 def _fill_make_combobox(page: Page, make: str) -> bool:
-    return _select_from_combobox_list(page, ("Make", "Marca"), (make,))
+    """Fill Marca / Make — searchable listbox on Spanish and English UI."""
+    labels = ("Marca", "Make")
+    if _select_from_combobox_list(page, labels, (make,)):
+        return True
+    # Fallback: click visible "Marca" label, type brand, pick option.
+    for label in labels:
+        try:
+            label_node = page.get_by_text(label, exact=True)
+            if not label_node.count():
+                continue
+            target = label_node.first
+            if not target.is_visible():
+                continue
+            target.scroll_into_view_if_needed()
+            target.click()
+            page.wait_for_timeout(600)
+            page.keyboard.press("Control+a")
+            page.keyboard.press("Backspace")
+            page.keyboard.type(make, delay=40)
+            page.wait_for_timeout(1_500)
+            if _pick_option_from_list(page, make):
+                page.wait_for_timeout(700)
+                if _combobox_has_value(page, labels, make):
+                    return True
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(700)
+            if _combobox_has_value(page, labels, make):
+                return True
+            page.keyboard.press("Escape")
+        except Exception:
+            continue
+    # Last resort: treat as plain text input (some locales).
+    return _fill_vehicle_field(page, labels, make)
 
 
 def _select_from_combobox_list(
@@ -1139,6 +1235,11 @@ def _select_from_combobox_list(
         if candidate and _combobox_contains_value(box, candidate):
             return True
 
+    type_to_filter = any(
+        label.lower() in {"make", "marca", "year", "año", "model year", "año del modelo"}
+        for label in labels
+    )
+
     try:
         box.scroll_into_view_if_needed()
         box.click()
@@ -1146,7 +1247,7 @@ def _select_from_combobox_list(
         for candidate in candidates:
             if not candidate:
                 continue
-            if labels[0] in ("Make", "Marca", "Year", "Año"):
+            if type_to_filter:
                 page.keyboard.press("Control+a")
                 page.keyboard.press("Backspace")
                 page.keyboard.type(candidate, delay=35)
@@ -1158,7 +1259,10 @@ def _select_from_combobox_list(
                     return True
         page.keyboard.press("Escape")
     except Exception:
-        page.keyboard.press("Escape")
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
     return False
 
 
@@ -1190,39 +1294,87 @@ def _find_combobox(page: Page, labels: tuple[str, ...]) -> Locator | None:
     for label in labels:
         for locator in (
             page.get_by_role("combobox", name=label),
+            page.get_by_role("combobox", name=re.compile(rf"^{re.escape(label)}$", re.I)),
             page.get_by_role("combobox", name=re.compile(re.escape(label), re.I)),
+            page.get_by_label(label),
             page.locator(f'[role="combobox"][aria-label="{label}"]'),
             page.locator(f'[role="combobox"][aria-label*="{label}" i]'),
             page.locator(f'[aria-haspopup="listbox"][aria-label*="{label}" i]'),
+            # Empty es-MX fields show only the label text (e.g. "Carrocería")
+            page.locator('[role="combobox"]').filter(
+                has_text=re.compile(rf"^{re.escape(label)}\s*$", re.I)
+            ),
             page.locator('[role="combobox"]').filter(
                 has_text=re.compile(rf"^{re.escape(label)}(?:\n|$)", re.I)
             ),
             page.locator('[role="combobox"]').filter(
                 has_text=re.compile(rf"^{re.escape(label)}\b", re.I)
             ),
+            # Floating label "Marca" / "Año" / "Carrocería" inside composer sidebar
+            page.locator(f'span:text-is("{label}")').locator(
+                "xpath=ancestor::*[@role='combobox'][1]"
+            ),
+            page.locator(f'label:text-is("{label}")').locator(
+                "xpath=following::*[@role='combobox'][1]"
+            ),
             page.locator(f'text={label}').locator('xpath=ancestor::*[@role="combobox"][1]'),
+            page.locator(f'text={label}').locator(
+                'xpath=following::*[@role="combobox" or @role="textbox"][1]'
+            ),
         ):
             try:
-                if locator.count() and locator.first.is_visible():
-                    return locator.first
+                if locator.count() == 0:
+                    continue
+                candidate = locator.first
+                if candidate.is_visible():
+                    return candidate
             except Exception:
                 continue
+    # JS fallback: match combobox whose visible text starts with the label
+    for label in labels:
+        try:
+            handle = page.evaluate_handle(
+                """(label) => {
+                    const needle = label.toLowerCase();
+                    for (const el of document.querySelectorAll('[role="combobox"]')) {
+                      const rect = el.getBoundingClientRect();
+                      if (rect.width <= 0 || rect.height <= 0) continue;
+                      const text = (el.innerText || '').trim().toLowerCase();
+                      if (text === needle || text.startsWith(needle + '\\n') || text.startsWith(needle + ' ')) {
+                        return el;
+                      }
+                    }
+                    return null;
+                }""",
+                label,
+            )
+            element = handle.as_element()
+            if element is not None:
+                return page.locator(f'[role="combobox"]').filter(
+                    has_text=re.compile(rf"^{re.escape(label)}", re.I)
+                ).first
+        except Exception:
+            continue
     return None
 
 
 def _ensure_required_comboboxes(
     page: Page, vehicle: Vehicle, attrs: ListingAttributes
 ) -> None:
-    if not _combobox_has_value(page, ("Year", "Año", "Model year"), vehicle.year):
-        _select_from_combobox_list(page, ("Year", "Año", "Model year"), (vehicle.year,))
-    if not _combobox_has_value(page, ("Make", "Marca"), attrs.make):
+    year_labels = ("Año", "Year", "Año del modelo", "Model year")
+    make_labels = ("Marca", "Make")
+    model_labels = ("Modelo", "Model")
+
+    if not _combobox_has_value(page, year_labels, vehicle.year):
+        _select_from_combobox_list(page, year_labels, (vehicle.year,))
+    if not _combobox_has_value(page, make_labels, attrs.make):
         _fill_make_combobox(page, attrs.make)
-    if not _text_field_has_value(page, ("Model", "Modelo"), attrs.model):
-        _fill_vehicle_field(page, ("Model", "Modelo"), attrs.model)
+    if not _text_field_has_value(page, model_labels, attrs.model):
+        _fill_vehicle_field(page, model_labels, attrs.model)
 
     for name, labels, value in (
-        ("year", ("Year", "Año", "Model year"), vehicle.year),
-        ("make", ("Make", "Marca"), attrs.make),
+        ("year", year_labels, vehicle.year),
+        ("make", make_labels, attrs.make),
     ):
         if not value:
             continue

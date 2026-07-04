@@ -36,6 +36,7 @@ MAKE_ALIASES: dict[str, str] = {
     "volkswagen": "Volkswagen",
 }
 
+# English defaults (account_1 / EN UI). Spanish aliases are applied at fill time.
 DEFAULT_EXTERIOR = "Silver"
 DEFAULT_INTERIOR = "Black"
 DEFAULT_FUEL = "Gasoline"
@@ -43,6 +44,56 @@ DEFAULT_TRANSMISSION = "Automatic transmission"
 DEFAULT_CONDITION = "Excellent"
 DEFAULT_VEHICLE_TYPE = "Car/Truck"
 DEFAULT_BODY_STYLE = "Sedan"
+
+# Spanish Marketplace option labels (es-MX UI)
+# Exact option text from es-MX Marketplace (case-sensitive in UI)
+ES_VEHICLE_TYPE = ("Auto/camioneta", "Auto/Camioneta", "Coche", "Camioneta", "Auto")
+ES_BODY_STYLE = {
+    "Sedan": ("Sedán", "Sedan"),
+    "SUV": ("SUV", "Camioneta SUV"),
+    "Truck": ("Camioneta", "Pickup", "Truck"),
+    "Hatchback": ("Hatchback", "Compacto"),
+    "Coupe": ("Coupé", "Coupe"),
+    "Minivan": ("Minivan", "Van"),
+    "Convertible": ("Convertible",),
+    "Wagon": ("Wagon", "Familiar"),
+    "Small Car": ("Auto pequeño", "Small Car"),
+    "Other": ("Otro", "Other"),
+}
+ES_EXTERIOR = {
+    "Silver": ("Plata", "Silver"),
+    "Gray": ("Gris", "Gray"),
+    "Black": ("Negro", "Black"),
+    "White": ("Blanco", "White"),
+    "Red": ("Rojo", "Red"),
+    "Blue": ("Azul", "Blue"),
+    "Other": ("Otro", "Other"),
+}
+ES_INTERIOR = {
+    "Black": ("Negro", "Black"),
+    "Gray": ("Gris", "Gray"),
+    "Beige": ("Beige",),
+    "White": ("Blanco", "White"),
+    "Other": ("Otro", "Other"),
+}
+ES_FUEL = {
+    "Gasoline": ("Gasolina", "Gasoline"),
+    "Diesel": ("Diésel", "Diesel"),
+    "Electric": ("Eléctrico", "Electric"),
+    "Hybrid": ("Híbrido", "Hybrid"),
+    "Flex": ("Flex",),
+    "Other": ("Otro", "Other"),
+}
+ES_TRANSMISSION = {
+    "Automatic transmission": ("Transmisión automática", "Automatic transmission", "Automática"),
+    "Manual transmission": ("Transmisión manual", "Manual transmission", "Manual"),
+}
+ES_CONDITION = {
+    "Excellent": ("Excelente", "Excellent"),
+    "Good": ("Bueno", "Good"),
+    "Fair": ("Regular", "Fair"),
+    "Poor": ("Malo", "Poor"),
+}
 
 DIESEL_MARKERS = (
     "diesel", "tdi", "duramax", "powerstroke", "cummins", "ecoblue", "bluetec",
@@ -297,3 +348,30 @@ def _infer_vehicle_type(haystack: str) -> str:
     if any(marker in haystack for marker in ("can-am", "can am", "atv", "cuatrimoto")):
         return "Powersport"
     return DEFAULT_VEHICLE_TYPE
+
+
+def spanish_candidates(field: str, primary: str) -> tuple[str, ...]:
+    """Ordered option labels for es-MX Marketplace UI (Spanish first)."""
+    tables: dict[str, dict[str, tuple[str, ...]]] = {
+        "body_style": ES_BODY_STYLE,
+        "exterior_color": ES_EXTERIOR,
+        "interior_color": ES_INTERIOR,
+        "fuel_type": ES_FUEL,
+        "transmission": ES_TRANSMISSION,
+        "condition": ES_CONDITION,
+    }
+    if field == "vehicle_type":
+        aliases = (*ES_VEHICLE_TYPE, primary, "Car/Truck", "Car")
+    else:
+        aliases = (*tables.get(field, {}).get(primary, ()), primary)
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for candidate in aliases:
+        if not candidate:
+            continue
+        key = candidate.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(candidate)
+    return tuple(ordered)

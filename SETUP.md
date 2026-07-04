@@ -10,9 +10,9 @@
 
 Your daily PC can stay off. Only **fb-worker** must be always on and registered before workflows can run.
 
-Phase 0–1: scrape + diff planning. **Phase 2 (Facebook):** Playwright posting is implemented and verified manually on `account_1` (test vehicle `obj969` — 2020 Audi A3). Scheduled sync still uses `DRY_RUN=true` until you enable live posting for all accounts.
+Phase 0–1: scrape + diff. **Phase 2 (Facebook):** Playwright posting works on **all three accounts** (English and Spanish Marketplace UI). Sessions are on fb-worker. Scheduled sync still uses **`DRY_RUN=true`** until operators clear old listings and enable live posting.
 
-**Extended docs:** [docs/PROJECT_GUIDE.md](./docs/PROJECT_GUIDE.md) — architecture diagrams, user stories, QA checklists, statistics, rollout timeline.
+**Extended docs:** [docs/PROJECT_GUIDE.md](./docs/PROJECT_GUIDE.md) — sync rules, go-live checklist, planned work, diagrams.
 
 ---
 
@@ -219,13 +219,24 @@ python scripts/fb_login.py --account account_1
 python scripts/fb_test_session.py --account account_1
 ```
 
-Copy sessions to fb-worker if login was local:
+Copy sessions to fb-worker if login was local. Prefer a **lean tarball** (skip browser caches — full profiles are 100–200MB each):
 
 ```bash
-scp -r sessions/account_1 ubuntu@YOUR_VPS_IP:~/auto-upload-data/sessions/
+# From repo root on your PC
+cd sessions
+tar --exclude='*/Cache' --exclude='*/Code Cache' --exclude='*/GPUCache' \
+    --exclude='*/Service Worker' --exclude='*/BrowserMetrics' \
+    -czf /tmp/account_N-session.tgz account_N
+scp -i YOUR_KEY /tmp/account_N-session.tgz ubuntu@YOUR_VPS_IP:/tmp/
+ssh ubuntu@YOUR_VPS_IP 'tar -xzf /tmp/account_N-session.tgz -C ~/auto-upload-data/sessions'
 ```
 
-Repeat for `account_2` and `account_3`.
+Repeat for `account_1`, `account_2`, and `account_3`. Verify on the VM:
+
+```bash
+python scripts/fb_test_session.py --account account_N
+# Logged in: True
+```
 
 ### E2. Test one listing (before live sync)
 
@@ -251,52 +262,56 @@ python scripts/fb_find_listing.py --account account_1 --autosell-id obj969
 
 Debug screenshots: `data/logs/facebook/{autosell_id}_*.png`
 
-### E3. Autosell → Facebook field mapping
+### E3. Autosell → Facebook field mapping (EN + ES)
 
-The poster fills FB’s vehicle composer in this order. Values come from the autosell catalog plus `src/facebook/categorize.py` when autosell has no equivalent field.
+The poster is **bilingual**: Spanish labels first (es-MX UI), English fallback. Internal values stay English; option text tries Spanish then English (e.g. `Plata` / `Silver`).
 
-| Autosell / source | Facebook field | Notes |
-|-------------------|----------------|-------|
-| `brand` (Marca) | **Make** | Searchable dropdown — must click option (e.g. Audi) |
-| `title` | **Model** | Text input; normalized (`A 3` → `A3`) |
-| `year` | **Year** | Dropdown |
-| `mileage` (Kilometraje) | **Mileage** | Digits only (`92,000 kms` → `92000`) |
-| `price` (Precio) | **Price** | Digits only |
-| `location_city` in config | **Location** | Default Chihuahua |
-| inferred | **Vehicle type** | Usually `Car/Truck` |
-| inferred | **Body style** | Sedan, SUV, Truck, Hatchback, … |
-| inferred | **Exterior color** | Default Silver |
-| inferred | **Interior color** | Default Black |
-| inferred | **Fuel type** | Default Gasoline |
-| inferred | **Transmission** | `Automatic transmission` |
-| inferred | **Vehicle condition** | Default Excellent |
-| — | **Clean title** | Checked |
-| generated | **Description** | Title, km, specs, autosell URL |
+| Autosell / source | EN label | ES label (live UI) | Notes |
+|-------------------|----------|--------------------|-------|
+| `brand` | Make | **Marca** | Searchable list — click option (Audi, …) |
+| `title` | Model | **Modelo** | Text; `A 3` → `A3` |
+| `year` | Year | **Año** | Dropdown |
+| `mileage` | Mileage | **Kilometraje** | Digits only |
+| `price` | Price | **Precio** | Digits only |
+| config city | Location | **Ubicación** | Default Chihuahua |
+| inferred | Vehicle type | **Tipo de vehículo** | `Auto/camioneta` / `Car/Truck` |
+| inferred | Body style | **Carrocería** | Sedán / Sedan, … |
+| inferred | Exterior color | **Color del exterior** | Plata / Silver |
+| inferred | Interior color | **Color del interior** | Negro / Black |
+| inferred | Fuel type | **Tipo de combustible** | Gasolina / Gasoline |
+| inferred | Transmission | **Transmisión** | Transmisión automática |
+| inferred | Condition | **Estado del vehículo** | Excelente / Excellent |
+| — | Clean title | título limpio | Checked |
+| generated | Description | **Descripción** | Title, km, specs, autosell URL |
 
-Make/model/year must verify on the form before **Next** is enabled. The script only reports success after the listing URL matches **brand + price or model** on the item page (not year alone — avoids false matches from “Joined Facebook in 2020”).
+Success requires a listing URL that matches **brand + price or model** (year alone is not enough).
 
 ```mermaid
 flowchart LR
-    AS["autosell.mx<br/>Marca, modelo, km, precio"]
-    CAT["categorize.py<br/>+ defaults"]
-    FB["FB composer<br/>Make, Model, Mileage, …"]
+    AS["autosell.mx"]
+    CAT["categorize.py"]
+    FB["FB composer EN/ES"]
     AS --> CAT --> FB
 ```
 
-### E4. Enable live sync
+### E4. Enable live sync (go-live)
+
+**Do this only after old Marketplace inventory is cleared** (see [PROJECT_GUIDE go-live checklist](./docs/PROJECT_GUIDE.md#go-live-checklist)).
 
 ```mermaid
 flowchart TD
-    A[Manual post OK account_1] --> B[Sessions account_2 & account_3]
-    B --> C[QA checklist in PROJECT_GUIDE]
-    C --> D[Set DRY_RUN=false secret]
-    D --> E[Monitor 2 scheduled runs]
+    A[Manual post OK all 3 accounts] --> B[Clear old FB listings manually]
+    B --> C[Optional: reset fb_listings in sync.db]
+    C --> D[Mini live test cap 1-2 - later]
+    D --> E[Set DRY_RUN=false]
     E --> F[~420 listings over ~7 days]
 ```
 
-1. Verify manual post on each account.
-2. Set GitHub secret `DRY_RUN=false`.
-3. Monitor first scheduled runs; default cap is `MAX_POSTS_PER_ACCOUNT_PER_RUN=10` per run (~420 listings total at 3 accounts × ~140 vehicles).
+1. Confirm `fb_test_session.py` and a test post on each account.
+2. On each FB account: **mark sold or delete** existing active listings (Facebook has no reliable mass-delete API; do this by hand).
+3. Optional: clear `fb_listings` in `sync.db` on the VM for a true fresh start.
+4. Set GitHub secret `DRY_RUN=false` (optionally start with `MAX_POSTS_PER_ACCOUNT_PER_RUN=2` for a mini run).
+5. Monitor scheduled runs; default cap is 10 posts/account/run.
 
 ```bash
 # Full pipeline locally (respects DRY_RUN in .env)
@@ -337,8 +352,10 @@ python run_sync.py --from-snapshot data/catalog_latest.json --dry-run
 | Facebook checkpoint | Re-login via `fb_login.py`; copy session to fb-worker |
 | Next disabled on FB form | Check `data/logs/facebook/*_next_disabled*.png`; usually missing Make or vehicle details |
 | Script prints wrong item URL | Dashboard is source of truth; `fb_find_listing.py` uses strict brand+price match |
-| Listing “being reviewed” | Normal for new posts; appears on dashboard before public item page stabilizes |
+| Listing “being reviewed” / “Se está revisando” | Normal for new posts |
 | `pip install` blocked (Ubuntu 24.04) | Use project `.venv`, never system pip |
+| Duplicate cars after go-live | Clear old FB listings first; app only tracks `sync.db` |
+| Mass delete on Facebook | Not available reliably; mark sold / delete by hand |
 
 ---
 

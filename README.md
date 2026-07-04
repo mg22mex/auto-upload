@@ -2,19 +2,20 @@
 
 Sync [autosell.mx](https://www.autosell.mx) public catalog to Facebook Marketplace (Chihuahua, MX) across three personal accounts.
 
-**Status:** Phase 0–1 (scrape + diff) and **Phase 2** (Facebook posting via Playwright) are implemented. Live scheduled posting stays off until `DRY_RUN=false` in GitHub Secrets. Manual test post verified on `account_1` (2020 Audi A3, `obj969`).
+**Status:** Scrape, diff, and Playwright posting work. Manual posts verified on **all three accounts** (Spanish + English UI). Sessions live on fb-worker. **Scheduled live posting is still off** (`DRY_RUN=true`) until operators clear old Marketplace listings and enable live sync.
 
-📖 **[Full project guide — diagrams, user stories, QA, statistics](./docs/PROJECT_GUIDE.md)** · **[Setup instructions](./SETUP.md)**
+📖 **[Full project guide](./docs/PROJECT_GUIDE.md)** · **[Setup](./SETUP.md)**
 
 ## At a glance
 
 | | |
 |--:|--|
 | **Vehicles** | ~140 public catalog |
-| **FB accounts** | 3 |
+| **FB accounts** | 3 (sessions on VM) |
 | **Target listings** | ~420 (140 × 3) |
 | **Schedule** | 2× daily (Chihuahua) |
 | **Posts/run/account** | 10 (configurable) |
+| **Live sync** | Off (`DRY_RUN=true`) |
 
 ## System overview
 
@@ -33,13 +34,13 @@ flowchart LR
     FB --> DB[(sync.db)]
 ```
 
+The planner only manages listings **recorded in `sync.db`**. It does **not** scan Facebook’s “Your listings” for manual posts. Clear old inventory before go-live to avoid duplicates (see [PROJECT_GUIDE](./docs/PROJECT_GUIDE.md#go-live-checklist)).
+
 ## Pipeline
 
 | Job | Host | Action |
 |-----|------|--------|
-| **sync** | Self-hosted `fb-worker` | Scrape → diff → Facebook create/update/remove |
-
-> GitHub cloud runners cannot reach autosell.mx (connect timeout). Register **fb-worker** before workflows run.
+| **sync** | Self-hosted `fb-worker` | Scrape → diff → create / update / remove on FB |
 
 ## Key scripts
 
@@ -51,7 +52,7 @@ flowchart LR
 | `scripts/fb_post_test.py` | Post one vehicle (e.g. `--autosell-id obj969`) |
 | `scripts/fb_find_listing.py` | Resolve listing URL from dashboard |
 
-Facebook logic: `src/facebook/` (`poster.py`, `categorize.py`, `session.py`, `executor.py`).
+Facebook logic: `src/facebook/` (`poster.py`, `categorize.py`, bilingual EN/ES labels).
 
 ## Quick start (local)
 
@@ -66,15 +67,15 @@ python run_sync.py --dry-run
 ## Production setup
 
 1. Push to GitHub and add secrets (see `.env.example`).
-2. Register a self-hosted runner with label **`fb-worker`** (Oracle free VPS or Mac Mini).
-3. Follow **[SETUP.md](./SETUP.md)** — sessions, test post, field mapping, enable live sync.
-4. Review **[docs/PROJECT_GUIDE.md](./docs/PROJECT_GUIDE.md)** — architecture diagrams, QA checklist, rollout timeline.
+2. Register **`fb-worker`** (Oracle free VPS or Mac Mini).
+3. Follow **[SETUP.md](./SETUP.md)** — sessions, Spanish/English form fields, go-live checklist.
+4. Review **[docs/PROJECT_GUIDE.md](./docs/PROJECT_GUIDE.md)** — sync rules, planned work, mini live test (later).
 
 Persistent state on fb-worker:
 
 - `~/auto-upload-data/data/sync.db`
-- `~/auto-upload-data/sessions/account_*`
-- Working clone recommended at `~/auto-upload` (pull before manual tests)
+- `~/auto-upload-data/sessions/account_*` (lean copies without browser cache)
+- Working clone: `~/auto-upload`
 
 ## Rollout timeline
 
@@ -84,10 +85,12 @@ gantt
     dateFormat YYYY-MM
     section Done
         Scrape + diff           :done, p0, 2026-05, 2026-06
-        Playwright posting      :done, p2, 2026-06, 2026-06
+        Playwright posting      :done, p2, 2026-06, 2026-07
+        All 3 account sessions  :done, p2b, 2026-07, 2026-07
     section Next
-        Accounts 2 & 3 sessions :active, p2b, 2026-06, 2026-07
-        DRY_RUN=false live sync :p2c, after p2b, 7d
+        Clear old FB listings   :active, p2c, 2026-07, 2026-07
+        Mini live test (cap 1-2):p2d, after p2c, 2d
+        DRY_RUN=false full drain:p2e, after p2d, 7d
     section Steady
-        Twice-daily maintenance :p3, after p2c, 2026-12
+        Twice-daily maintenance :p3, after p2e, 2026-12
 ```
