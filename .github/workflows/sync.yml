@@ -33,7 +33,7 @@ jobs:
           # (bare `pip` on self-hosted runners often targets a different Python).
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
-          python -c "import playwright; print('playwright', playwright.__version__)"
+          python -c "from playwright.sync_api import sync_playwright; print('playwright OK')"
           python -m playwright install chromium
 
       # OS libraries for Chromium are machine-wide and must be installed once on
