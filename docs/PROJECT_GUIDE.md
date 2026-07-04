@@ -327,6 +327,7 @@ stateDiagram-v2
 | Spanish UI (es-MX) | Audi, `A 3` | Marca Audi, Modelo A3, Carrocería Sedán |
 | English UI | Audi, `A 3` | Make Audi, Model A3, Body style Sedan |
 | Can-Am / UTV (es-MX) | Maverick XRC | Tipo **Todoterreno**, Marca free-text **Can-Am** |
+| Polaris RZR / RAZR | RZR … | Tipo **Todoterreno**, Marca free-text **Polaris** |
 | SUV slug | `cx-50`, Mazda | Body style SUV |
 | Pickup | Ram 1500 | Body style Truck / Camioneta |
 | Mercedes naming | `Mercedes Benz` | Make **Mercedes-Benz** |
