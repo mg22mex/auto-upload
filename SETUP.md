@@ -284,7 +284,7 @@ The poster is **bilingual**: Spanish labels first (es-MX UI), English fallback. 
 | — | Clean title | título limpio | Checked |
 | generated | Description | **Descripción** | Title, km, specs, autosell URL |
 
-**Powersport example:** Can-am Maverick XRC → Tipo de vehículo **Todoterreno**, Marca free-text **Can-Am**, Modelo **Maverick XRC**.
+**Powersport / Todoterreno:** Can-Am Maverick, Polaris **RZR** (also matched as RAZR), UTV/ATV → Tipo de vehículo **Todoterreno**, Marca free-text (any brand), Modelo as text.
 
 Success requires a listing URL that matches **brand + price or model** (year alone is not enough). Post-publish URL capture can hang; the listing may already be live on **Your listings**.
 

@@ -239,8 +239,11 @@ def _infer_body_style(vehicle: Vehicle, haystack: str, specs: dict[str, str]) ->
         value = specs.get(key)
         if value:
             return _normalize_body_style(value)
-    # Can-Am / UTV / ATV — not a road truck (avoid matching "maverick" as Ford pickup)
-    if any(marker in haystack for marker in ("can-am", "can am", "atv", "utv", "rzr", "xrc", "xrs")):
+    # Can-Am / Polaris RZR / UTV / ATV — not a road truck (avoid "maverick" as Ford pickup)
+    if any(
+        marker in haystack
+        for marker in ("can-am", "can am", "atv", "utv", "rzr", "razr", "polaris", "xrc", "xrs")
+    ):
         return "Other"
     if any(marker in haystack for marker in TRUCK_BODY_MARKERS):
         return "Truck"
@@ -381,9 +384,13 @@ def _infer_condition(specs: dict[str, str]) -> str:
 
 
 def _infer_vehicle_type(haystack: str) -> str:
+    # Todoterreno on es-MX Marketplace (Can-Am, Polaris RZR / RAZR, UTV, ATV)
     if any(
         marker in haystack
-        for marker in ("can-am", "can am", "atv", "utv", "cuatrimoto", "rzr", "xrc", "xrs")
+        for marker in (
+            "can-am", "can am", "atv", "utv", "cuatrimoto",
+            "rzr", "razr", "polaris", "xrc", "xrs",
+        )
     ):
         return "Powersport"
     return DEFAULT_VEHICLE_TYPE
