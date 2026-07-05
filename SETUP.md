@@ -273,7 +273,8 @@ The poster is **bilingual**: Spanish labels first (es-MX UI), English fallback. 
 | `year` | Year | **Año** | Dropdown |
 | `mileage` | Mileage | **Kilometraje** | Digits only |
 | `price` | Price | **Precio** | Digits only |
-| config city | Location | **Ubicación** | Default Chihuahua |
+| config city | Location | **Ubicación** | Type city name, pick suggestion from list (e.g. Chihuahua). Field is an `<input role="combobox">` — verify with `input_value`, not inner text |
+| photos | — | **Agregar fotos** | **Max 20** per listing (`FB_MAX_PHOTOS` in `photos.py`; `config.yaml` `max_photos_per_listing: 20`) |
 | inferred | Vehicle type | **Tipo de vehículo** | Cars: `Auto/camioneta`. **Can-Am / UTV / ATV: `Todoterreno`** (never leave default Auto/camioneta) |
 | inferred | Body style | **Carrocería** | Sedán / Sedan, … (optional under Todoterreno) |
 | inferred | Exterior color | **Color del exterior** | Plata / Silver |
@@ -285,6 +286,8 @@ The poster is **bilingual**: Spanish labels first (es-MX UI), English fallback. 
 | generated | Description | **Descripción** | Title, km, specs, autosell URL |
 
 **Powersport / Todoterreno:** Can-Am Maverick, Polaris **RZR** (also matched as RAZR), UTV/ATV → Tipo de vehículo **Todoterreno**, Marca free-text (any brand), Modelo as text.
+
+**Large uploads:** With 15–20 photos, wait for all previews to finish before **Siguiente** enables (poster waits and polls). Uploading **more than 20** photos keeps Next disabled even when all fields are filled.
 
 Success requires a listing URL that matches **brand + price or model** (year alone is not enough). Post-publish URL capture can hang; the listing may already be live on **Your listings**.
 
@@ -352,7 +355,9 @@ python run_sync.py --from-snapshot data/catalog_latest.json --dry-run
 | `sync.db` resets each run | Check symlinks to `~/auto-upload-data/data` in workflow |
 | Oracle out of capacity | Retry AD/region; fallback Hetzner ~€4/mo |
 | Facebook checkpoint | Re-login via `fb_login.py`; copy session to fb-worker |
-| Next disabled on FB form | Check `data/logs/facebook/*_next_disabled*.png`; usually missing Make or vehicle details |
+| Next disabled on FB form | Check `data/logs/facebook/*_next_disabled*.png`; missing Make/vehicle details, **or >20 photos**, or previews still processing |
+| Siguiente disabled with all fields filled | Likely **>20 photos** or previews not done — retry with `--max-photos 20` and wait |
+| Ubicación not sticking | Pick from dropdown after typing city; debug with `scripts/fb_debug_location.py` |
 | Script prints wrong item URL | Dashboard is source of truth; `fb_find_listing.py` uses strict brand+price match |
 | Listing “being reviewed” / “Se está revisando” | Normal for new posts |
 | `pip install` blocked (Ubuntu 24.04) | Use project `.venv`, never system pip |

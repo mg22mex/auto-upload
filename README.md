@@ -51,8 +51,11 @@ The planner only manages listings **recorded in `sync.db`**. It does **not** sca
 | `scripts/fb_test_session.py` | Verify saved session |
 | `scripts/fb_post_test.py` | Post one vehicle (e.g. `--autosell-id obj969`) |
 | `scripts/fb_find_listing.py` | Resolve listing URL from dashboard |
+| `scripts/fb_debug_location.py` | Debug **Ubicación** combobox (account setup) |
 
-Facebook logic: `src/facebook/` (`poster.py`, `categorize.py`, bilingual EN/ES labels; Can-Am/UTV → **Todoterreno** + free-text Marca).
+Facebook logic: `src/facebook/` (`poster.py`, `categorize.py`, bilingual EN/ES labels; Can-Am/UTV → **Todoterreno** + free-text Marca). **Max 20 photos** per listing (Facebook limit; enforced in `photos.py`).
+
+**Latest manual verification (account_3, es-MX):** `obj1126` Chevrolet Traverse LT (20 photos), `obj1125` Can-am Maverick XRC (15 photos).
 
 ## Quick start (local)
 

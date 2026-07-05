@@ -228,7 +228,7 @@ flowchart TD
 ## Go-live checklist
 
 1. [x] Sessions for `account_1`, `account_2`, `account_3` on fb-worker (`fb_test_session.py` → Logged in: True).
-2. [x] Manual `fb_post_test.py` succeeds on each account (Spanish UI labels supported).
+2. [x] Manual `fb_post_test.py` succeeds on each account (Spanish UI labels supported). Verified: `obj969` (Audi), `obj1126` Traverse LT (20 photos), `obj1125` Can-am Maverick (Todoterreno) on all three accounts.
 3. [ ] Inform other account holders (clear old listings).
 4. [ ] On each FB account: **mark sold or delete** active listings. Facebook has **no reliable mass-delete API**; do this manually (or mark sold). Prefer not to automate mass wipe (account risk).
 5. [ ] Optional: reset `fb_listings` in `~/auto-upload-data/data/sync.db` for a clean tracker.
@@ -248,7 +248,9 @@ flowchart TD
 | One-off `fb_clear_listings.py` (mark sold) | Low | Only if inventory is huge; prefer manual |
 | Unit tests for `categorize.py` / price parse | Medium | No `tests/` package yet |
 | Faster post-publish URL capture | Medium | Often hangs after live post; listing may already be on dashboard |
-| Exterior color reliability on all locales | Low | Occasional `MISSING Color del exterior` but publish still succeeds |
+| Exterior color reliability on all locales | Done | Plateado alias; occasional retry pass |
+| Photo limit enforcement | Done | `FB_MAX_PHOTOS = 20`; >20 blocked Next on account_3 |
+| Ubicación / Precio field handling (es-MX) | Done | Input combobox + label-near JS for Precio |
 | Powersport field set (Todoterreno) | Done | Can-Am → Todoterreno + free-text Marca |
 
 ---
@@ -260,7 +262,7 @@ flowchart TD
 | ID | Story | Acceptance criteria | Status |
 |----|-------|---------------------|--------|
 | US-01 | As an operator, I want the public autosell catalog scraped twice daily so FB stays in sync without manual copy-paste. | Workflow green on fb-worker; ~140 vehicles in snapshot; diff logged. | Done |
-| US-02 | As an operator, I want each new public vehicle posted to **3 FB accounts** in Chihuahua. | Same vehicle on account_1/2/3; location Chihuahua; photos from autosell. | Posting verified; live backlog pending |
+| US-02 | As an operator, I want each new public vehicle posted to **3 FB accounts** in Chihuahua. | Same vehicle on account_1/2/3; location Chihuahua; photos from autosell. | Manual posts verified on all 3; live backlog pending |
 | US-03 | As an operator, I want sold/removed autosell vehicles marked sold on FB. | `remove` action in diff; `remover.py` executes when `DRY_RUN=false`. | Implemented, not live |
 | US-04 | As an operator, I want **price** changes on autosell reflected on all FB accounts. | `update` when `content_hash` changes; price field + description. | Implemented, not live |
 | US-05 | As an operator, I want failed FB runs to leave debug screenshots. | PNG under `data/logs/facebook/{autosell_id}_*.png`. | Done |
@@ -314,6 +316,7 @@ stateDiagram-v2
 | QA-02 | Dry-run diff | `python run_sync.py --dry-run` | Actions listed; no FB browser |
 | QA-03 | Session | `scripts/fb_test_session.py --account account_N` | Logged-in marketplace page |
 | QA-04 | Single post (each account) | `scripts/fb_post_test.py --account account_N --autosell-id obj969` | `Posted:` URL; dashboard shows Audi A3 |
+| QA-04b | SUV + Powersport (es-MX) | `obj1126` (Traverse, `--max-photos 20`), `obj1125` (Maverick) | Auto/camioneta vs Todoterreno; ≤20 photos |
 | QA-05 | URL lookup | `scripts/fb_find_listing.py --account account_N --autosell-id obj969` | URL contains correct brand/price on item page |
 | QA-06 | Categorization | `python -c "from src.facebook.categorize import categorize_vehicle; …"` | Sensible body/color/fuel for sample vehicles |
 | QA-07 | CI workflow | Manual **Run workflow** on GitHub | Green on `fb-worker`; artifact uploaded |
@@ -326,8 +329,9 @@ stateDiagram-v2
 |----------|-------|-------------------|
 | Spanish UI (es-MX) | Audi, `A 3` | Marca Audi, Modelo A3, Carrocería Sedán |
 | English UI | Audi, `A 3` | Make Audi, Model A3, Body style Sedan |
-| Can-Am / UTV (es-MX) | Maverick XRC | Tipo **Todoterreno**, Marca free-text **Can-Am** |
+| Can-Am / UTV (es-MX) | Maverick XRC (`obj1125`) | Tipo **Todoterreno**, Marca free-text **Can-Am** |
 | Polaris RZR / RAZR | RZR … | Tipo **Todoterreno**, Marca free-text **Polaris** |
+| SUV + many photos | Traverse LT (`obj1126`) | Auto/camioneta, **≤20 photos** (21 keeps Siguiente disabled) |
 | SUV slug | `cx-50`, Mazda | Body style SUV |
 | Pickup | Ram 1500 | Body style Truck / Camioneta |
 | Mercedes naming | `Mercedes Benz` | Make **Mercedes-Benz** |

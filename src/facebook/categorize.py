@@ -77,7 +77,7 @@ ES_BODY_STYLE = {
     "Other": ("Otro", "Other"),
 }
 ES_EXTERIOR = {
-    "Silver": ("Plata", "Silver"),
+    "Silver": ("Plata", "Plateado", "Silver", "Gris"),
     "Gray": ("Gris", "Gray"),
     "Black": ("Negro", "Black"),
     "White": ("Blanco", "White"),

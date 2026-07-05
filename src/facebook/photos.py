@@ -8,6 +8,9 @@ import requests
 
 from src.models import Vehicle
 
+# Facebook Marketplace vehicle listings accept at most 20 photos.
+FB_MAX_PHOTOS = 20
+
 BROWSER_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 "
@@ -31,6 +34,7 @@ def download_vehicle_photos(
     timeout_sec: int = 60,
 ) -> list[Path]:
     """Download up to max_photos images for a vehicle into a temp directory."""
+    max_photos = min(max_photos, FB_MAX_PHOTOS)
     if max_photos <= 0:
         return []
 

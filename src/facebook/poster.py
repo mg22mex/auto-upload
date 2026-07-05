@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 from pathlib import Path
 
 from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError
@@ -58,7 +59,10 @@ def create_vehicle_listing(
     capture.attach(page)
     try:
         _upload_photos(page, photo_paths, log_dir, vehicle.autosell_id)
-        filled_names = _fill_vehicle_form(page, vehicle, fb_config, log_dir, vehicle.autosell_id)
+        filled_names = _fill_vehicle_form(
+            page, vehicle, fb_config, log_dir, vehicle.autosell_id,
+            photo_count=len(photo_paths),
+        )
         print(f"Form fields filled: {len(filled_names)} ({', '.join(sorted(filled_names))})")
         required = {"year", "price", "make", "model"}
         missing = required - filled_names
@@ -159,12 +163,18 @@ def _upload_photos(page: Page, photo_paths: list[Path], log_dir: Path, autosell_
     else:
         file_input.set_input_files([str(p) for p in photo_paths])
 
-    print(f"Uploaded {len(photo_paths)} photo(s); waiting for previews...")
-    wait_for_photo_previews(page, min_count=1, timeout_ms=120_000)
+    n = len(photo_paths)
+    print(f"Uploaded {n} photo(s); waiting for previews...")
+    preview_timeout = max(180_000, n * 10_000)
+    wait_for_photo_previews(page, min_count=n, timeout_ms=preview_timeout)
+    if n >= 10:
+        settle_ms = min(n * 5_000, 120_000)
+        print(f"  waiting {settle_ms}ms for {n} photo previews to finish processing")
+        page.wait_for_timeout(settle_ms)
     _save_debug(page, log_dir, autosell_id, "after_upload")
     log_page_state(page, "photos_uploaded")
 
-    advance_past_photo_step(page, timeout_ms=90_000)
+    advance_past_photo_step(page, timeout_ms=max(90_000, n * 5_000))
     log_page_state(page, "after_photo_next")
 
 
@@ -174,6 +184,8 @@ def _fill_vehicle_form(
     fb_config: dict,
     log_dir: Path,
     autosell_id: str,
+    *,
+    photo_count: int = 1,
 ) -> set[str]:
     page.wait_for_timeout(2_000)
     dismiss_overlays(page)
@@ -189,18 +201,19 @@ def _fill_vehicle_form(
     # vehicle type -> location/year/make/model/mileage/price ->
     # appearance -> vehicle details -> description
     _fill_vehicle_type(page, attrs)
+    _scroll_composer_sidebar(page)
 
     # Spanish (es-MX) labels first — account_2+ often use Spanish Marketplace UI.
     core_fields: list[tuple[str, str, tuple[str, ...], str]] = [
-        ("location", city, ("Ubicación", "Location", "Ciudad"), "text"),
         ("year", vehicle.year, ("Año", "Year", "Año del modelo", "Model year"), "listbox"),
         ("make", vehicle.brand, ("Marca", "Make"), "make"),
         ("model", attrs.model, ("Modelo", "Model"), "text"),
+        ("price", parse_mxn_price(vehicle.price), ("Precio", "Price"), "numeric"),
         ("mileage", attrs.mileage_km, (
             "Kilometraje", "Mileage", "Odómetro", "Odometro", "Odometer",
             "Kilómetros", "Kilometros", "Kilometers", "Vehicle mileage",
         ), "mileage"),
-        ("price", parse_mxn_price(vehicle.price), ("Precio", "Price"), "text"),
+        ("location", city, ("Ubicación", "Location", "Ciudad"), "location"),
     ]
 
     free_text_make = attrs.vehicle_type == "Powersport"
@@ -213,10 +226,16 @@ def _fill_vehicle_form(
         if mode == "make":
             # Todoterreno / Powersport: Marca is free text (any brand). Cars: dropdown.
             ok = _fill_make_field(page, value, free_text=free_text_make)
+        elif mode == "location":
+            ok = _fill_location(page, value)
+            if ok and not _location_is_filled(page, value):
+                ok = False
         elif mode == "listbox":
             ok = _select_from_combobox_list(page, labels, (value,))
         elif mode == "mileage":
             ok = _fill_mileage(page, value)
+        elif mode == "numeric":
+            ok = _fill_price(page, value) if name == "price" else _fill_numeric_field(page, labels, value)
         else:
             ok = _fill_vehicle_field(page, labels, value)
         if ok:
@@ -224,6 +243,19 @@ def _fill_vehicle_form(
             print(f"  filled {name}")
         else:
             print(f"  MISSING {name}")
+
+    price_digits = parse_mxn_price(vehicle.price)
+    if "price" not in filled_names:
+        _scroll_composer_sidebar(page)
+        if _fill_price(page, price_digits):
+            filled_names.add("price")
+            print("  filled price (retry)")
+
+    # Price JS can accidentally target the wrong input — restore location if needed.
+    if not _location_is_filled(page, city):
+        if _fill_location(page, city) and _location_is_filled(page, city):
+            filled_names.add("location")
+            print("  re-filled location after price")
 
     _ensure_required_comboboxes(page, vehicle, attrs)
     if _make_is_filled(page, vehicle.brand, free_text=free_text_make):
@@ -250,8 +282,44 @@ def _fill_vehicle_form(
     _fill_appearance_fields(page, attrs)
     _fill_vehicle_detail_fields(page, attrs)
 
+    if not _location_is_filled(page, city):
+        if _fill_location(page, city) and _location_is_filled(page, city):
+            print("  re-filled location (final pass)")
+
+    if photo_count >= 10:
+        extra_ms = min(photo_count * 4_000, 90_000)
+        print(f"  waiting {extra_ms}ms post-form for {photo_count} photos to settle")
+        page.wait_for_timeout(extra_ms)
+
+    if _form_inputs_complete(page, vehicle, attrs, city):
+        print("  form inputs complete — waiting for Siguiente to enable")
+        _wait_for_next_enabled_polling(page, timeout_ms=min(photo_count * 6_000, 180_000))
+        print("  advancing past vehicle form")
+        page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(2_000)
+        try:
+            click_labeled_action(page, NEXT_LABELS, timeout_ms=30_000, allow_force=True)
+        except FacebookPostingError:
+            pass
+        from src.facebook.ui import _js_click_next
+        for attempt in range(10):
+            _js_click_next(page)
+            page.wait_for_timeout(3_000)
+            if _on_review_or_past_form(page):
+                log_page_state(page, "after_form_next")
+                _save_debug(page, log_dir, autosell_id, "before_publish")
+                return filled_names
+            if attempt == 4:
+                page.locator("body").click(position={"x": 400, "y": 400})
+                page.wait_for_timeout(2_000)
+                _wait_for_next_enabled_polling(page, timeout_ms=30_000)
+        if _on_review_or_past_form(page):
+            log_page_state(page, "after_form_next")
+            _save_debug(page, log_dir, autosell_id, "before_publish")
+            return filled_names
+
     try:
-        wait_for_composer_next_enabled(page, timeout_ms=45_000)
+        wait_for_composer_next_enabled(page, timeout_ms=60_000)
     except FacebookPostingError:
         _scroll_composer_sidebar(page)
         _fill_appearance_fields(page, attrs)
@@ -259,10 +327,31 @@ def _fill_vehicle_form(
         page.locator("body").click(position={"x": 400, "y": 400})
         page.wait_for_timeout(2_000)
         try:
-            wait_for_composer_next_enabled(page, timeout_ms=20_000)
+            wait_for_composer_next_enabled(page, timeout_ms=30_000)
         except FacebookPostingError:
             _save_debug(page, log_dir, autosell_id, "next_disabled_pre_review")
             _log_composer_comboboxes(page)
+            _log_composer_inputs(page)
+            if _form_inputs_complete(page, vehicle, attrs, city):
+                print("  form inputs complete — force-clicking Next")
+                try:
+                    page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
+                    page.wait_for_timeout(2_000)
+                    click_labeled_action(page, NEXT_LABELS, timeout_ms=30_000, allow_force=True)
+                    page.wait_for_timeout(3_000)
+                    if not _on_review_or_past_form(page):
+                        from src.facebook.ui import _js_click_next
+                        for _ in range(3):
+                            _js_click_next(page)
+                            page.wait_for_timeout(2_000)
+                            if _on_review_or_past_form(page):
+                                break
+                    if _on_review_or_past_form(page):
+                        log_page_state(page, "after_form_next")
+                        _save_debug(page, log_dir, autosell_id, "before_publish")
+                        return filled_names
+                except FacebookPostingError:
+                    pass
             raise FacebookPostingError(
                 "Composer Next stayed disabled — required fields still empty "
                 "(check Carrocería / Color del exterior / Estado del vehículo)."
@@ -272,6 +361,73 @@ def _fill_vehicle_form(
     log_page_state(page, "after_form_next")
     _save_debug(page, log_dir, autosell_id, "before_publish")
     return filled_names
+
+
+def _wait_for_next_enabled_polling(page: Page, *, timeout_ms: int = 120_000) -> bool:
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    while time.monotonic() < deadline:
+        try:
+            enabled = page.evaluate(
+                """() => {
+                    for (const label of ['Next', 'Siguiente']) {
+                      for (const node of document.querySelectorAll(
+                        `[aria-label="${label}"]`
+                      )) {
+                        if (node.getAttribute('aria-disabled') === 'true') continue;
+                        const r = node.getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) return true;
+                      }
+                    }
+                    return false;
+                }"""
+            )
+            if enabled:
+                print("  Siguiente enabled")
+                return True
+        except Exception:
+            pass
+        page.wait_for_timeout(2_000)
+    print("  Siguiente still disabled after wait — will force-click")
+    return False
+
+
+def _form_inputs_complete(
+    page: Page, vehicle: Vehicle, attrs: ListingAttributes, city: str
+) -> bool:
+    price_digits = parse_mxn_price(vehicle.price)
+    checks = [
+        _location_is_filled(page, city),
+        _combobox_has_value(page, ("Año", "Year"), vehicle.year),
+        _make_is_filled(page, vehicle.brand, free_text=attrs.vehicle_type == "Powersport"),
+        _text_field_has_value(page, ("Modelo", "Model"), attrs.model),
+    ]
+    try:
+        inputs = page.evaluate(
+            """() => [...document.querySelectorAll('input')].map(el => el.value || '')"""
+        )
+        has_price = any(price_digits in re.sub(r"[^\d]", "", val) for val in inputs)
+        has_mileage = any(attrs.mileage_km in re.sub(r"[^\d]", "", val) for val in inputs)
+        checks.extend([has_price, has_mileage])
+    except Exception:
+        return False
+    return all(checks)
+
+
+def _on_review_or_past_form(page: Page) -> bool:
+    url = page.url.lower()
+    if "step=audience" in url or "step=review" in url:
+        return True
+    try:
+        body = page.locator("body").inner_text(timeout=3_000).lower()
+    except Exception:
+        body = ""
+    if re.search(r"step 2 of 2|paso 2 de 2", body):
+        return True
+    if "promote listing" in body or "promocionar" in body:
+        return True
+    if "publicar" in body and "precio" not in body:
+        return True
+    return "/marketplace/create/vehicle" not in page.url
 
 
 def _publish_and_capture_url(
@@ -884,6 +1040,8 @@ def _fill_appearance_fields(page: Page, attrs: ListingAttributes) -> None:
     for labels, candidates in appearance:
         if _select_from_combobox_list(page, labels, candidates):
             print(f"  filled {labels[0]}")
+        elif _fill_labeled_combobox(page, labels, candidates):
+            print(f"  filled {labels[0]} (labeled combobox)")
         else:
             print(f"  MISSING {labels[0]}")
 
@@ -1001,6 +1159,32 @@ def _combobox_is_filled(box: Locator, labels: tuple[str, ...]) -> bool:
     if any(current.startswith(p) for p in placeholders):
         return False
     return True
+
+
+def _log_composer_inputs(page: Page) -> None:
+    try:
+        fields = page.evaluate(
+            """() => {
+                const out = [];
+                for (const el of document.querySelectorAll('input, textarea')) {
+                  const rect = el.getBoundingClientRect();
+                  if (rect.width <= 0 || rect.height <= 0) continue;
+                  const type = (el.type || '').toLowerCase();
+                  if (type === 'file' || type === 'hidden' || type === 'checkbox') continue;
+                  out.push({
+                    tag: el.tagName,
+                    type,
+                    ariaLabel: el.getAttribute('aria-label') || '',
+                    value: el.value || '',
+                    id: el.id || '',
+                  });
+                }
+                return out;
+            }"""
+        )
+        print(f"  inputs: {fields}")
+    except Exception as exc:
+        print(f"  input dump failed: {exc}")
 
 
 def _log_composer_comboboxes(page: Page) -> None:
@@ -1224,6 +1408,11 @@ def _fill_make_field(page: Page, brand: str, *, free_text: bool = False) -> bool
 
     if free_text:
         for candidate in candidates:
+            if _fill_input_near_label(page, "Marca", candidate) or _fill_input_near_label(
+                page, "Make", candidate
+            ):
+                print(f"  marca free-text: {candidate}")
+                return True
             if _fill_vehicle_field(page, labels, candidate):
                 print(f"  marca free-text: {candidate}")
                 return True
@@ -1267,6 +1456,8 @@ def _make_is_filled(page: Page, brand: str, *, free_text: bool = False) -> bool:
     candidates = fb_make_candidates(brand)
     labels = ("Marca", "Make")
     if free_text:
+        if any(_input_near_label_has_value(page, label, c) for label in ("Marca", "Make") for c in candidates):
+            return True
         return any(_text_field_has_value(page, labels, c) for c in candidates)
     return any(_combobox_has_value(page, labels, c) for c in candidates) or any(
         _text_field_has_value(page, labels, c) for c in candidates
@@ -1287,7 +1478,13 @@ def _select_from_combobox_list(
             return True
 
     type_to_filter = any(
-        label.lower() in {"make", "marca", "year", "año", "model year", "año del modelo"}
+        label.lower() in {
+            "make", "marca", "year", "año", "model year", "año del modelo",
+            "carrocería", "estilo de carrocería", "body style", "body style",
+            "color del exterior", "color exterior", "exterior color",
+            "color del interior", "color interior", "interior color",
+            "ubicación", "location", "ciudad",
+        }
         for label in labels
     )
 
@@ -1519,6 +1716,373 @@ def _fill_numeric_field(page: Page, labels: tuple[str, ...], value: str) -> bool
             continue
 
     return _fill_vehicle_field(page, labels, digits)
+
+
+def _fill_location(page: Page, city: str) -> bool:
+    labels = ("Ubicación", "Location", "Ciudad")
+    state = "Chihuahua"
+    candidates = (
+        city,
+        f"{city}, {state}",
+        f"{city}, CH",
+        f"{city}, Chihuahua, Mexico",
+        f"{city}, Chihuahua, MX",
+        f"{city}, Chihuahua",
+    )
+    for locator in (
+        page.locator('input[role="combobox"][aria-label="Ubicación"]'),
+        page.locator('input[role="combobox"][aria-label*="Ubicación" i]'),
+        page.locator('input[role="combobox"][aria-label*="Location" i]'),
+        page.locator('[role="combobox"][aria-label="Ubicación"]'),
+        page.locator('[role="combobox"][aria-label*="Ubicación" i]'),
+    ):
+        try:
+            if locator.count() == 0:
+                continue
+            box = locator.first
+            if not box.is_visible():
+                continue
+            if _location_is_filled(page, city):
+                return True
+            box.scroll_into_view_if_needed()
+            box.click()
+            page.wait_for_timeout(500)
+            box.fill(city)
+            page.wait_for_timeout(2_000)
+            option = page.get_by_role("option").filter(
+                has_text=re.compile(rf"^{re.escape(city)}\b", re.I)
+            )
+            if option.count() and option.first.is_visible():
+                option.first.click(force=True)
+                page.wait_for_timeout(1_000)
+                if _location_is_filled(page, city):
+                    print(f"  location set: {city}")
+                    return True
+            for candidate in candidates:
+                option = page.get_by_role("option").filter(
+                    has_text=re.compile(re.escape(candidate.split(",")[0]), re.I)
+                )
+                if option.count() and option.first.is_visible():
+                    option.first.click()
+                    page.wait_for_timeout(800)
+                    if _location_is_filled(page, city):
+                        print(f"  location set: {candidate}")
+                        return True
+            page.keyboard.press("ArrowDown")
+            page.wait_for_timeout(200)
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(800)
+            if _location_is_filled(page, city):
+                return True
+        except Exception:
+            continue
+    if _select_from_combobox_list(page, labels, candidates):
+        return _location_is_filled(page, city)
+    return False
+
+
+def _location_is_filled(page: Page, city: str) -> bool:
+    needle = city.strip().lower()
+    if not needle:
+        return True
+    for locator in (
+        page.locator('input[role="combobox"][aria-label="Ubicación"]'),
+        page.locator('input[role="combobox"][aria-label*="Ubicación" i]'),
+        page.locator('input[role="combobox"][aria-label*="Location" i]'),
+    ):
+        try:
+            if locator.count() == 0:
+                continue
+            val = (locator.first.input_value(timeout=1_000) or "").strip()
+            low = val.lower()
+            if not val or low in ("ubicación", "location", "ciudad"):
+                continue
+            # Typed-only city name is not enough — FB requires picking a suggestion.
+            if low == needle:
+                continue
+            if needle in low:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _input_near_label_has_value(page: Page, label_text: str, value: str) -> bool:
+    needle = value.strip().lower()
+    if not needle:
+        return False
+    try:
+        result = page.evaluate(
+            """([labelText, needle]) => {
+                let anchor = null;
+                for (const el of document.querySelectorAll('span, label, div')) {
+                  if ((el.textContent || '').trim() !== labelText) continue;
+                  const r = el.getBoundingClientRect();
+                  if (r.width <= 0 || r.height <= 0) continue;
+                  anchor = { top: r.top, left: r.left };
+                  break;
+                }
+                if (!anchor) return false;
+                for (const input of document.querySelectorAll('input')) {
+                  const r = input.getBoundingClientRect();
+                  if (r.width < 40 || r.height < 10) continue;
+                  const dy = r.top - anchor.top;
+                  if (dy < -5 || dy > 120) continue;
+                  const val = (input.value || '').trim().toLowerCase();
+                  if (val && val.includes(needle)) return true;
+                }
+                return false;
+            }""",
+            [label_text, needle],
+        )
+        return bool(result)
+    except Exception:
+        return False
+
+
+def _fill_input_near_label(page: Page, label_text: str, value: str) -> bool:
+    try:
+        result = page.evaluate(
+            """([labelText, value]) => {
+                const setter = Object.getOwnPropertyDescriptor(
+                  window.HTMLInputElement.prototype, 'value'
+                )?.set;
+                let anchor = null;
+                for (const el of document.querySelectorAll('span, label, div')) {
+                  const raw = (el.textContent || '').trim();
+                  if (raw !== labelText) continue;
+                  const r = el.getBoundingClientRect();
+                  if (r.width <= 0 || r.height <= 0) continue;
+                  anchor = { top: r.top, left: r.left };
+                  break;
+                }
+                if (!anchor) return { ok: false };
+                let best = null;
+                let bestDist = Infinity;
+                for (const input of document.querySelectorAll('input')) {
+                  const r = input.getBoundingClientRect();
+                  if (r.width < 40 || r.height < 10) continue;
+                  const type = (input.type || '').toLowerCase();
+                  if (type === 'file' || type === 'hidden' || type === 'checkbox') continue;
+                  const dy = r.top - anchor.top;
+                  const dx = Math.abs(r.left - anchor.left);
+                  if (dy < -5 || dy > 120) continue;
+                  const dist = dy * 3 + dx;
+                  if (dist < bestDist) {
+                    bestDist = dist;
+                    best = input;
+                  }
+                }
+                if (!best) return { ok: false };
+                best.focus();
+                if (setter) setter.call(best, value);
+                else best.value = value;
+                best.dispatchEvent(new Event('input', { bubbles: true }));
+                best.dispatchEvent(new Event('change', { bubbles: true }));
+                return { ok: true, id: best.id || '', value: best.value || '' };
+            }""",
+            [label_text, value],
+        )
+    except Exception:
+        return False
+    if result and result.get("ok"):
+        return True
+    return False
+
+
+def _fill_price(page: Page, digits: str) -> bool:
+    labels = ("Precio", "Price")
+    if _fill_numeric_field(page, labels, digits):
+        return True
+    if _fill_price_via_js(page, digits):
+        return True
+    if _fill_price_near_label(page, digits):
+        return True
+    if _fill_price_after_model(page, digits):
+        return True
+    return _fill_vehicle_field(page, labels, digits)
+
+
+def _fill_price_near_label(page: Page, digits: str) -> bool:
+    try:
+        result = page.evaluate(
+            """(digits) => {
+                const setter = Object.getOwnPropertyDescriptor(
+                  window.HTMLInputElement.prototype, 'value'
+                )?.set;
+                const labels = ['Precio', 'Price'];
+                let anchor = null;
+                for (const el of document.querySelectorAll('span, label, div')) {
+                  const raw = (el.textContent || '').trim();
+                  if (!labels.includes(raw)) continue;
+                  const r = el.getBoundingClientRect();
+                  if (r.width <= 0 || r.height <= 0) continue;
+                  anchor = { top: r.top, left: r.left };
+                  break;
+                }
+                if (!anchor) return { ok: false };
+                const skip = (al) => {
+                  al = (al || '').toLowerCase();
+                  return /ubic|location|search|marca|make|modelo|model|año|year|kilometraje|mileage/.test(al);
+                };
+                let best = null;
+                let bestDist = Infinity;
+                for (const input of document.querySelectorAll('input')) {
+                  const r = input.getBoundingClientRect();
+                  if (r.width < 40 || r.height < 10) continue;
+                  if (skip(input.getAttribute('aria-label'))) continue;
+                  const type = (input.type || '').toLowerCase();
+                  if (type === 'file' || type === 'hidden' || type === 'checkbox') continue;
+                  const dy = r.top - anchor.top;
+                  const dx = Math.abs(r.left - anchor.left);
+                  if (dy < -5 || dy > 120) continue;
+                  const dist = dy * 3 + dx;
+                  if (dist < bestDist) {
+                    bestDist = dist;
+                    best = input;
+                  }
+                }
+                if (!best) return { ok: false };
+                best.focus();
+                if (setter) setter.call(best, digits);
+                else best.value = digits;
+                best.dispatchEvent(new Event('input', { bubbles: true }));
+                best.dispatchEvent(new Event('change', { bubbles: true }));
+                return { ok: true, id: best.id || '', ariaLabel: best.getAttribute('aria-label') || '' };
+            }""",
+            digits,
+        )
+    except Exception:
+        return False
+    if result and result.get("ok"):
+        print(
+            f"  price near label "
+            f"(id={result.get('id', '?')}, label={result.get('ariaLabel', '')!r})"
+        )
+        return True
+    return False
+
+
+def _fill_price_via_js(page: Page, digits: str) -> bool:
+    try:
+        result = page.evaluate(
+            """(digits) => {
+                const keywords = ['precio', 'price'];
+                const skipLabels = [
+                  'ubic', 'location', 'ciudad', 'search', 'buscar',
+                  'marca', 'make', 'modelo', 'model', 'año', 'year',
+                  'kilometraje', 'mileage', 'odometer',
+                ];
+                const setter = Object.getOwnPropertyDescriptor(
+                  window.HTMLInputElement.prototype, 'value'
+                )?.set;
+                const visible = (el) => {
+                  const r = el.getBoundingClientRect();
+                  return r.width > 20 && r.height > 10;
+                };
+                const shouldSkip = (al) => {
+                  al = (al || '').toLowerCase();
+                  return skipLabels.some((k) => al.includes(k));
+                };
+                const apply = (el) => {
+                  el.focus();
+                  if (setter && el instanceof HTMLInputElement) {
+                    setter.call(el, digits);
+                  } else {
+                    el.value = digits;
+                  }
+                  el.dispatchEvent(new Event('input', { bubbles: true }));
+                  el.dispatchEvent(new Event('change', { bubbles: true }));
+                  return true;
+                };
+                for (const input of document.querySelectorAll('input, [role="spinbutton"]')) {
+                  if (!visible(input)) continue;
+                  const al = (input.getAttribute('aria-label') || '').toLowerCase();
+                  if (shouldSkip(al)) continue;
+                  if (keywords.some((k) => al.includes(k))) {
+                    apply(input);
+                    return { ok: true, id: input.id || '', ariaLabel: al };
+                  }
+                }
+                for (const label of document.querySelectorAll('label, span')) {
+                  const raw = (label.textContent || '').trim();
+                  if (raw !== 'Precio' && raw !== 'Price') continue;
+                  const field = label.closest('label')?.querySelector('input')
+                    || label.parentElement?.querySelector('input')
+                    || label.nextElementSibling?.querySelector?.('input');
+                  if (field && visible(field) && !shouldSkip(field.getAttribute('aria-label'))) {
+                    apply(field);
+                    return { ok: true, id: field.id || '', ariaLabel: 'Precio-label' };
+                  }
+                }
+                for (const input of document.querySelectorAll('input, [role="spinbutton"]')) {
+                  if (!visible(input)) continue;
+                  const al = (input.getAttribute('aria-label') || '').toLowerCase();
+                  if (al || shouldSkip(al)) continue;
+                  let node = input.parentElement;
+                  for (let depth = 0; depth < 6 && node; depth++) {
+                    const text = (node.textContent || '').trim().toLowerCase();
+                    if (text === 'precio' || text === 'price' || text.startsWith('precio\\n') || text.startsWith('price\\n')) {
+                      apply(input);
+                      return { ok: true, id: input.id || '', ariaLabel: 'Precio-near' };
+                    }
+                    node = node.parentElement;
+                  }
+                }
+                return { ok: false };
+            }""",
+            digits,
+        )
+    except Exception:
+        return False
+    if result and result.get("ok"):
+        print(
+            f"  price via JS "
+            f"(id={result.get('id', '?')}, label={result.get('ariaLabel', '')!r})"
+        )
+        return True
+    return False
+
+
+def _fill_price_after_model(page: Page, digits: str) -> bool:
+    """Tab from Model field — price often follows model/mileage in the composer."""
+    model_labels = ("Modelo", "Model")
+    for label in model_labels:
+        try:
+            field = page.get_by_label(label)
+            if field.count() == 0:
+                field = page.locator(f'input[aria-label*="{label}" i]')
+            if field.count() == 0:
+                continue
+            target = field.first
+            if not target.is_visible():
+                continue
+            target.click()
+            page.wait_for_timeout(400)
+            # Tab past mileage to price (model -> mileage -> price)
+            for _ in range(3):
+                page.keyboard.press("Tab")
+                page.wait_for_timeout(300)
+            page.keyboard.press("Control+a")
+            page.keyboard.type(digits, delay=30)
+            page.wait_for_timeout(500)
+            active = page.evaluate(
+                """() => {
+                  const el = document.activeElement;
+                  if (!el) return null;
+                  return {
+                    tag: el.tagName,
+                    value: el.value || '',
+                    ariaLabel: el.getAttribute('aria-label') || '',
+                  };
+                }"""
+            )
+            if active and digits in re.sub(r"[^\d]", "", active.get("value", "")):
+                print(f"  price via Tab after model (label={active.get('ariaLabel', '')!r})")
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def _fill_mileage(page: Page, value: str) -> bool:
