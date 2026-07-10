@@ -64,9 +64,41 @@ class SyncStore:
                 removals INTEGER NOT NULL DEFAULT 0,
                 notes TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS repost_holds (
+                autosell_id TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                reason TEXT,
+                hold_until TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (autosell_id, account_id)
+            );
             """
         )
         self._conn.commit()
+
+    def _parse_iso(self, value: str | None) -> datetime | None:
+        if not value:
+            return None
+        text = value.strip()
+        if len(text) == 10:
+            text = f"{text}T23:59:59+00:00"
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    def _hold_active(self, hold_until: str | None) -> bool:
+        if hold_until is None or not str(hold_until).strip():
+            return True
+        parsed = self._parse_iso(hold_until)
+        if parsed is None:
+            return True
+        return parsed > datetime.now(timezone.utc)
 
     def upsert_catalog_snapshot(self, vehicle: Vehicle) -> None:
         import json
@@ -125,7 +157,7 @@ class SyncStore:
     def get_live_listings(self) -> list[sqlite3.Row]:
         cursor = self._conn.execute(
             """
-            SELECT autosell_id, account_id, fb_listing_url, status, content_hash
+            SELECT autosell_id, account_id, fb_listing_url, status, content_hash, posted_at
             FROM fb_listings
             WHERE status = 'live'
             """
@@ -135,13 +167,103 @@ class SyncStore:
     def get_fb_listing(self, autosell_id: str, account_id: str) -> sqlite3.Row | None:
         cursor = self._conn.execute(
             """
-            SELECT autosell_id, account_id, fb_listing_url, status, content_hash
+            SELECT autosell_id, account_id, fb_listing_url, status, content_hash, posted_at
             FROM fb_listings
             WHERE autosell_id = ? AND account_id = ?
             """,
             (autosell_id, account_id),
         )
         return cursor.fetchone()
+
+    def add_repost_hold(
+        self,
+        autosell_id: str,
+        account_id: str,
+        *,
+        reason: str = "",
+        hold_until: str | None = None,
+    ) -> None:
+        now = utc_now()
+        self._conn.execute(
+            """
+            INSERT INTO repost_holds (
+                autosell_id, account_id, reason, hold_until, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(autosell_id, account_id) DO UPDATE SET
+                reason = excluded.reason,
+                hold_until = excluded.hold_until,
+                updated_at = excluded.updated_at
+            """,
+            (autosell_id, account_id, reason or None, hold_until, now, now),
+        )
+        self._conn.commit()
+
+    def clear_repost_hold(self, autosell_id: str, account_id: str) -> bool:
+        cursor = self._conn.execute(
+            """
+            DELETE FROM repost_holds
+            WHERE autosell_id = ? AND account_id = ?
+            """,
+            (autosell_id, account_id),
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    def list_repost_holds(self, account_id: str | None = None) -> list[sqlite3.Row]:
+        if account_id:
+            cursor = self._conn.execute(
+                """
+                SELECT autosell_id, account_id, reason, hold_until, created_at, updated_at
+                FROM repost_holds
+                WHERE account_id = ?
+                ORDER BY autosell_id
+                """,
+                (account_id,),
+            )
+        else:
+            cursor = self._conn.execute(
+                """
+                SELECT autosell_id, account_id, reason, hold_until, created_at, updated_at
+                FROM repost_holds
+                ORDER BY account_id, autosell_id
+                """
+            )
+        return cursor.fetchall()
+
+    def is_on_repost_hold(self, autosell_id: str, account_id: str) -> bool:
+        row = self._conn.execute(
+            """
+            SELECT hold_until FROM repost_holds
+            WHERE autosell_id = ? AND account_id = ?
+            """,
+            (autosell_id, account_id),
+        ).fetchone()
+        if row is None:
+            return False
+        if not self._hold_active(row["hold_until"]):
+            self.clear_repost_hold(autosell_id, account_id)
+            return False
+        return True
+
+    def record_repost(
+        self,
+        autosell_id: str,
+        account_id: str,
+        *,
+        fb_listing_url: str,
+        content_hash: str,
+    ) -> None:
+        now = utc_now()
+        self._conn.execute(
+            """
+            UPDATE fb_listings
+            SET fb_listing_url = ?, status = 'live', content_hash = ?,
+                posted_at = ?, updated_at = ?
+            WHERE autosell_id = ? AND account_id = ?
+            """,
+            (fb_listing_url, content_hash, now, now, autosell_id, account_id),
+        )
+        self._conn.commit()
 
     def upsert_fb_listing(
         self,

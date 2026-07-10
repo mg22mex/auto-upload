@@ -48,6 +48,8 @@ The planner only manages listings **recorded in `sync.db`**. It does **not** sca
 | Script | Purpose |
 |--------|---------|
 | `run_sync.py` | Full sync (scrape + diff + FB when `DRY_RUN=false`; respects `sync.active_accounts`) |
+| `scripts/run_repost.py` | Repost listings (mark sold → create → refresh URL in sync.db) |
+| `scripts/fb_repost_hold.py` | Add/clear/list repost holds (ads, promotions) |
 | `scripts/fb_login.py` | One-time headed login per account |
 | `scripts/fb_test_session.py` | Verify saved session |
 | `scripts/fb_post_test.py` | Post one vehicle (e.g. `--autosell-id obj969`) |

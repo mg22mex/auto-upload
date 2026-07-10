@@ -339,6 +339,44 @@ python run_sync.py --accounts account_1
 python run_sync.py --dry-run
 ```
 
+### E5. Repost (replace extension workflow)
+
+Repost marks the **old** listing sold, creates a **new** listing, and updates `sync.db` with the new URL and `posted_at`. This is **separate** from the 2× daily sync.
+
+**Protect listings during FB ads:**
+
+```bash
+python scripts/fb_repost_hold.py add obj1126 --account account_2 --until 2026-07-25 --reason fb_ads
+python scripts/fb_repost_hold.py list --account account_2
+python scripts/fb_repost_hold.py clear obj1126 --account account_2
+```
+
+**Manual repost (extension-style selection):**
+
+```bash
+python scripts/run_repost.py --account account_2 --ids obj1126,obj969 --dry-run
+python scripts/run_repost.py --account account_2 --ids obj1126,obj969
+```
+
+**Batch repost (oldest first, respects holds):**
+
+```bash
+python scripts/run_repost.py --account account_1 --all-eligible --older-than 7d --max 10
+```
+
+**Admin override** (ignore holds — use sparingly):
+
+```bash
+python scripts/run_repost.py --account account_2 --ids obj1126 --force
+```
+
+| | Extension | Built-in repost |
+|--|-----------|-----------------|
+| Pick listings | UI checkboxes | `--ids` |
+| Protect promoted items | Don't select them | `fb_repost_hold add` |
+| Remember exclusions | Manual each week | Holds in `sync.db` |
+| URL sync with auto-upload | Manual | Automatic |
+
 ---
 
 ## Local development (any machine)

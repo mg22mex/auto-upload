@@ -13,6 +13,10 @@ sync:
   active_accounts:
     - account_1
     - account_2
+  # Repost (scripts/run_repost.py — separate from daily sync)
+  repost:
+    min_age_days: 7
+    max_per_account_per_run: 10
 
 facebook:
   location_city: Chihuahua

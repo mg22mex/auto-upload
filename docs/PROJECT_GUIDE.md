@@ -253,6 +253,8 @@ flowchart TD
 | Item | Priority | Notes |
 |------|----------|-------|
 | Enable **account_3** in scheduled sync | High | After operator clears old FB listings; add to `active_accounts` |
+| **Repost with holds** | Done | `run_repost.py`, `fb_repost_hold.py`, `repost_holds` table |
+| Scheduled weekly repost job | Medium | Optional GitHub cron; use `run_repost.py --all-eligible` |
 | Richer **update** (photos, title, mileage) | Medium | Today: price + description only |
 | Inventory FB dashboard (discover untracked listings) | Low | Avoids manual wipe; complex / fragile |
 | One-off `fb_clear_listings.py` (mark sold) | Low | Only if inventory is huge; prefer manual |
