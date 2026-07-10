@@ -43,7 +43,12 @@ The workflow symlinks `data/` and `sessions/` to `~/auto-upload-data/` so `sync.
 
 **Not suitable:** Hugging Face Spaces, Streamlit Cloud, Render/Railway free tiers — they sleep and cannot keep Facebook browser sessions.
 
-**Scheduling:** GitHub Actions cron triggers both jobs. You do not need cron on the worker itself.
+**Scheduling:** GitHub Actions cron triggers sync (2× daily) and repost (weekly Sunday). You do not need cron on the worker itself.
+
+| Workflow | Schedule (Chihuahua) | Purpose |
+|----------|----------------------|---------|
+| `sync.yml` | 08:00 & 12:00 daily | New cars, price updates, removals |
+| `repost.yml` | **Sunday 09:00** | Refresh listing placement (respects holds) |
 
 ---
 

@@ -16,8 +16,9 @@ Visual reference for architecture, flows, user stories, quality checks, and roll
 | Target FB listings (active accounts) | **~268** | 134 vehicles × 2 accounts |
 | Target FB listings (all 3, future) | **~402** | 134 × 3 when account_3 enabled |
 | Posts per account per run | **10** | `MAX_POSTS_PER_ACCOUNT_PER_RUN` (configurable) |
-| Scheduled runs per day | **2** | ~08:00 & ~12:00 America/Chihuahua |
-| Max new listings per day (active accounts) | **~40** | 10 × 2 × 2 runs |
+| Scheduled runs per day | **2** sync + **1/week** repost | ~08:00 & ~12:00 sync; Sun 09:00 repost |
+| Max new listings per day (active accounts) | **~40** | 10 × 2 × 2 sync runs |
+| Max reposts per week (active accounts) | **~20** | 10 × 2 accounts (configurable) |
 | CI job timeout | **120 min** | `.github/workflows/sync.yml` |
 | Verified manual test vehicle | **obj969** | 2020 Audi A3 on all 3 accounts |
 | Live scheduled posting | **On** | `DRY_RUN=false`; account_1 + account_2 at 134/134 |
@@ -254,7 +255,7 @@ flowchart TD
 |------|----------|-------|
 | Enable **account_3** in scheduled sync | High | After operator clears old FB listings; add to `active_accounts` |
 | **Repost with holds** | Done | `run_repost.py`, `fb_repost_hold.py`, `repost_holds` table |
-| Scheduled weekly repost job | Medium | Optional GitHub cron; use `run_repost.py --all-eligible` |
+| Scheduled weekly repost job | Done | `.github/workflows/repost.yml` — Sun 09:00 Chihuahua |
 | Richer **update** (photos, title, mileage) | Medium | Today: price + description only |
 | Inventory FB dashboard (discover untracked listings) | Low | Avoids manual wipe; complex / fragile |
 | One-off `fb_clear_listings.py` (mark sold) | Low | Only if inventory is huge; prefer manual |

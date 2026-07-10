@@ -13,7 +13,7 @@ Sync [autosell.mx](https://www.autosell.mx) public catalog to Facebook Marketpla
 | **Vehicles** | ~134 public catalog |
 | **FB accounts** | 3 sessions; **2 live** (account_1, account_2) |
 | **Target listings (live)** | ~268 (134 × 2 active accounts) |
-| **Schedule** | 2× daily (Chihuahua) |
+| **Schedule** | 2× daily sync + **weekly repost** (Sun 09:00 Chihuahua) |
 | **Posts/run/account** | 10 (configurable) |
 | **Live sync** | account_1 + account_2 (`DRY_RUN=false`) |
 | **account_3** | Excluded until old listings cleared |
@@ -42,6 +42,7 @@ The planner only manages listings **recorded in `sync.db`**. It does **not** sca
 | Job | Host | Action |
 |-----|------|--------|
 | **sync** | Self-hosted `fb-worker` | Scrape → diff → create / update / remove on FB |
+| **repost** | Self-hosted `fb-worker` | Weekly repost eligible listings (account_1 + account_2) |
 
 ## Key scripts
 
