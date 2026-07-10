@@ -10,34 +10,34 @@ Visual reference for architecture, flows, user stories, quality checks, and roll
 
 | Metric | Value | Notes |
 |--------|------:|-------|
-| Public vehicles (autosell.mx) | **140** | From latest `catalog_latest.json` scrape |
+| Public vehicles (autosell.mx) | **~134** | From latest `catalog_latest.json` scrape |
 | Facebook accounts | **3** | `account_1`, `account_2`, `account_3` in `config.yaml` |
-| Target FB listings (full sync) | **~420** | 140 vehicles × 3 accounts |
+| Active sync accounts | **2** | `sync.active_accounts`: account_1, account_2 |
+| Target FB listings (active accounts) | **~268** | 134 vehicles × 2 accounts |
+| Target FB listings (all 3, future) | **~402** | 134 × 3 when account_3 enabled |
 | Posts per account per run | **10** | `MAX_POSTS_PER_ACCOUNT_PER_RUN` (configurable) |
 | Scheduled runs per day | **2** | ~08:00 & ~12:00 America/Chihuahua |
-| Max new listings per day (all accounts) | **~60** | 10 × 3 × 2 runs |
-| Estimated days to initial backlog drain | **~7** | 420 ÷ 60 ≈ 7 days at full cap |
-| Playwright photos per listing (default test) | **3** | `fb_post_test.py --max-photos 3` |
+| Max new listings per day (active accounts) | **~40** | 10 × 2 × 2 runs |
 | CI job timeout | **120 min** | `.github/workflows/sync.yml` |
-| Verified manual test vehicle | **obj969** | 2020 Audi A3 on account_1, _2, and _3 |
-| Live scheduled posting | **Off** | `DRY_RUN=true` until go-live checklist |
+| Verified manual test vehicle | **obj969** | 2020 Audi A3 on all 3 accounts |
+| Live scheduled posting | **On** | `DRY_RUN=false`; account_1 + account_2 at 134/134 |
 
 ```mermaid
-pie title Target listing distribution (steady state)
-    "Account 1 (~140)" : 140
-    "Account 2 (~140)" : 140
-    "Account 3 (~140)" : 140
+pie title Target listing distribution (steady state, 2 active accounts)
+    "Account 1 (~134)" : 134
+    "Account 2 (~134)" : 134
+    "Account 3 (pending)" : 134
 ```
 
 ```mermaid
 xychart-beta
-    title "Backlog drain (listings posted, cumulative)"
-    x-axis ["Day 1", "Day 2", "Day 3", "Day 4", "Day 5", "Day 6", "Day 7"]
-    y-axis "Listings" 0 --> 420
-    line [60, 120, 180, 240, 300, 360, 420]
+    title "Backlog drain — account_1 + account_2 (cumulative)"
+    x-axis ["Day 1", "Day 2", "Day 3", "Day 4", "Day 5"]
+    y-axis "Listings" 0 --> 268
+    line [40, 80, 120, 160, 200]
 ```
 
-*Assumes `DRY_RUN=false`, all sessions valid, cap 10/account/run, 2 runs/day, no failures.*
+*Initial drain for account_1 + account_2 completed Jul 2026. Steady-state runs handle new catalog vehicles and price updates.*
 
 ---
 
@@ -94,9 +94,12 @@ flowchart LR
     D --> E{DRY_RUN?}
     E -->|true| F[Log planned actions only]
     E -->|false| G[Facebook executor]
-    G --> H[Create / update / remove]
+    G --> G2{In active_accounts?}
+    G2 -->|no| SKIP[Skip account]
+    G2 -->|yes| H[Create / update / remove]
     H --> I[Update sync.db + snapshots]
     F --> I
+    SKIP --> I
 ```
 
 ---
@@ -160,7 +163,7 @@ flowchart TB
 | Store | Key tables / files | Purpose |
 |-------|---------------------|---------|
 | `sync.db` | vehicles, fb_listings, sync runs | Idempotency, FB URL per account×vehicle |
-| `catalog_latest.json` | 140 vehicle records | Point-in-time scrape for diff |
+| `catalog_latest.json` | ~134 vehicle records | Point-in-time scrape for diff |
 | `sessions/account_*` | Playwright storage state | FB auth cookies |
 | `data/logs/facebook/` | PNG screenshots | Debug failed form steps |
 
@@ -184,13 +187,13 @@ timeline
         : EN + ES Marketplace UI labels
         : Manual verify obj969 on all 3 accounts
         : Sessions on fb-worker
-    section Phase 2b — Go-live (next)
-        Clear old FB listings : manual mark sold / delete
-        Mini live test : cap 1-2 posts/account - later
-        DRY_RUN=false : full backlog drain ~7 days
+        : Bulk posting account_1 + account_2
+    section Phase 2b — Go-live
+        Live sync account_1 + account_2 : DRY_RUN=false Jul 2026
+        account_3 pending : clear old FB listings first
     section Phase 3 — Steady state
         Twice-daily sync : create / update / remove
-        : price updates on all accounts
+        : price updates on active accounts
 ```
 
 ---
@@ -212,6 +215,7 @@ Each run compares **autosell.mx** (scrape) to **`fb_listings` in `sync.db`** (wh
 - Leaving old manual listings while the app posts the same cars causes **duplicates** (and FB may suppress similar posts).
 - **`update` today** only edits **price** and **description** on the existing listing (not full re-post of photos/make/model). Price changes are fully supported once live.
 - With **`DRY_RUN=true`**, actions are planned and logged only.
+- Only accounts in **`sync.active_accounts`** (or `--accounts` / `SYNC_ACCOUNTS`) are processed. account_3 is configured but excluded until go-live there.
 
 ```mermaid
 flowchart TD
@@ -227,13 +231,20 @@ flowchart TD
 
 ## Go-live checklist
 
+### account_1 + account_2 (live)
+
 1. [x] Sessions for `account_1`, `account_2`, `account_3` on fb-worker (`fb_test_session.py` → Logged in: True).
-2. [x] Manual `fb_post_test.py` succeeds on each account (Spanish UI labels supported). Verified: `obj969` (Audi), `obj1126` Traverse LT (20 photos), `obj1125` Can-am Maverick (Todoterreno) on all three accounts.
-3. [ ] Inform other account holders (clear old listings).
-4. [ ] On each FB account: **mark sold or delete** active listings. Facebook has **no reliable mass-delete API**; do this manually (or mark sold). Prefer not to automate mass wipe (account risk).
-5. [ ] Optional: reset `fb_listings` in `~/auto-upload-data/data/sync.db` for a clean tracker.
-6. [ ] **Later — mini live test:** set `MAX_POSTS_PER_ACCOUNT_PER_RUN=1` or `2`, `DRY_RUN=false`, run workflow once, verify ~3–6 new listings + DB rows, then set `DRY_RUN=true` again if needed.
-7. [ ] Full live: `DRY_RUN=false`, cap 10, monitor backlog drain (~7 days).
+2. [x] Manual `fb_post_test.py` succeeds on each account (Spanish UI labels supported).
+3. [x] Bulk sync verified — 134/134 catalog vehicles live on account_1 and account_2.
+4. [x] GitHub secret `DRY_RUN=false`.
+5. [x] `config.yaml` → `sync.active_accounts: [account_1, account_2]`.
+
+### account_3 (pending)
+
+1. [ ] account_3 operator: **mark sold or delete** active listings on Facebook.
+2. [ ] Add `account_3` to `sync.active_accounts` in `config.yaml` and push.
+3. [ ] Optional: one manual run `python run_sync.py --accounts account_3` on fb-worker.
+4. [ ] Monitor first scheduled run for account_3 (cap 10 posts/run).
 
 ---
 
@@ -241,17 +252,19 @@ flowchart TD
 
 | Item | Priority | Notes |
 |------|----------|-------|
-| Mini live sync test (cap 1–2) | High | One workflow run before full drain |
-| Enable `DRY_RUN=false` full backlog | High | After old listings cleared |
+| Enable **account_3** in scheduled sync | High | After operator clears old FB listings; add to `active_accounts` |
 | Richer **update** (photos, title, mileage) | Medium | Today: price + description only |
 | Inventory FB dashboard (discover untracked listings) | Low | Avoids manual wipe; complex / fragile |
 | One-off `fb_clear_listings.py` (mark sold) | Low | Only if inventory is huge; prefer manual |
 | Unit tests for `categorize.py` / price parse | Medium | No `tests/` package yet |
-| Faster post-publish URL capture | Medium | Often hangs after live post; listing may already be on dashboard |
+| Faster post-publish URL capture | Medium | Occasional verify false-negative (obj329); listing may already be live |
 | Exterior color reliability on all locales | Done | Plateado alias; occasional retry pass |
-| Photo limit enforcement | Done | `FB_MAX_PHOTOS = 20`; >20 blocked Next on account_3 |
-| Ubicación / Precio field handling (es-MX) | Done | Input combobox + label-near JS for Precio |
+| Photo limit enforcement | Done | `FB_MAX_PHOTOS = 20`; >20 blocked Next |
+| Ubicación / Precio field handling (es-MX) | Done | Keyboard fill strategies for Precio |
 | Powersport field set (Todoterreno) | Done | Can-Am → Todoterreno + free-text Marca |
+| Shelby / exotic makes | Done | Shelby → Ford in Marca; model `Shelby Cobra` |
+| Live sync account_1 + account_2 | Done | Jul 2026; `DRY_RUN=false` |
+| Account scoping (`active_accounts`) | Done | config.yaml + `--accounts` + `SYNC_ACCOUNTS` |
 
 ---
 
@@ -262,12 +275,12 @@ flowchart TD
 | ID | Story | Acceptance criteria | Status |
 |----|-------|---------------------|--------|
 | US-01 | As an operator, I want the public autosell catalog scraped twice daily so FB stays in sync without manual copy-paste. | Workflow green on fb-worker; ~140 vehicles in snapshot; diff logged. | Done |
-| US-02 | As an operator, I want each new public vehicle posted to **3 FB accounts** in Chihuahua. | Same vehicle on account_1/2/3; location Chihuahua; photos from autosell. | Manual posts verified on all 3; live backlog pending |
-| US-03 | As an operator, I want sold/removed autosell vehicles marked sold on FB. | `remove` action in diff; `remover.py` executes when `DRY_RUN=false`. | Implemented, not live |
-| US-04 | As an operator, I want **price** changes on autosell reflected on all FB accounts. | `update` when `content_hash` changes; price field + description. | Implemented, not live |
+| US-02 | As an operator, I want each new public vehicle posted to **active FB accounts** in Chihuahua. | Same vehicle on account_1/2; location Chihuahua; photos from autosell. | **Live** on account_1 + account_2; account_3 pending |
+| US-03 | As an operator, I want sold/removed autosell vehicles marked sold on FB. | `remove` action in diff; `remover.py` executes when `DRY_RUN=false`. | **Live** on active accounts |
+| US-04 | As an operator, I want **price** changes on autosell reflected on all FB accounts. | `update` when `content_hash` changes; price field + description. | **Live** on active accounts |
 | US-05 | As an operator, I want failed FB runs to leave debug screenshots. | PNG under `data/logs/facebook/{autosell_id}_*.png`. | Done |
 | US-06 | As an operator, I want listing URLs stored per account×vehicle. | Row in `fb_listings` with verified URL. | Done |
-| US-07 | As an operator, I want to avoid duplicate listings when enabling the app. | Clear old FB inventory before `DRY_RUN=false`. | Documented; manual step |
+| US-07 | As an operator, I want to avoid duplicate listings when enabling the app. | Clear old FB inventory before adding account to `active_accounts`. | Done for acct 1+2; pending acct 3 |
 
 ### Developer / maintainer
 
@@ -321,7 +334,8 @@ stateDiagram-v2
 | QA-06 | Categorization | `python -c "from src.facebook.categorize import categorize_vehicle; …"` | Sensible body/color/fuel for sample vehicles |
 | QA-07 | CI workflow | Manual **Run workflow** on GitHub | Green on `fb-worker`; artifact uploaded |
 | QA-08 | Persistence | Re-run workflow | `sync.db` row counts grow; sessions unchanged |
-| QA-09 | Mini live (later) | Cap 1–2, `DRY_RUN=false`, one run | Few creates on all accounts; no flood |
+| QA-09 | Mini live | Cap 1–2, `DRY_RUN=false`, one run | Passed Jul 2026 before full drain |
+| QA-10 | Full live (2 accounts) | Scheduled sync, 134/134 each | Passed Jul 2026 |
 
 ### Regression scenarios (Facebook form)
 
@@ -336,6 +350,7 @@ stateDiagram-v2
 | Pickup | Ram 1500 | Body style Truck / Camioneta |
 | Mercedes naming | `Mercedes Benz` | Make **Mercedes-Benz** |
 | KIA casing | `KIA` | Make **Kia** |
+| Shelby Cobra | `Shelby`, `Cobra` | Marca **Ford**, Modelo **Shelby Cobra** |
 
 ### Automated tests (current & planned)
 
@@ -345,7 +360,8 @@ stateDiagram-v2
 | Unit: `parse_mxn_price`, mileage | Planned | Pure functions |
 | Integration: scrape | Manual | Requires autosell reachability |
 | E2E: FB post | Manual | `fb_post_test.py` local or on fb-worker |
-| Mini live sync | Planned | Cap 1–2 before full `DRY_RUN=false` |
+| Mini live sync | Done | Jul 2026 |
+| Full live sync (2 accounts) | Done | account_1 + account_2 at 134/134 |
 
 **Suggested local categorization smoke test:**
 
@@ -362,6 +378,26 @@ for vid, title, brand, slug in [
     print(vid, categorize_vehicle(v).summary())
 "
 ```
+
+---
+
+## Configuration (account scoping)
+
+```yaml
+# config.yaml
+sync:
+  active_accounts:
+    - account_1
+    - account_2
+    # account_3: add after old FB listings cleared
+```
+
+Priority for which accounts run:
+
+1. CLI `--accounts account_1 account_2`
+2. Env `SYNC_ACCOUNTS=account_1,account_2`
+3. `config.yaml` → `sync.active_accounts`
+4. All accounts in `config.yaml` (fallback)
 
 ---
 
@@ -403,7 +439,8 @@ mindmap
 | Wrong listing URL returned | Dashboard match + strict `_verify_listing_url` |
 | Form UI changes | Debug PNGs; labeled button helpers in `ui.py` |
 | Rate limits / spam flags | Delays between actions; 10 posts/account/run cap |
-| Duplicate listings at go-live | Clear old FB inventory before `DRY_RUN=false` |
+| Duplicate listings at go-live | Clear old FB inventory before adding account to `active_accounts` |
+| account_3 not in sync | Intentional until operator clears old listings |
 | Mass-delete on Facebook | Not reliable via API; mark sold / delete manually |
 
 ---
@@ -413,7 +450,8 @@ mindmap
 | Term | Meaning |
 |------|---------|
 | **fb-worker** | Self-hosted GitHub Actions runner (label) on Oracle or Mac Mini |
-| **DRY_RUN** | When `true`, plan FB actions but do not execute |
+| **DRY_RUN** | When `true`, plan FB actions but do not execute. Currently `false` in production. |
+| **active_accounts** | Subset of `config.yaml` accounts included in scheduled sync |
 | **autosell_id** | Internal id e.g. `obj969` |
 | **content_hash** | Detects catalog changes (price, photos, title, …) for update actions |
 | **Being reviewed** / **Se está revisando** | FB moderation for new listings — normal short-term |

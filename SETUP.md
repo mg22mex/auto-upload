@@ -10,7 +10,9 @@
 
 Your daily PC can stay off. Only **fb-worker** must be always on and registered before workflows can run.
 
-Phase 0–1: scrape + diff. **Phase 2 (Facebook):** Playwright posting works on **all three accounts** (English and Spanish Marketplace UI). Sessions are on fb-worker. Scheduled sync still uses **`DRY_RUN=true`** until operators clear old listings and enable live posting.
+Phase 0–1: scrape + diff. **Phase 2 (Facebook):** Playwright posting works on **all three accounts** (English and Spanish Marketplace UI). Sessions are on fb-worker.
+
+**Live sync is on** for **account_1** and **account_2** (`DRY_RUN=false`, GitHub secret set). **account_3** is excluded via `config.yaml` → `sync.active_accounts` until that operator clears old Marketplace listings.
 
 **Extended docs:** [docs/PROJECT_GUIDE.md](./docs/PROJECT_GUIDE.md) — sync rules, go-live checklist, planned work, diagrams.
 
@@ -80,11 +82,14 @@ See also: [CI/CD flowchart](./docs/PROJECT_GUIDE.md#end-to-end-sync-flow) · [FB
 
 | Secret | Example | Used by |
 |--------|---------|---------|
-| `AUTOSELL_BASE_URL` | `https://www.autosell.mx` | both jobs |
-| `DRY_RUN` | `true` (now) → `false` (Phase 2) | fb-worker |
-| `MAX_POSTS_PER_ACCOUNT_PER_RUN` | `10` | fb-worker |
-| `TELEGRAM_BOT_TOKEN` | optional | fb-worker |
-| `TELEGRAM_CHAT_ID` | optional | fb-worker |
+| `AUTOSELL_BASE_URL` | `https://www.autosell.mx` | sync job |
+| `DRY_RUN` | `false` (live) | sync job — set `true` to plan only |
+| `MAX_POSTS_PER_ACCOUNT_PER_RUN` | `10` | sync job |
+| `SYNC_ACCOUNTS` | optional `account_1,account_2` | overrides `config.yaml` `active_accounts` |
+| `TELEGRAM_BOT_TOKEN` | optional | sync job |
+| `TELEGRAM_CHAT_ID` | optional | sync job |
+
+**Account scoping:** By default, only accounts listed in **`config.yaml`** → `sync.active_accounts` are synced. Currently `account_1` and `account_2`. Do not add `account_3` until old FB listings are cleared on that account.
 
 Local dev: `cp .env.example .env`
 
@@ -176,11 +181,11 @@ To switch later: stop/remove the old runner, register the new one with the same 
 
 Expected:
 
-- **sync** job: green on fb-worker — scrapes ~140 vehicles, prints create/update/remove plan
+- **sync** job: green on fb-worker — scrapes catalog, executes create/update/remove on **active accounts** (account_1 + account_2)
 
 Until fb-worker is registered, the workflow will stay **queued** — this is expected.
 
-Schedule: ~08:00 and ~12:00 America/Chihuahua (`0 14` and `0 18` UTC; adjust for DST).
+Schedule: ~08:00 and ~12:00 America/Chihuahua (`0 14` and `0 18` UTC; adjust for DST). Each run posts up to **10 new listings per active account**.
 
 ---
 
@@ -268,7 +273,7 @@ The poster is **bilingual**: Spanish labels first (es-MX UI), English fallback. 
 
 | Autosell / source | EN label | ES label (live UI) | Notes |
 |-------------------|----------|--------------------|-------|
-| `brand` | Make | **Marca** | Cars: searchable list (Audi, …). **Todoterreno / Powersport: free-text** — type any brand (e.g. Can-Am) |
+| `brand` | Make | **Marca** | Cars: searchable list (Audi, Ford, …). **Todoterreno / Powersport: free-text** — type any brand (e.g. Can-Am). **Shelby → Ford** (not in FB list); model becomes `Shelby Cobra` |
 | `title` | Model | **Modelo** | Text; `A 3` → `A3`, keep spaces in `Traverse LT` |
 | `year` | Year | **Año** | Dropdown |
 | `mileage` | Mileage | **Kilometraje** | Digits only |
@@ -299,28 +304,39 @@ flowchart LR
     AS --> CAT --> FB
 ```
 
-### E4. Enable live sync (go-live)
+### E4. Live sync (current state)
 
-**Do this only after old Marketplace inventory is cleared** (see [PROJECT_GUIDE go-live checklist](./docs/PROJECT_GUIDE.md#go-live-checklist)).
+**account_1 and account_2 are live.** Scheduled GitHub Actions runs use `DRY_RUN=false` and `sync.active_accounts` in `config.yaml`.
 
 ```mermaid
 flowchart TD
-    A[Manual post OK all 3 accounts] --> B[Clear old FB listings manually]
-    B --> C[Optional: reset fb_listings in sync.db]
-    C --> D[Mini live test cap 1-2 - later]
-    D --> E[Set DRY_RUN=false]
-    E --> F[~420 listings over ~7 days]
+    A[Manual post OK on active accounts] --> B[Clear old FB listings on account_3]
+    B --> C[Add account_3 to active_accounts]
+    C --> D[Third account joins scheduled sync]
 ```
 
-1. Confirm `fb_test_session.py` and a test post on each account.
-2. On each FB account: **mark sold or delete** existing active listings (Facebook has no reliable mass-delete API; do this by hand).
-3. Optional: clear `fb_listings` in `sync.db` on the VM for a true fresh start.
-4. Set GitHub secret `DRY_RUN=false` (optionally start with `MAX_POSTS_PER_ACCOUNT_PER_RUN=2` for a mini run).
-5. Monitor scheduled runs; default cap is 10 posts/account/run.
+**Already done for account_1 + account_2:**
+
+1. Sessions valid on fb-worker (`fb_test_session.py` → Logged in: True).
+2. Bulk posting verified (134/134 catalog vehicles per account).
+3. GitHub secret `DRY_RUN=false`.
+4. `config.yaml` → `sync.active_accounts: [account_1, account_2]`.
+
+**Before enabling account_3:**
+
+1. account_3 operator: **mark sold or delete** existing active listings on Facebook (no reliable mass-delete API).
+2. Add `account_3` to `sync.active_accounts` in `config.yaml` and push.
+3. Optional: run `python run_sync.py --accounts account_3` once manually to verify.
 
 ```bash
-# Full pipeline locally (respects DRY_RUN in .env)
+# Full pipeline on fb-worker (respects active_accounts + DRY_RUN in .env)
 python run_sync.py
+
+# Single account override
+python run_sync.py --accounts account_1
+
+# Plan only (no Facebook actions)
+python run_sync.py --dry-run
 ```
 
 ---
@@ -386,6 +402,6 @@ Full checklist: **[docs/PROJECT_GUIDE.md § Quality assurance](./docs/PROJECT_GU
 |------|-------------|
 | Pre-live | QA-01 … QA-08 passed (scrape, dry-run, session, post, CI) |
 | Per account | `fb_post_test.py` success + dashboard listing visible |
-| Go-live | `DRY_RUN=false` only after all 3 accounts tested |
+| Go-live | `DRY_RUN=false` on account_1 + account_2; account_3 pending clearance |
 
 ---
