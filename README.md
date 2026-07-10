@@ -2,7 +2,7 @@
 
 Sync [autosell.mx](https://www.autosell.mx) public catalog to Facebook Marketplace (Chihuahua, MX) across three personal accounts.
 
-**Status:** Scrape, diff, and Playwright posting work. Manual posts verified on **all three accounts** (Spanish + English UI). Sessions live on fb-worker. **Scheduled live posting is still off** (`DRY_RUN=true`) until operators clear old Marketplace listings and enable live sync.
+**Status:** Scrape, diff, and Playwright posting work. **Scheduled live sync is on** for **account_1** and **account_2** (`DRY_RUN=false`). **account_3** is excluded until old Marketplace listings are cleared there.
 
 📖 **[Full project guide](./docs/PROJECT_GUIDE.md)** · **[Setup](./SETUP.md)**
 
@@ -15,7 +15,7 @@ Sync [autosell.mx](https://www.autosell.mx) public catalog to Facebook Marketpla
 | **Target listings** | ~420 (140 × 3) |
 | **Schedule** | 2× daily (Chihuahua) |
 | **Posts/run/account** | 10 (configurable) |
-| **Live sync** | Off (`DRY_RUN=true`) |
+| **Live sync** | account_1 + account_2 (`DRY_RUN=false`) |
 
 ## System overview
 

@@ -9,6 +9,10 @@ sync:
   timezone: America/Chihuahua
   max_posts_per_account_per_run: 10
   removal_action: mark_sold  # mark_sold | delete
+  # Live sync accounts. account_3 excluded until operator clears old FB listings.
+  active_accounts:
+    - account_1
+    - account_2
 
 facebook:
   location_city: Chihuahua

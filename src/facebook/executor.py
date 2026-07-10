@@ -8,7 +8,7 @@ from pathlib import Path
 from src.facebook.errors import FacebookAutomationError, FacebookSessionError
 from src.facebook.poster import create_vehicle_listing
 from src.facebook.remover import remove_vehicle_listing
-from src.facebook.session import get_page, is_logged_in, open_account_context
+from src.facebook.session import get_page, is_logged_in, open_account_context, page_shows_login_form
 from src.facebook.updater import update_vehicle_listing
 from src.facebook.util import ensure_log_dir, random_delay
 from src.models import SyncAction
@@ -33,6 +33,7 @@ def execute_actions(
     config: dict,
     *,
     root: Path,
+    account_order: list[str] | None = None,
 ) -> ExecutionResult:
     if not actions:
         return ExecutionResult()
@@ -62,7 +63,11 @@ def execute_actions(
 
     result = ExecutionResult()
 
-    for account_id, account_actions in by_account.items():
+    ordered_accounts = account_order or list(by_account.keys())
+    for account_id in ordered_accounts:
+        account_actions = by_account.get(account_id)
+        if not account_actions:
+            continue
         print(f"Facebook: processing {len(account_actions)} action(s) for {account_id}")
         try:
             with open_account_context(
@@ -78,6 +83,11 @@ def execute_actions(
                     )
 
                 for action in account_actions:
+                    if page_shows_login_form(page):
+                        raise FacebookSessionError(
+                            f"Session expired for {account_id}. "
+                            f"Run: python scripts/fb_login.py --account {account_id}"
+                        )
                     try:
                         _execute_one(
                             page,

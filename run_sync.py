@@ -105,10 +105,12 @@ def run_sync_from_catalog(
     db_path: str,
     dry_run: bool,
     max_posts: int,
+    account_ids: list[str] | None = None,
 ) -> int:
-    account_ids = [account["id"] for account in config.get("accounts", [])]
+    if account_ids is None:
+        account_ids = [account["id"] for account in config.get("accounts", [])]
     if not account_ids:
-        print("No accounts configured in config.yaml", file=sys.stderr)
+        print("No accounts configured", file=sys.stderr)
         return 1
 
     store = SyncStore(db_path)
@@ -149,7 +151,9 @@ def run_sync_from_catalog(
             from src.facebook.executor import execute_actions
 
             print("Executing Facebook actions...")
-            fb_result = execute_actions(executable, store, config, root=ROOT)
+            fb_result = execute_actions(
+                executable, store, config, root=ROOT, account_order=account_ids
+            )
             executed_creates = fb_result.creates
             executed_updates = fb_result.updates
             executed_removals = fb_result.removals
@@ -208,6 +212,12 @@ def main() -> int:
         default=None,
         help="Plan only; do not touch Facebook (default from DRY_RUN env)",
     )
+    parser.add_argument(
+        "--accounts",
+        metavar="ID",
+        nargs="+",
+        help="Limit sync to these account ids (e.g. account_2). Default: all in config.yaml",
+    )
     args = parser.parse_args()
 
     load_dotenv(ROOT / ".env")
@@ -223,6 +233,22 @@ def main() -> int:
             config.get("sync", {}).get("max_posts_per_account_per_run", 10),
         )
     )
+
+    all_account_ids = [account["id"] for account in config.get("accounts", [])]
+    if args.accounts:
+        account_ids = args.accounts
+    else:
+        env_accounts = os.getenv("SYNC_ACCOUNTS", "").strip()
+        if env_accounts:
+            account_ids = [part.strip() for part in env_accounts.split(",") if part.strip()]
+        else:
+            account_ids = list(config.get("sync", {}).get("active_accounts") or all_account_ids)
+    unknown = set(account_ids) - set(all_account_ids)
+    if unknown:
+        print(f"Unknown account(s): {', '.join(sorted(unknown))}", file=sys.stderr)
+        return 1
+    if account_ids != all_account_ids:
+        print(f"Accounts limited to: {', '.join(account_ids)}")
 
     try:
         if args.scrape_only:
@@ -242,6 +268,7 @@ def main() -> int:
                 db_path=db_path,
                 dry_run=dry_run,
                 max_posts=max_posts,
+                account_ids=account_ids,
             )
 
         vehicles = run_scrape(config, output_path, snapshot_dir)
@@ -251,6 +278,7 @@ def main() -> int:
             db_path=db_path,
             dry_run=dry_run,
             max_posts=max_posts,
+            account_ids=account_ids,
         )
 
     except AutosellCatalogError as exc:

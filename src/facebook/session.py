@@ -17,26 +17,29 @@ def resolve_session_dir(config: dict, account_id: str, root: Path) -> Path:
     raise FacebookSessionError(f"Unknown account id: {account_id}")
 
 
-def is_logged_in(page: Page) -> bool:
-    page.goto("https://www.facebook.com/marketplace", wait_until="domcontentloaded", timeout=60_000)
-    page.wait_for_timeout(2_000)
-
+def page_shows_login_form(page: Page) -> bool:
     if "login" in page.url.lower():
-        return False
-
+        return True
     login_indicators = [
         page.get_by_role("button", name="Log in"),
         page.get_by_role("button", name="Iniciar sesión"),
         page.locator('input[name="email"]'),
+        page.locator('input[aria-label="Correo o teléfono"]'),
+        page.locator('input[aria-label="Contraseña"]'),
     ]
     for locator in login_indicators:
         try:
             if locator.count() and locator.first.is_visible():
-                return False
+                return True
         except Exception:
             continue
+    return False
 
-    return True
+
+def is_logged_in(page: Page) -> bool:
+    page.goto("https://www.facebook.com/marketplace", wait_until="domcontentloaded", timeout=60_000)
+    page.wait_for_timeout(2_000)
+    return not page_shows_login_form(page)
 
 
 @contextmanager

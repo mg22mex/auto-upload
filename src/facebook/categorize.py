@@ -34,6 +34,8 @@ MAKE_ALIASES: dict[str, str] = {
     "gmc": "GMC",
     "ram": "Ram",
     "volkswagen": "Volkswagen",
+    # Shelby American — not in FB Marca list; Cobra is Ford-based.
+    "shelby": "Ford",
 }
 
 # Extra Marca dropdown spellings to try (order matters)
@@ -41,6 +43,9 @@ MAKE_CANDIDATES: dict[str, tuple[str, ...]] = {
     "can-am": ("Can-Am", "Can Am", "Can-am", "BRP", "Otro", "Other"),
     "can am": ("Can-Am", "Can Am", "Can-am", "BRP", "Otro", "Other"),
 }
+
+# Brands not in Facebook's Marca dropdown — use Otro/Other, put full name in Modelo.
+UNKNOWN_FB_MAKES: frozenset[str] = frozenset()
 
 # English defaults (account_1 / EN UI). Spanish aliases are applied at fill time.
 DEFAULT_EXTERIOR = "Silver"
@@ -164,9 +169,13 @@ def categorize_vehicle(vehicle: Vehicle) -> ListingAttributes:
     haystack = _vehicle_haystack(vehicle)
     specs = {k.lower(): v for k, v in vehicle.specs.items()}
 
+    model = fb_model_name(vehicle.title)
+    if (vehicle.brand or "").strip().lower() == "shelby" and "shelby" not in model.lower():
+        model = f"Shelby {model}".strip()
+
     return ListingAttributes(
         make=fb_make_name(vehicle.brand),
-        model=fb_model_name(vehicle.title),
+        model=model,
         mileage_km=parse_mileage_km(vehicle.mileage),
         body_style=_infer_body_style(vehicle, haystack, specs),
         exterior_color=_infer_exterior_color(specs),
@@ -183,7 +192,9 @@ def parse_mileage_km(mileage: str) -> str:
     if not match:
         return "12345"
     digits = match.group(0).replace(",", "")
-    return digits or "12345"
+    if not digits or digits == "0":
+        return "12345"
+    return digits
 
 
 def fb_make_name(brand: str) -> str:
@@ -194,7 +205,14 @@ def fb_make_name(brand: str) -> str:
     return alias or cleaned
 
 
+def is_unknown_fb_make(brand: str) -> bool:
+    return (brand or "").strip().lower() in UNKNOWN_FB_MAKES
+
+
 def fb_make_candidates(brand: str) -> tuple[str, ...]:
+    key = (brand or "").strip().lower()
+    if key in UNKNOWN_FB_MAKES:
+        return ("Otro", "Other", "Otra")
     primary = fb_make_name(brand)
     extras = MAKE_CANDIDATES.get((brand or "").strip().lower(), ())
     seen: set[str] = set()

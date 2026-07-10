@@ -6,7 +6,8 @@ from pathlib import Path
 
 from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError
 
-from src.facebook.errors import FacebookPostingError
+from src.facebook.errors import FacebookPostingError, FacebookSessionError
+from src.facebook.session import page_shows_login_form
 from src.facebook.network import MarketplaceItemCapture
 from src.facebook.photos import download_vehicle_photos
 from src.facebook.ui import (
@@ -26,6 +27,7 @@ from src.facebook.categorize import (
     categorize_vehicle,
     fb_make_candidates,
     fb_model_name,
+    is_unknown_fb_make,
     spanish_candidates,
 )
 from src.facebook.util import (
@@ -52,7 +54,19 @@ def create_vehicle_listing(
     page.wait_for_timeout(3_000)
     dismiss_overlays(page)
     log_page_state(page, "create_opened")
-    _ensure_vehicle_create_flow(page)
+    if page_shows_login_form(page):
+        raise FacebookSessionError(
+            "Facebook session expired — log in again with scripts/fb_login.py"
+        )
+    _ensure_vehicle_create_flow(page, create_url=create_url)
+    if page_shows_login_form(page):
+        raise FacebookSessionError(
+            "Facebook session expired — log in again with scripts/fb_login.py"
+        )
+    if not re.search(r"/marketplace/create/(vehicle|item)", page.url, re.I):
+        raise FacebookPostingError(
+            f"Not on vehicle composer after opening create URL (at {page.url})"
+        )
 
     photo_paths = download_vehicle_photos(vehicle, max_photos=max_photos)
     capture = MarketplaceItemCapture()
@@ -105,15 +119,13 @@ def create_vehicle_listing(
                 pass
 
 
-def _ensure_vehicle_create_flow(page: Page) -> None:
+def _ensure_vehicle_create_flow(page: Page, *, create_url: str) -> None:
     """Handle category pickers only when not already on the vehicle composer."""
     if re.search(r"/marketplace/create/(vehicle|item)", page.url, re.I):
         return
     for label in (
         "Vehículo",
         "Vehicle",
-        "Vehículos",
-        "Vehicles",
         "Carro",
         "Car",
         "Camioneta",
@@ -125,23 +137,15 @@ def _ensure_vehicle_create_flow(page: Page) -> None:
                 option.click(timeout=3_000)
                 page.wait_for_timeout(1_500)
                 log_page_state(page, f"selected_{label}")
-                return
+                if re.search(r"/marketplace/create/(vehicle|item)", page.url, re.I):
+                    return
         except Exception:
             continue
 
-    for pattern in (
-        re.compile(r"veh[ií]culo", re.I),
-        re.compile(r"vehicle", re.I),
-    ):
-        text = page.get_by_text(pattern)
-        try:
-            if text.count() and text.first.is_visible():
-                text.first.click(timeout=3_000)
-                page.wait_for_timeout(1_500)
-                log_page_state(page, "selected_vehicle_text")
-                return
-        except Exception:
-            continue
+    page.goto(create_url, wait_until="domcontentloaded", timeout=90_000)
+    page.wait_for_timeout(2_000)
+    dismiss_overlays(page)
+    log_page_state(page, "create_retry")
 
 
 def _upload_photos(page: Page, photo_paths: list[Path], log_dir: Path, autosell_id: str) -> None:
@@ -203,17 +207,17 @@ def _fill_vehicle_form(
     _fill_vehicle_type(page, attrs)
     _scroll_composer_sidebar(page)
 
-    # Spanish (es-MX) labels first — account_2+ often use Spanish Marketplace UI.
+    # Match FB composer order: type -> year/make/model -> mileage -> location -> price
     core_fields: list[tuple[str, str, tuple[str, ...], str]] = [
         ("year", vehicle.year, ("Año", "Year", "Año del modelo", "Model year"), "listbox"),
         ("make", vehicle.brand, ("Marca", "Make"), "make"),
         ("model", attrs.model, ("Modelo", "Model"), "text"),
-        ("price", parse_mxn_price(vehicle.price), ("Precio", "Price"), "numeric"),
         ("mileage", attrs.mileage_km, (
             "Kilometraje", "Mileage", "Odómetro", "Odometro", "Odometer",
             "Kilómetros", "Kilometros", "Kilometers", "Vehicle mileage",
         ), "mileage"),
         ("location", city, ("Ubicación", "Location", "Ciudad"), "location"),
+        ("price", parse_mxn_price(vehicle.price), ("Precio", "Price"), "numeric"),
     ]
 
     free_text_make = attrs.vehicle_type == "Powersport"
@@ -236,6 +240,8 @@ def _fill_vehicle_form(
             ok = _fill_mileage(page, value)
         elif mode == "numeric":
             ok = _fill_price(page, value) if name == "price" else _fill_numeric_field(page, labels, value)
+            if name == "price" and ok and not _price_is_filled(page, value):
+                ok = False
         else:
             ok = _fill_vehicle_field(page, labels, value)
         if ok:
@@ -247,9 +253,11 @@ def _fill_vehicle_form(
     price_digits = parse_mxn_price(vehicle.price)
     if "price" not in filled_names:
         _scroll_composer_sidebar(page)
-        if _fill_price(page, price_digits):
+        if _fill_price(page, price_digits) and _price_is_filled(page, price_digits):
             filled_names.add("price")
             print("  filled price (retry)")
+        elif price_digits:
+            print("  MISSING price (all fill strategies failed)")
 
     # Price JS can accidentally target the wrong input — restore location if needed.
     if not _location_is_filled(page, city):
@@ -260,7 +268,12 @@ def _fill_vehicle_form(
     _ensure_required_comboboxes(page, vehicle, attrs)
     if _make_is_filled(page, vehicle.brand, free_text=free_text_make):
         filled_names.add("make")
-    if _text_field_has_value(page, ("Modelo", "Model"), attrs.model):
+    model_label = attrs.model
+    if is_unknown_fb_make(vehicle.brand) and _make_other_selected(page):
+        model_label = f"{vehicle.brand} {attrs.model}".strip()
+    if _text_field_has_value(page, ("Modelo", "Model"), model_label) or _text_field_has_value(
+        page, ("Modelo", "Model"), attrs.model
+    ):
         filled_names.add("model")
     if _combobox_has_value(page, ("Año", "Year", "Año del modelo", "Model year"), vehicle.year):
         filled_names.add("year")
@@ -332,6 +345,19 @@ def _fill_vehicle_form(
             _save_debug(page, log_dir, autosell_id, "next_disabled_pre_review")
             _log_composer_comboboxes(page)
             _log_composer_inputs(page)
+            if _refill_price_and_mileage_keyboard(page, vehicle, attrs):
+                print("  recovered price/mileage via keyboard — rechecking Siguiente")
+                page.wait_for_timeout(2_000)
+                if _composer_next_enabled(page) or _on_review_or_past_form(page):
+                    try:
+                        click_labeled_action(page, NEXT_LABELS, timeout_ms=30_000, allow_force=True)
+                    except FacebookPostingError:
+                        pass
+                    if _on_review_or_past_form(page):
+                        log_page_state(page, "after_form_next")
+                        _save_debug(page, log_dir, autosell_id, "before_publish")
+                        return filled_names
+            missing_hint = _missing_required_field_hint(page, vehicle, attrs, city)
             if _form_inputs_complete(page, vehicle, attrs, city):
                 print("  form inputs complete — force-clicking Next")
                 try:
@@ -353,8 +379,7 @@ def _fill_vehicle_form(
                 except FacebookPostingError:
                     pass
             raise FacebookPostingError(
-                "Composer Next stayed disabled — required fields still empty "
-                "(check Carrocería / Color del exterior / Estado del vehículo)."
+                f"Composer Next stayed disabled — {missing_hint}"
             )
 
     click_labeled_action(page, NEXT_LABELS, timeout_ms=60_000)
@@ -391,6 +416,84 @@ def _wait_for_next_enabled_polling(page: Page, *, timeout_ms: int = 120_000) -> 
     return False
 
 
+def _normalize_odometer_digits(value: str) -> str:
+    digits = re.sub(r"[^\d]", "", value or "")
+    if not digits or digits == "0":
+        return "12345"
+    return digits
+
+
+def _composer_next_enabled(page: Page) -> bool:
+    try:
+        return bool(
+            page.evaluate(
+                """() => {
+                    for (const label of ['Next', 'Siguiente']) {
+                      for (const node of document.querySelectorAll(
+                        `[aria-label="${label}"]`
+                      )) {
+                        if (node.getAttribute('aria-disabled') === 'true') continue;
+                        const r = node.getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) return true;
+                      }
+                    }
+                    return false;
+                }"""
+            )
+        )
+    except Exception:
+        return False
+
+
+def _price_is_filled(page: Page, digits: str) -> bool:
+    needle = re.sub(r"[^\d]", "", digits)
+    if not needle:
+        return False
+    try:
+        inputs = page.evaluate(
+            """() => [...document.querySelectorAll('input, [role="spinbutton"]')]
+              .map(el => el.value || el.textContent || '')"""
+        )
+        return any(needle in re.sub(r"[^\d]", "", val) for val in inputs)
+    except Exception:
+        return False
+
+
+def _missing_required_field_hint(
+    page: Page, vehicle: Vehicle, attrs: ListingAttributes, city: str
+) -> str:
+    price_digits = parse_mxn_price(vehicle.price)
+    parts: list[str] = []
+    if not _price_is_filled(page, price_digits):
+        parts.append("Precio")
+    if not _location_is_filled(page, city):
+        parts.append("Ubicación")
+    if not _combobox_has_value(page, ("Año", "Year"), vehicle.year):
+        parts.append("Año")
+    if not _make_is_filled(page, vehicle.brand, free_text=attrs.vehicle_type == "Powersport") and not _make_other_selected(page):
+        parts.append("Marca")
+    if not _text_field_has_value(page, ("Modelo", "Model"), attrs.model):
+        parts.append("Modelo")
+    mileage_km = _normalize_odometer_digits(attrs.mileage_km)
+    try:
+        inputs = page.evaluate(
+            """() => [...document.querySelectorAll('input')].map(el => el.value || '')"""
+        )
+        if not any(
+            mileage_km in re.sub(r"[^\d]", "", val) and re.sub(r"[^\d]", "", val) not in ("", "0")
+            for val in inputs
+        ):
+            parts.append("Kilometraje")
+    except Exception:
+        parts.append("Kilometraje")
+    if parts:
+        return f"required fields still empty ({', '.join(parts)})"
+    return (
+        "required fields appear filled but Siguiente is still disabled "
+        "(check Carrocería / Color del exterior / Estado del vehículo)"
+    )
+
+
 def _form_inputs_complete(
     page: Page, vehicle: Vehicle, attrs: ListingAttributes, city: str
 ) -> bool:
@@ -400,14 +503,18 @@ def _form_inputs_complete(
         _combobox_has_value(page, ("Año", "Year"), vehicle.year),
         _make_is_filled(page, vehicle.brand, free_text=attrs.vehicle_type == "Powersport"),
         _text_field_has_value(page, ("Modelo", "Model"), attrs.model),
+        _price_is_filled(page, price_digits),
     ]
     try:
         inputs = page.evaluate(
             """() => [...document.querySelectorAll('input')].map(el => el.value || '')"""
         )
-        has_price = any(price_digits in re.sub(r"[^\d]", "", val) for val in inputs)
-        has_mileage = any(attrs.mileage_km in re.sub(r"[^\d]", "", val) for val in inputs)
-        checks.extend([has_price, has_mileage])
+        mileage_km = _normalize_odometer_digits(attrs.mileage_km)
+        has_mileage = any(
+            mileage_km in re.sub(r"[^\d]", "", val) and re.sub(r"[^\d]", "", val) not in ("", "0")
+            for val in inputs
+        )
+        checks.append(has_mileage)
     except Exception:
         return False
     return all(checks)
@@ -1394,7 +1501,21 @@ def _combobox_contains_value(box: Locator, value: str) -> bool:
         return False
     parts = [part.strip() for part in text.split("\n") if part.strip()]
     needle = value.strip().lower()
-    return any(needle in part.lower() for part in parts)
+    return any(part.lower() == needle or needle in part.lower() for part in parts)
+
+
+def _marca_combobox_is_empty(page: Page) -> bool:
+    box = _find_combobox(page, ("Marca", "Make"))
+    if box is None:
+        return True
+    try:
+        text = (box.inner_text(timeout=1_000) or "").strip()
+    except Exception:
+        return True
+    parts = [part.strip() for part in text.split("\n") if part.strip()]
+    if not parts:
+        return True
+    return len(parts) == 1 and parts[0].lower() in ("marca", "make")
 
 
 def _fill_make_field(page: Page, brand: str, *, free_text: bool = False) -> bool:
@@ -1418,8 +1539,26 @@ def _fill_make_field(page: Page, brand: str, *, free_text: bool = False) -> bool
                 return True
         return False
 
-    if _select_from_combobox_list(page, labels, candidates):
+    if is_unknown_fb_make(brand) and _fill_make_via_other_dropdown(page):
+        if _make_is_filled(page, brand, free_text=free_text):
+            print(f"  marca Otro/Other for {brand}")
+            return True
+
+    if _select_from_combobox_list(page, labels, candidates) and _make_is_filled(
+        page, brand, free_text=free_text
+    ):
         return True
+    if _fill_make_via_other_dropdown(page) and _make_is_filled(page, brand, free_text=free_text):
+        print(f"  marca Otro/Other for {brand}")
+        return True
+    # Unknown / classic makes — try free text after dropdown fails.
+    for candidate in candidates:
+        if _fill_input_near_label(page, "Marca", candidate) or _fill_input_near_label(
+            page, "Make", candidate
+        ):
+            if _make_is_filled(page, brand):
+                print(f"  marca free-text fallback: {candidate}")
+                return True
     # Fallback: click visible "Marca" label, type brand, pick option.
     for candidate in candidates:
         for label in labels:
@@ -1449,7 +1588,9 @@ def _fill_make_field(page: Page, brand: str, *, free_text: bool = False) -> bool
             except Exception:
                 continue
     # Last resort: free text (some locales / categories)
-    return any(_fill_vehicle_field(page, labels, c) for c in candidates)
+    if any(_fill_vehicle_field(page, labels, c) for c in candidates):
+        return _make_is_filled(page, brand, free_text=free_text)
+    return False
 
 
 def _make_is_filled(page: Page, brand: str, *, free_text: bool = False) -> bool:
@@ -1459,9 +1600,75 @@ def _make_is_filled(page: Page, brand: str, *, free_text: bool = False) -> bool:
         if any(_input_near_label_has_value(page, label, c) for label in ("Marca", "Make") for c in candidates):
             return True
         return any(_text_field_has_value(page, labels, c) for c in candidates)
-    return any(_combobox_has_value(page, labels, c) for c in candidates) or any(
+    if _marca_combobox_is_empty(page):
+        return False
+    return any(_combobox_has_value(page, labels, c) for c in candidates) or _make_other_selected(page) or any(
         _text_field_has_value(page, labels, c) for c in candidates
     )
+
+
+def _make_other_selected(page: Page) -> bool:
+    labels = ("Marca", "Make")
+    return any(_combobox_has_value(page, labels, c) for c in ("Otro", "Other", "Otra"))
+
+
+def _pick_make_other_option(page: Page) -> bool:
+    try:
+        count = page.locator('[role="option"]').count()
+    except Exception:
+        return False
+    for index in range(count):
+        option = page.locator('[role="option"]').nth(index)
+        try:
+            if not option.is_visible():
+                continue
+            text = (option.inner_text(timeout=500) or "").strip().lower()
+            if text in ("otro", "other", "otra", "others") or text.startswith("otro") or text.startswith("other"):
+                option.click()
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _fill_make_via_other_dropdown(page: Page) -> bool:
+    """Select Otro/Other in the Marca combobox (classic / exotic makes)."""
+    labels = ("Marca", "Make")
+    box = _find_combobox(page, labels)
+    if box is None:
+        try:
+            bare = page.locator('[role="combobox"]').filter(
+                has_text=re.compile(r"^Marca$", re.I)
+            )
+            if bare.count() and bare.first.is_visible():
+                box = bare.first
+        except Exception:
+            return False
+    if box is None:
+        return False
+
+    others = ("Otro", "Other", "Otra", "Others")
+    try:
+        box.scroll_into_view_if_needed()
+        box.click()
+        page.wait_for_timeout(1_000)
+        if _pick_make_other_option(page):
+            page.wait_for_timeout(800)
+            if _make_other_selected(page):
+                return True
+        for other in others:
+            page.keyboard.press("Control+a")
+            page.keyboard.press("Backspace")
+            page.keyboard.type(other, delay=40)
+            page.wait_for_timeout(1_200)
+            if _pick_make_other_option(page) or _pick_option_from_list(page, other):
+                page.wait_for_timeout(800)
+                if _make_other_selected(page):
+                    return True
+        page.keyboard.press("Escape")
+    except Exception:
+        pass
+    return False
 
 
 def _select_from_combobox_list(
@@ -1618,6 +1825,12 @@ def _ensure_required_comboboxes(
     free_text_make = attrs.vehicle_type == "Powersport"
     if not _make_is_filled(page, vehicle.brand, free_text=free_text_make):
         _fill_make_field(page, vehicle.brand, free_text=free_text_make)
+    if not _make_is_filled(page, vehicle.brand, free_text=free_text_make):
+        _fill_make_via_other_dropdown(page)
+    if is_unknown_fb_make(vehicle.brand) and _make_other_selected(page):
+        full_model = f"{vehicle.brand} {attrs.model}".strip()
+        if _fill_vehicle_field(page, model_labels, full_model):
+            print(f"  model expanded for unknown make: {full_model}")
     if not _text_field_has_value(page, model_labels, attrs.model):
         _fill_vehicle_field(page, model_labels, attrs.model)
 
@@ -1891,16 +2104,164 @@ def _fill_input_near_label(page: Page, label_text: str, value: str) -> bool:
 
 
 def _fill_price(page: Page, digits: str) -> bool:
-    labels = ("Precio", "Price")
-    if _fill_numeric_field(page, labels, digits):
-        return True
-    if _fill_price_via_js(page, digits):
-        return True
-    if _fill_price_near_label(page, digits):
-        return True
-    if _fill_price_after_model(page, digits):
-        return True
-    return _fill_vehicle_field(page, labels, digits)
+    if not digits:
+        return False
+    strategies = (
+        _fill_price_empty_input_scan,
+        _fill_price_click_label,
+        _fill_price_after_mileage_tab,
+        _fill_price_after_model,
+        lambda p, d: _fill_numeric_field(p, ("Precio", "Price"), d),
+        _fill_price_near_label,
+        _fill_price_via_js,
+    )
+    for strategy in strategies:
+        try:
+            if strategy(page, digits) and _price_is_filled(page, digits):
+                return True
+        except Exception:
+            continue
+    return _fill_vehicle_field(page, ("Precio", "Price"), digits) and _price_is_filled(page, digits)
+
+
+def _fill_price_empty_input_scan(page: Page, digits: str) -> bool:
+    """Find the empty price input (not model/location/mileage) and type digits."""
+    try:
+        count = page.locator('input[type="text"]').count()
+        for i in range(count):
+            el = page.locator('input[type="text"]').nth(i)
+            if not el.is_visible():
+                continue
+            al = (el.get_attribute("aria-label") or "").lower()
+            if any(k in al for k in ("search", "ubic", "location", "buscar")):
+                continue
+            val = (el.input_value(timeout=500) or "").strip()
+            stripped = re.sub(r"[^\d]", "", val)
+            if re.search(r"[a-zA-Z]{2,}", val):
+                continue  # model
+            if stripped and stripped not in ("", "0") and len(stripped) >= 4 and not val.startswith("$"):
+                if not val.startswith("$") and digits not in stripped:
+                    continue  # mileage or other numeric
+            if val.startswith("$"):
+                el.click()
+            elif not val:
+                el.click()
+            else:
+                continue
+            page.wait_for_timeout(300)
+            page.keyboard.press("Control+a")
+            page.keyboard.press("Backspace")
+            page.wait_for_timeout(200)
+            page.keyboard.type(digits, delay=50)
+            page.wait_for_timeout(500)
+            page.keyboard.press("Tab")
+            page.wait_for_timeout(400)
+            if _price_is_filled(page, digits):
+                print("  price via empty-input scan")
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _fill_price_click_label(page: Page, digits: str) -> bool:
+    for label in ("Precio", "Price"):
+        try:
+            anchor = page.get_by_text(label, exact=True)
+            if anchor.count() == 0 or not anchor.first.is_visible():
+                continue
+            anchor.first.scroll_into_view_if_needed()
+            anchor.first.click()
+            page.wait_for_timeout(400)
+            page.keyboard.press("Tab")
+            page.wait_for_timeout(300)
+            page.keyboard.press("Control+a")
+            page.keyboard.press("Backspace")
+            page.keyboard.type(digits, delay=50)
+            page.wait_for_timeout(500)
+            page.keyboard.press("Tab")
+            page.wait_for_timeout(400)
+            if _price_is_filled(page, digits):
+                print(f"  price via {label} label click")
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _fill_price_after_mileage_tab(page: Page, digits: str) -> bool:
+    """From a filled mileage field, Tab once to price and type."""
+    try:
+        for i in range(page.locator('input[type="text"]').count()):
+            el = page.locator('input[type="text"]').nth(i)
+            if not el.is_visible():
+                continue
+            val = re.sub(r"[^\d]", "", el.input_value(timeout=500) or "")
+            if not (4 <= len(val) <= 7):
+                continue
+            el.click()
+            page.wait_for_timeout(300)
+            page.keyboard.press("Tab")
+            page.wait_for_timeout(400)
+            page.keyboard.press("Control+a")
+            page.keyboard.press("Backspace")
+            page.keyboard.type(digits, delay=50)
+            page.wait_for_timeout(500)
+            page.keyboard.press("Tab")
+            page.wait_for_timeout(400)
+            if _price_is_filled(page, digits):
+                print("  price via Tab after mileage")
+                return True
+            return False
+    except Exception:
+        pass
+    return False
+
+
+def _refill_price_and_mileage_keyboard(page: Page, vehicle: Vehicle, attrs: ListingAttributes) -> bool:
+    price_digits = parse_mxn_price(vehicle.price)
+    mileage_digits = _normalize_odometer_digits(attrs.mileage_km)
+    mileage_ok = _fill_mileage_keyboard(page, mileage_digits)
+    price_ok = (
+        _fill_price_empty_input_scan(page, price_digits)
+        or _fill_price_click_label(page, price_digits)
+        or _fill_price_after_mileage_tab(page, price_digits)
+        or _fill_price_after_model(page, price_digits)
+    )
+    return price_ok and mileage_ok
+
+
+def _fill_mileage_keyboard(page: Page, digits: str) -> bool:
+    digits = _normalize_odometer_digits(digits)
+    model_labels = ("Modelo", "Model")
+    for label in model_labels:
+        try:
+            field = page.get_by_label(label)
+            if field.count() == 0:
+                field = page.locator(f'input[aria-label*="{label}" i]')
+            if field.count() == 0 or not field.first.is_visible():
+                continue
+            field.first.scroll_into_view_if_needed()
+            field.first.click()
+            page.wait_for_timeout(400)
+            page.keyboard.press("Tab")
+            page.wait_for_timeout(300)
+            page.keyboard.press("Control+a")
+            page.keyboard.press("Backspace")
+            page.wait_for_timeout(200)
+            page.keyboard.type(digits, delay=50)
+            page.wait_for_timeout(500)
+            page.keyboard.press("Tab")
+            page.wait_for_timeout(300)
+            inputs = page.evaluate(
+                """() => [...document.querySelectorAll('input')].map(el => el.value || '')"""
+            )
+            if any(digits in re.sub(r"[^\d]", "", val) for val in inputs):
+                print(f"  mileage via keyboard ({digits})")
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def _fill_price_near_label(page: Page, digits: str) -> bool:
@@ -2045,7 +2406,7 @@ def _fill_price_via_js(page: Page, digits: str) -> bool:
 
 
 def _fill_price_after_model(page: Page, digits: str) -> bool:
-    """Tab from Model field — price often follows model/mileage in the composer."""
+    """Tab from Model field — price follows model/mileage in the composer."""
     model_labels = ("Modelo", "Model")
     for label in model_labels:
         try:
@@ -2057,28 +2418,21 @@ def _fill_price_after_model(page: Page, digits: str) -> bool:
             target = field.first
             if not target.is_visible():
                 continue
+            target.scroll_into_view_if_needed()
             target.click()
             page.wait_for_timeout(400)
-            # Tab past mileage to price (model -> mileage -> price)
-            for _ in range(3):
+            for _ in range(4):
                 page.keyboard.press("Tab")
                 page.wait_for_timeout(300)
             page.keyboard.press("Control+a")
-            page.keyboard.type(digits, delay=30)
+            page.keyboard.press("Backspace")
+            page.wait_for_timeout(200)
+            page.keyboard.type(digits, delay=50)
             page.wait_for_timeout(500)
-            active = page.evaluate(
-                """() => {
-                  const el = document.activeElement;
-                  if (!el) return null;
-                  return {
-                    tag: el.tagName,
-                    value: el.value || '',
-                    ariaLabel: el.getAttribute('aria-label') || '',
-                  };
-                }"""
-            )
-            if active and digits in re.sub(r"[^\d]", "", active.get("value", "")):
-                print(f"  price via Tab after model (label={active.get('ariaLabel', '')!r})")
+            page.keyboard.press("Tab")
+            page.wait_for_timeout(500)
+            if _price_is_filled(page, digits):
+                print("  price via Tab after model")
                 return True
         except Exception:
             continue
@@ -2086,12 +2440,14 @@ def _fill_price_after_model(page: Page, digits: str) -> bool:
 
 
 def _fill_mileage(page: Page, value: str) -> bool:
-    digits = re.sub(r"[^\d]", "", value) or "12345"
+    digits = _normalize_odometer_digits(value)
     labels = (
         "Mileage", "Kilometraje", "Odometer", "Vehicle mileage",
         "Kilometers", "Kilómetros",
     )
 
+    if _fill_mileage_keyboard(page, digits):
+        return True
     if _fill_numeric_field(page, labels, digits):
         return True
     if _fill_mileage_via_js(page, digits):
