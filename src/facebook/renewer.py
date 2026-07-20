@@ -12,7 +12,7 @@ from src.facebook.errors import FacebookAutomationError, FacebookPostingError, F
 from src.facebook.poster import _save_debug
 from src.facebook.session import get_page, is_logged_in, open_account_context, page_shows_login_form
 from src.facebook.ui import dismiss_overlays
-from src.facebook.util import ensure_log_dir, random_delay
+from src.facebook.util import ensure_log_dir, env_float, random_delay
 from src.models import SyncAction, Vehicle
 from src.store.db import SyncStore
 
@@ -43,8 +43,8 @@ def execute_renews(
 
     fb_config = config.get("facebook", {})
     headless = _env_bool("FB_HEADLESS", fb_config.get("headless", True))
-    delay_min = float(os.getenv("FB_RENEW_DELAY_MIN_SEC", os.getenv("FB_ACTION_DELAY_MIN_SEC", "15")))
-    delay_max = float(os.getenv("FB_RENEW_DELAY_MAX_SEC", os.getenv("FB_ACTION_DELAY_MAX_SEC", "30")))
+    delay_min = env_float("FB_RENEW_DELAY_MIN_SEC", 15.0, "FB_ACTION_DELAY_MIN_SEC")
+    delay_max = env_float("FB_RENEW_DELAY_MAX_SEC", 30.0, "FB_ACTION_DELAY_MAX_SEC")
     log_dir = ensure_log_dir(root / "data" / "logs" / "facebook")
 
     by_account: dict[str, list[SyncAction]] = defaultdict(list)

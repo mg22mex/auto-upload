@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import random
 import re
 import time
@@ -103,6 +104,31 @@ def vehicle_description(vehicle: Vehicle) -> str:
             lines.append(f"{key}: {value}")
     lines.append(f"Más información: {vehicle.url}")
     return "\n".join(lines)
+
+
+def env_str(name: str, default: str, *fallbacks: str) -> str:
+    """Return a non-blank env value; blank/missing uses the next fallback, then default.
+
+    GitHub Actions maps unset secrets to empty strings.
+    """
+    for key in (name, *fallbacks):
+        raw = os.getenv(key)
+        if raw is not None and str(raw).strip():
+            return str(raw).strip()
+    return default
+
+
+def env_float(name: str, default: float, *fallbacks: str) -> float:
+    """Parse a float env var; blank/missing uses the next fallback, then default.
+
+    GitHub Actions maps unset secrets to empty strings, which breaks float('').
+    """
+    return float(env_str(name, str(default), *fallbacks))
+
+
+def env_int(name: str, default: int, *fallbacks: str) -> int:
+    """Parse an int env var; blank/missing uses the next fallback, then default."""
+    return int(env_str(name, str(default), *fallbacks))
 
 
 def random_delay(min_sec: float, max_sec: float) -> None:

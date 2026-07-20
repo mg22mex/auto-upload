@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.facebook.renewer import execute_renews
+from src.facebook.util import env_int
 from src.inventory.snapshot import load_catalog_snapshot
 from src.store.db import SyncStore
 from src.sync.repost import parse_older_than_days, plan_repost_actions
@@ -83,14 +84,14 @@ def main() -> int:
     )
     max_per = args.max
     if max_per is None:
-        max_per = int(
-            os.getenv(
-                "RENEW_MAX_PER_ACCOUNT_PER_RUN",
+        max_per = env_int(
+            "RENEW_MAX_PER_ACCOUNT_PER_RUN",
+            int(
                 renew_cfg.get(
                     "max_per_account_per_run",
                     repost_cfg.get("max_per_account_per_run", 25),
-                ),
-            )
+                )
+            ),
         )
 
     catalog_path = ROOT / args.catalog

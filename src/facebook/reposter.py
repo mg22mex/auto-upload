@@ -9,7 +9,7 @@ from src.facebook.errors import FacebookAutomationError, FacebookSessionError
 from src.facebook.poster import create_vehicle_listing
 from src.facebook.remover import remove_vehicle_listing
 from src.facebook.session import get_page, is_logged_in, open_account_context, page_shows_login_form
-from src.facebook.util import ensure_log_dir, random_delay
+from src.facebook.util import ensure_log_dir, env_float, env_int, env_str, random_delay
 from src.models import SyncAction
 from src.store.db import SyncStore
 
@@ -37,17 +37,15 @@ def execute_reposts(
 
     fb_config = config.get("facebook", {})
     headless = _env_bool("FB_HEADLESS", fb_config.get("headless", True))
-    max_photos = int(
-        os.getenv(
-            "MAX_PHOTOS_PER_LISTING",
-            fb_config.get("max_photos_per_listing", 20),
-        )
+    max_photos = env_int(
+        "MAX_PHOTOS_PER_LISTING",
+        int(fb_config.get("max_photos_per_listing", 20)),
     )
-    delay_min = float(os.getenv("FB_ACTION_DELAY_MIN_SEC", "60"))
-    delay_max = float(os.getenv("FB_ACTION_DELAY_MAX_SEC", "120"))
-    removal_action = os.getenv(
+    delay_min = env_float("FB_ACTION_DELAY_MIN_SEC", 60.0)
+    delay_max = env_float("FB_ACTION_DELAY_MAX_SEC", 120.0)
+    removal_action = env_str(
         "REMOVAL_ACTION",
-        config.get("sync", {}).get("removal_action", "mark_sold"),
+        str(config.get("sync", {}).get("removal_action", "mark_sold")),
     )
     log_dir = ensure_log_dir(root / "data" / "logs" / "facebook")
 

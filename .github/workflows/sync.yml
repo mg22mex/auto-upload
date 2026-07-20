@@ -68,11 +68,11 @@ jobs:
         env:
           AUTOSELL_BASE_URL: ${{ secrets.AUTOSELL_BASE_URL }}
           DRY_RUN: ${{ secrets.DRY_RUN || 'false' }}
-          MAX_POSTS_PER_ACCOUNT_PER_RUN: ${{ secrets.MAX_POSTS_PER_ACCOUNT_PER_RUN }}
-          FB_ACTION_DELAY_MIN_SEC: ${{ secrets.FB_ACTION_DELAY_MIN_SEC }}
-          FB_ACTION_DELAY_MAX_SEC: ${{ secrets.FB_ACTION_DELAY_MAX_SEC }}
-          REMOVAL_ACTION: ${{ secrets.REMOVAL_ACTION }}
-          FB_HEADLESS: ${{ secrets.FB_HEADLESS }}
+          MAX_POSTS_PER_ACCOUNT_PER_RUN: ${{ secrets.MAX_POSTS_PER_ACCOUNT_PER_RUN || '3' }}
+          FB_ACTION_DELAY_MIN_SEC: ${{ secrets.FB_ACTION_DELAY_MIN_SEC || '60' }}
+          FB_ACTION_DELAY_MAX_SEC: ${{ secrets.FB_ACTION_DELAY_MAX_SEC || '120' }}
+          REMOVAL_ACTION: ${{ secrets.REMOVAL_ACTION || 'mark_sold' }}
+          FB_HEADLESS: ${{ secrets.FB_HEADLESS || 'true' }}
           DB_PATH: data/sync.db
           SNAPSHOT_DIR: data/snapshots
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}

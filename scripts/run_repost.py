@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.facebook.reposter import execute_reposts
+from src.facebook.util import env_int
 from src.inventory.snapshot import load_catalog_snapshot
 from src.store.db import SyncStore
 from src.sync.repost import parse_older_than_days, plan_repost_actions
@@ -89,11 +90,9 @@ def main() -> int:
     )
     max_per = args.max
     if max_per is None:
-        max_per = int(
-            os.getenv(
-                "REPOST_MAX_PER_ACCOUNT_PER_RUN",
-                repost_cfg.get("max_per_account_per_run", 10),
-            )
+        max_per = env_int(
+            "REPOST_MAX_PER_ACCOUNT_PER_RUN",
+            int(repost_cfg.get("max_per_account_per_run", 10)),
         )
 
     catalog_path = ROOT / args.catalog

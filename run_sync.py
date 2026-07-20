@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
+from src.facebook.util import env_int
 from src.inventory.autosell import AutosellCatalogError, fetch_catalog
 from src.inventory.snapshot import load_catalog_snapshot, save_catalog_snapshot
 from src.sync.engine import plan_sync_actions, split_executable_actions
@@ -227,11 +228,9 @@ def main() -> int:
     db_path = os.getenv("DB_PATH", "data/sync.db")
     snapshot_dir = Path(os.getenv("SNAPSHOT_DIR", "data/snapshots"))
     output_path = Path(args.output)
-    max_posts = int(
-        os.getenv(
-            "MAX_POSTS_PER_ACCOUNT_PER_RUN",
-            config.get("sync", {}).get("max_posts_per_account_per_run", 10),
-        )
+    max_posts = env_int(
+        "MAX_POSTS_PER_ACCOUNT_PER_RUN",
+        int(config.get("sync", {}).get("max_posts_per_account_per_run", 10)),
     )
 
     all_account_ids = [account["id"] for account in config.get("accounts", [])]
