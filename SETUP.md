@@ -48,7 +48,7 @@ The workflow symlinks `data/` and `sessions/` to `~/auto-upload-data/` so `sync.
 | Workflow | Schedule (Chihuahua) | Purpose |
 |----------|----------------------|---------|
 | `sync.yml` | 08:00 & 12:00 daily | New cars, price updates, removals |
-| `repost.yml` | **Sunday 09:00** | Refresh listing placement (respects holds) |
+| `repost.yml` (Weekly renew) | **Sunday 09:00** | Native **Renovar** (same URL; respects holds) |
 
 ---
 
@@ -344,43 +344,37 @@ python run_sync.py --accounts account_1
 python run_sync.py --dry-run
 ```
 
-### E5. Repost (replace extension workflow)
+### E5. Renew vs repost
 
-Repost marks the **old** listing sold, creates a **new** listing, and updates `sync.db` with the new URL and `posted_at`. This is **separate** from the 2× daily sync.
+**Weekly default = Renovar** (same item URL — ads-safe, fast):
+
+```bash
+python scripts/run_renew.py --account account_2 --ids obj1137 --dry-run
+python scripts/run_renew.py --account account_1 --all-eligible --max 25
+```
+
+**Extension-style new URL** (slow full create, or after Chrome extension):
+
+```bash
+# Our automation (mark sold → create)
+python scripts/run_repost.py --account account_2 --ids obj1126
+
+# After Chrome extension created a new item URL:
+python scripts/fb_set_listing_url.py --account account_2 --autosell-id obj1136 \
+  --url 'https://www.facebook.com/marketplace/item/NEWID/'
+```
 
 **Protect listings during FB ads:**
 
 ```bash
 python scripts/fb_repost_hold.py add obj1126 --account account_2 --until 2026-07-25 --reason fb_ads
-python scripts/fb_repost_hold.py list --account account_2
-python scripts/fb_repost_hold.py clear obj1126 --account account_2
 ```
 
-**Manual repost (extension-style selection):**
-
-```bash
-python scripts/run_repost.py --account account_2 --ids obj1126,obj969 --dry-run
-python scripts/run_repost.py --account account_2 --ids obj1126,obj969
-```
-
-**Batch repost (oldest first, respects holds):**
-
-```bash
-python scripts/run_repost.py --account account_1 --all-eligible --older-than 7d --max 10
-```
-
-**Admin override** (ignore holds — use sparingly):
-
-```bash
-python scripts/run_repost.py --account account_2 --ids obj1126 --force
-```
-
-| | Extension | Built-in repost |
-|--|-----------|-----------------|
-| Pick listings | UI checkboxes | `--ids` |
-| Protect promoted items | Don't select them | `fb_repost_hold add` |
-| Remember exclusions | Manual each week | Holds in `sync.db` |
-| URL sync with auto-upload | Manual | Automatic |
+| Flow | URL | Speed | Weekly job |
+|------|-----|-------|------------|
+| Renovar | Same | Seconds | Yes (`run_renew.py`) |
+| Extension / full repost | New | Minutes | Manual |
+| FB “eliminar y volver a publicar” | New (when eligible) | — | Not offered for our stock (count 0) |
 
 ---
 

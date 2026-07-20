@@ -35,14 +35,19 @@ def plan_repost_actions(
     max_per_account: int = 10,
     is_on_hold,
     force: bool = False,
+    action_name: str = "repost",
 ) -> tuple[list[SyncAction], list[str]]:
-    """Plan repost actions. is_on_hold(autosell_id, account_id) -> bool."""
+    """Plan repost/renew actions. is_on_hold(autosell_id, account_id) -> bool."""
     if not explicit_ids and not all_eligible:
         raise ValueError("Specify explicit_ids or all_eligible=True")
+    if action_name not in ("repost", "renew"):
+        raise ValueError(f"Unsupported action_name: {action_name}")
 
     active_by_id = {vehicle.autosell_id: vehicle for vehicle in vehicles}
     now = datetime.now(timezone.utc)
     min_age = timedelta(days=older_than_days)
+    hold_label = "repost hold" if action_name == "repost" else "renew hold"
+    cap_label = "repost" if action_name == "repost" else "renew"
 
     live_by_key: dict[tuple[str, str], object] = {}
     for row in live_listings:
@@ -66,7 +71,7 @@ def plan_repost_actions(
             return
 
         if not force and is_on_hold(autosell_id, account_id):
-            skipped.append(f"{autosell_id} on {account_id}: repost hold active")
+            skipped.append(f"{autosell_id} on {account_id}: {hold_label} active")
             return
 
         if all_eligible and older_than_days > 0:
@@ -87,16 +92,20 @@ def plan_repost_actions(
                     pass
 
         if budget[account_id] <= 0:
-            skipped.append(f"{autosell_id} on {account_id}: repost cap reached for account")
+            skipped.append(f"{autosell_id} on {account_id}: {cap_label} cap reached for account")
             return
 
+        if explicit_ids:
+            reason = f"Manual {action_name}"
+        else:
+            reason = f"Eligible (>{older_than_days}d since post)"
         actions.append(
             SyncAction(
-                action="repost",
+                action=action_name,
                 autosell_id=autosell_id,
                 account_id=account_id,
                 slug=vehicle.slug,
-                reason="Manual repost" if explicit_ids else f"Eligible (>{older_than_days}d since post)",
+                reason=reason,
                 vehicle=vehicle,
                 fb_listing_url=row["fb_listing_url"],
             )

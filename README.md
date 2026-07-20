@@ -13,7 +13,7 @@ Sync [autosell.mx](https://www.autosell.mx) public catalog to Facebook Marketpla
 | **Vehicles** | ~134 public catalog |
 | **FB accounts** | 3 sessions; **2 live** (account_1, account_2) |
 | **Target listings (live)** | ~268 (134 × 2 active accounts) |
-| **Schedule** | 2× daily sync + **weekly repost** (Sun 09:00 Chihuahua) |
+| **Schedule** | 2× daily sync + **weekly renew** (Sun 09:00 Chihuahua) |
 | **Posts/run/account** | 10 (configurable) |
 | **Live sync** | account_1 + account_2 (`DRY_RUN=false`) |
 | **account_3** | Excluded until old listings cleared |
@@ -42,15 +42,17 @@ The planner only manages listings **recorded in `sync.db`**. It does **not** sca
 | Job | Host | Action |
 |-----|------|--------|
 | **sync** | Self-hosted `fb-worker` | Scrape → diff → create / update / remove on FB |
-| **repost** | Self-hosted `fb-worker` | Weekly repost eligible listings (account_1 + account_2) |
+| **repost** / renew | Self-hosted `fb-worker` | Weekly **Renovar** (same URL); optional full repost via CLI |
 
 ## Key scripts
 
 | Script | Purpose |
 |--------|---------|
 | `run_sync.py` | Full sync (scrape + diff + FB when `DRY_RUN=false`; respects `sync.active_accounts`) |
-| `scripts/run_repost.py` | Repost listings (mark sold → create → refresh URL in sync.db) |
-| `scripts/fb_repost_hold.py` | Add/clear/list repost holds (ads, promotions) |
+| `scripts/run_renew.py` | **Renovar** (same URL, bump) — weekly default |
+| `scripts/run_repost.py` | Full repost (mark sold → create → new URL) |
+| `scripts/fb_repost_hold.py` | Holds — skip renew/repost during FB ads |
+| `scripts/fb_set_listing_url.py` | Fix sync.db URL after Chrome extension |
 | `scripts/fb_login.py` | One-time headed login per account |
 | `scripts/fb_test_session.py` | Verify saved session |
 | `scripts/fb_post_test.py` | Post one vehicle (e.g. `--autosell-id obj969`) |

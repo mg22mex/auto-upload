@@ -48,10 +48,10 @@ class Vehicle:
 
 @dataclass
 class SyncAction:
-    action: str  # create | update | remove | repost
+    action: str  # create | update | remove | repost | renew
     autosell_id: str
     account_id: str | None
     slug: str
     reason: str
     vehicle: Vehicle | None = None
-    fb_listing_url: str | None = None  # current URL (repost)
+    fb_listing_url: str | None = None  # current URL (repost / renew)

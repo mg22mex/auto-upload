@@ -265,6 +265,50 @@ class SyncStore:
         )
         self._conn.commit()
 
+    def update_fb_listing_url(
+        self,
+        autosell_id: str,
+        account_id: str,
+        *,
+        fb_listing_url: str,
+        reset_posted_at: bool = True,
+    ) -> bool:
+        """Point sync.db at a new FB item URL (e.g. after extension repost)."""
+        now = utc_now()
+        if reset_posted_at:
+            cursor = self._conn.execute(
+                """
+                UPDATE fb_listings
+                SET fb_listing_url = ?, status = 'live', posted_at = ?, updated_at = ?
+                WHERE autosell_id = ? AND account_id = ?
+                """,
+                (fb_listing_url, now, now, autosell_id, account_id),
+            )
+        else:
+            cursor = self._conn.execute(
+                """
+                UPDATE fb_listings
+                SET fb_listing_url = ?, status = 'live', updated_at = ?
+                WHERE autosell_id = ? AND account_id = ?
+                """,
+                (fb_listing_url, now, autosell_id, account_id),
+            )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    def touch_posted_at(self, autosell_id: str, account_id: str) -> None:
+        """Record a successful Renovar (same URL, bump placement)."""
+        now = utc_now()
+        self._conn.execute(
+            """
+            UPDATE fb_listings
+            SET posted_at = ?, updated_at = ?, status = 'live'
+            WHERE autosell_id = ? AND account_id = ?
+            """,
+            (now, now, autosell_id, account_id),
+        )
+        self._conn.commit()
+
     def upsert_fb_listing(
         self,
         autosell_id: str,

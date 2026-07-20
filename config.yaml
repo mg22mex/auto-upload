@@ -13,11 +13,15 @@ sync:
   active_accounts:
     - account_1
     - account_2
-  # Repost (scripts/run_repost.py + .github/workflows/repost.yml — Sundays 09:00 Chihuahua)
+  # Weekly bump: native FB Renovar (same URL). Extension-style = run_repost.py.
+  renew:
+    min_age_days: 7
+    max_per_account_per_run: 25
+    schedule: "0 15 * * 0"  # Sunday 09:00 America/Chihuahua (UTC-6)
+  # Full delete+recreate (slow; use manually when you need a new item URL)
   repost:
     min_age_days: 7
     max_per_account_per_run: 10
-    schedule: "0 15 * * 0"  # Sunday 09:00 America/Chihuahua (UTC-6)
 
 facebook:
   location_city: Chihuahua
