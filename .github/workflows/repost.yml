@@ -72,7 +72,7 @@ jobs:
           RENEW_MAX_PER_ACCOUNT_PER_RUN: ${{ inputs.max_per_account || secrets.RENEW_MAX_PER_ACCOUNT_PER_RUN || '25' }}
           FB_RENEW_DELAY_MIN_SEC: ${{ secrets.FB_RENEW_DELAY_MIN_SEC || '20' }}
           FB_RENEW_DELAY_MAX_SEC: ${{ secrets.FB_RENEW_DELAY_MAX_SEC || '40' }}
-          FB_HEADLESS: ${{ secrets.FB_HEADLESS }}
+          FB_HEADLESS: ${{ secrets.FB_HEADLESS || 'true' }}
           DB_PATH: data/sync.db
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,7 +9,7 @@ from src.facebook.poster import create_vehicle_listing
 from src.facebook.remover import remove_vehicle_listing
 from src.facebook.session import get_page, is_logged_in, open_account_context, page_shows_login_form
 from src.facebook.updater import update_vehicle_listing
-from src.facebook.util import ensure_log_dir, env_float, env_int, env_str, random_delay
+from src.facebook.util import ensure_log_dir, env_bool, env_float, env_int, env_str, random_delay
 from src.models import SyncAction
 from src.store.db import SyncStore
 
@@ -39,7 +38,7 @@ def execute_actions(
         return ExecutionResult()
 
     fb_config = config.get("facebook", {})
-    headless = _env_bool("FB_HEADLESS", fb_config.get("headless", True))
+    headless = env_bool("FB_HEADLESS", bool(fb_config.get("headless", True)))
     max_photos = env_int(
         "MAX_PHOTOS_PER_LISTING",
         int(fb_config.get("max_photos_per_listing", 20)),
@@ -191,9 +190,3 @@ def _sort_actions(actions: list[SyncAction]) -> list[SyncAction]:
     order = {"remove": 0, "update": 1, "create": 2}
     return sorted(actions, key=lambda item: order.get(item.action, 99))
 
-
-def _env_bool(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}

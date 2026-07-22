@@ -131,6 +131,17 @@ def env_int(name: str, default: int, *fallbacks: str) -> int:
     return int(env_str(name, str(default), *fallbacks))
 
 
+def env_bool(name: str, default: bool, *fallbacks: str) -> bool:
+    """Parse a bool env var; blank/missing uses the next fallback, then default.
+
+    Empty GitHub secrets must not flip True defaults to False (e.g. FB_HEADLESS).
+    """
+    raw = env_str(name, "", *fallbacks)
+    if not raw:
+        return default
+    return raw.lower() in {"1", "true", "yes", "on"}
+
+
 def random_delay(min_sec: float, max_sec: float) -> None:
     if max_sec <= 0:
         return
