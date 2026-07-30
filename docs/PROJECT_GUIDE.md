@@ -459,3 +459,66 @@ mindmap
 | **content_hash** | Detects catalog changes (price, photos, title, …) for update actions |
 | **Being reviewed** / **Se está revisando** | FB moderation for new listings — normal short-term |
 | **Lean session** | Session copy without browser Cache/GPUCache (few MB vs 100MB+) |
+
+---
+
+## Phase 2 Architecture & Integrations
+
+Scaffolded modules under `src/` for lead-to-quote-to-message automation. They do **not** replace the existing Facebook Marketplace sync pipeline (`run_sync.py` → inventory → sync engine → `src/facebook/`).
+
+### Module roles
+
+| Module | Path | Responsibility |
+|--------|------|----------------|
+| **quote_engine** | `src/quote_engine/` | Local French Amortization calculator. Pure Python, no network I/O. All payment schedules and quote figures are computed in-process (milliseconds) **before** any CRM or messaging payload is built. |
+| **odoo_sync** | `src/odoo_sync/` | Odoo CRM XML-RPC client. Creates/updates leads and opportunities; pulls structured lead fields for quoting. Credentials and host from `.env` only. |
+| **whatsapp_worker** | `src/whatsapp_worker/` | Thin API wrapper for open-wa / Evolution API. Outbound dispatch of approved quotes and follow-ups. Separate config and process boundary from Playwright. |
+
+### Incoming lead flow (Web / Voice AI → Odoo → WhatsApp)
+
+```mermaid
+flowchart LR
+    subgraph Inbound["Inbound"]
+        WEB[Web AI / Voice AI]
+    end
+
+    subgraph CRM["CRM"]
+        ODOO[odoo_sync XML-RPC]
+        LEAD[(Odoo lead / opportunity)]
+    end
+
+    subgraph Local["Local compute"]
+        QE[quote_engine<br/>French Amortization]
+    end
+
+    subgraph Outbound["Outbound messaging"]
+        WA[whatsapp_worker<br/>open-wa / Evolution]
+        CUST[Customer WhatsApp]
+    end
+
+    WEB -->|new lead payload| ODOO
+    ODOO --> LEAD
+    LEAD -->|vehicle + terms| QE
+    QE -->|quote figures| ODOO
+    ODOO -->|approved dispatch| WA
+    WA --> CUST
+```
+
+1. **Capture** — Web or Voice AI creates/updates a lead in Odoo via `odoo_sync`.
+2. **Quote** — `quote_engine` runs French Amortization locally from lead terms (price, down payment, rate, term). No external calc service.
+3. **Persist** — Quote summary written back to Odoo on the opportunity/lead.
+4. **Dispatch** — `whatsapp_worker` sends the customer-facing message only after local calc + CRM update succeed.
+
+Facebook Marketplace sync remains independent: catalog scrape → `sync.db` diff → Playwright on `sessions/account_*`.
+
+### Isolation rules (scraping vs messaging)
+
+| Rule | Scraping workers (`src/facebook/`, inventory) | Messaging workers (`src/whatsapp_worker/`) |
+|------|-----------------------------------------------|--------------------------------------------|
+| Browser / session root | Playwright profiles in `sessions/account_*` only | No access to `sessions/`; API tokens via `.env` |
+| Runtime | CI / fb-worker / headed `scripts/` — not inside LLM chat | Separate process or job; not mixed with FB browser launch |
+| Secrets | FB session cookies on disk; never commit | WhatsApp / Evolution API keys in `.env` only |
+| Shared state | `sync.db`, catalog snapshots | Odoo lead IDs + outbound message log (future) — not FB listing rows |
+| Cross-talk | Must not import or launch WhatsApp clients mid-scrape | Must not open Chromium with Marketplace session dirs |
+
+**Hard boundaries:** never reuse a Marketplace Playwright context for WhatsApp automation; never run live browser scripts from the IDE chat window; never hardcode CRM or messaging credentials.

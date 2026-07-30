@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Proyecto Auto-AI: Autosell.mx</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #0b0f19;
+            color: #333;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .slide {
+            box-sizing: border-box;
+            width: 960px;
+            height: 540px;
+            position: relative;
+            background: #ffffff;
+            margin-bottom: 40px;
+            padding: 40px 60px;
+            border-radius: 8px;
+            box-shadow: 0 12px 30px rgba(0,0,0,0.4);
+            overflow: hidden;
+        }
+        
+        /* Slide 1: Portada Azul Oscuro exacta a la Imagen 1 */
+        .title-slide {
+            background: linear-gradient(135deg, #0f1c3f 0%, #080f24 100%);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            color: #ffffff;
+        }
+        
+        .title-slide h1 {
+            font-size: 46px;
+            margin: 0 0 15px 0;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+        }
+        
+        .title-slide h2 {
+            font-size: 16px;
+            color: #8fa1c4;
+            font-weight: 400;
+            margin: 0 0 45px 0;
+            letter-spacing: 0.5px;
+        }
+        
+        .badge-proposal {
+            border: 1px solid #b81c22;
+            background-color: rgba(184, 28, 34, 0.1);
+            color: #ff4d5a;
+            padding: 10px 20px;
+            font-size: 12px;
+            border-radius: 4px;
+            font-weight: 600;
+        }
+        
+        /* Estilos Diapositivas de Contenido */
+        h1.slide-title {
+            color: #0c2340;
+            font-size: 28px;
+            margin-top: 10px;
+            margin-bottom: 5px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+        }
+        h1.slide-title::before {
+            content: "";
+            display: inline-block;
+            width: 4px;
+            height: 26px;
+            background-color: #B81C22;
+            margin-right: 12px;
+            border-radius: 2px;
+        }
+        
+        .subtitle {
+            color: #666;
+            font-size: 14px;
+            margin-bottom: 35px;
+        }
+
+        .grid-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 25px;
+        }
+
+        /* Estilo Exacto de Tarjetas "Asignación por Sucursal" (Imagen 1) */
+        .card-branch {
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 25px 20px;
+            background: #ffffff;
+            border-left: 4px solid #B81C22;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.02);
+        }
+        
+        .card-branch h3 {
+            color: #0c2340;
+            font-size: 18px;
+            margin-top: 0;
+            margin-bottom: 15px;
+            font-weight: 700;
+        }
+        
+        .card-branch p {
+            font-size: 13px;
+            color: #666;
+            line-height: 1.5;
+            margin-bottom: 15px;
+        }
+        
+        .card-branch ul {
+            padding-left: 18px;
+            margin: 0;
+        }
+        
+        .card-branch li {
+            font-size: 12px;
+            color: #444;
+            margin-bottom: 10px;
+            line-height: 1.4;
+        }
+
+        .footer-text {
+            position: absolute;
+            bottom: 25px;
+            left: 60px;
+            font-size: 11px;
+            color: #a0aec0;
+        }
+        
+        .slide-number {
+            position: absolute;
+            bottom: 25px;
+            right: 60px;
+            font-size: 11px;
+            color: #a0aec0;
+        }
+        
+        .grid-3 {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 15px;
+        }
+        
+        .small-card {
+            border: 1px solid #e2e8f0;
+            border-radius: 6px;
+            padding: 15px;
+            background: #f8fafc;
+            border-top: 3px solid #0c2340;
+        }
+        .small-card h4 {
+            margin-top: 0;
+            color: #0c2340;
+            font-size: 14px;
+            margin-bottom: 8px;
+        }
+        .small-card p {
+            font-size: 12px;
+            color: #666;
+            margin: 0;
+            line-height: 1.4;
+        }
+        
+        .highlight-box {
+            background-color: #fff5f5;
+            border-left: 4px solid #B81C22;
+            padding: 15px;
+            border-radius: 0 6px 6px 0;
+            font-size: 12px;
+            color: #333;
+            margin-top: 25px;
+            line-height: 1.5;
+        }
+
+        .table-style {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+            font-size: 12px;
+        }
+        .table-style th {
+            background-color: #0c2340;
+            color: white;
+            padding: 12px 10px;
+            text-align: left;
+        }
+        .table-style td {
+            padding: 10px;
+            border: 1px solid #e2e8f0;
+            color: #444;
+        }
+        .table-style tr:nth-child(even) {
+            background-color: #f8fafc;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Diapositiva 1: Portada (Copia exacta de la UI Azul de la Imagen 1) -->
+    <div class="slide title-slide">
+        <h1>Proyecto Auto-AI</h1>
+        <h2>Ecosistema Inteligente de Conversión, Captura y Cotización de Leads</h2>
+        <div class="badge-proposal">Propuesta Tecnológica Exclusiva para Autosell.mx</div>
+        <div class="slide-number">Slide 1 de 7</div>
+    </div>
+
+    <!-- Diapositiva 2: Entrada Multicanal -->
+    <div class="slide">
+        <h1 class="slide-title">Entrada Multicanal y Flujo General</h1>
+        <div class="subtitle">Absorción unificada de prospectos desde tres fuentes críticas de adquisición</div>
+        
+        <div class="grid-3">
+            <div class="small-card">
+                <h4>A. Prospectos de la Web</h4>
+                <p>Capturados en vivo 24/7 por el Agente AI Conversacional directo en el home de autosell.mx.</p>
+            </div>
+            <div class="small-card">
+                <h4>B. Llamadas Telefónicas</h4>
+                <p>Clientes llamando a sucursales; la IA de voz atiende reconociendo la procedencia de la línea física.</p>
+            </div>
+            <div class="small-card">
+                <h4>C. Gestión Directa CRM</h4>
+                <p>Oportunidades creadas manualmente en Odoo o mapeadas desde portales clasificados externos.</p>
+            </div>
+        </div>
+
+        <div class="highlight-box">
+            <strong>Estrategia de Asignación Inmediata:</strong> El backend analiza en tiempo real en qué lote físico se encuentra resguardado el vehículo premium. Si pertenece a Periférico, entra a la cola de asesores de esa sede en Odoo, disparando una llamada saliente automática con el identificador de dicha sucursal en menos de 60 segundos.
+        </div>
+        
+        <div class="footer-text">Proyecto Auto-AI: Propuesta de Automatización para Autosell.mx</div>
+        <div class="slide-number">Slide 2 de 7</div>
+    </div>
+
+    <!-- Diapositiva 3: Asignación por Sucursal (Réplica exacta de la Imagen 1) -->
+    <div class="slide">
+        <h1 class="slide-title">Asignación por Sucursal</h1>
+        <div class="subtitle">El motor de enrutamiento distribuye de manera balanceada los leads según la ubicación física del auto</div>
+        
+        <div class="grid-2">
+            <div class="card-branch">
+                <h3>Lógica de Sucursal Periférico</h3>
+                <p>Si el auto de interés consultado se encuentra físicamente en el Showroom de Periférico de la Juventud:</p>
+                <ul>
+                    <li>El lead se cataloga y asocia de forma exclusiva a los vendedores de esta locación en Odoo.</li>
+                    <li>Activa la cola Round-Robin exclusiva de Periférico para asignar equitativamente al vendedor en turno.</li>
+                </ul>
+            </div>
+            
+            <div class="card-branch">
+                <h3>Lógica de Sucursal Secundaria</h3>
+                <p>Si el auto consultado por el prospecto corresponde al inventario registrado de la segunda sucursal:</p>
+                <ul>
+                    <li>El motor de enrutamiento asigna inmediatamente el lead al roster local de dicha sucursal.</li>
+                    <li>Garantiza transparencia y un reparto balanceado del tráfico de leads sin disputas internas.</li>
+                </ul>
+            </div>
+        </div>
+        
+        <div class="footer-text">Proyecto Auto-AI: Propuesta de Automatización para Autosell.mx</div>
+        <div class="slide-number">Slide 3 de 7</div>
+    </div>
+
+    <!-- Diapositiva 4: Capa Data Science -->
+    <div class="slide">
+        <h1 class="slide-title">Módulo de Data Science en Odoo</h1>
+        <div class="subtitle">Modelos matemáticos aplicados para elevar el margen de utilidad y acelerar rotación</div>
+        
+        <div class="grid-3">
+            <div class="card-branch" style="border-left-color: #0c2340;">
+                <h3>Forecast de Rotación</h3>
+                <p>Algoritmos predictivos en Python estiman los días en piso basándose en marca, kilometraje e históricos de venta del lote.</p>
+            </div>
+            <div class="card-branch" style="border-left-color: #0c2340;">
+                <h3>Precios Dinámicos</h3>
+                <p>Modelos de regresión cruzan precios externos del mercado nacional para sugerir el precio óptimo y maximizar utilidad.</p>
+            </div>
+            <div class="card-branch" style="border-left-color: #0c2340;">
+                <h3>Auditoría del Embudo</h3>
+                <p>Métricas limpias que trackean la velocidad de respuesta real de los asesores tras la llamada automática del sistema.</p>
+            </div>
+        </div>
+        
+        <div class="footer-text">Proyecto Auto-AI: Propuesta de Automatización para Autosell.mx</div>
+        <div class="slide-number">Slide 4 de 7</div>
+    </div>
+
+    <!-- Diapositiva 5: Cotizador Local vs CAPTCHA -->
+    <div class="slide">
+        <h1 class="slide-title">Motor de Cotización Local vs CAPTCHA Bancario</h1>
+        <div class="subtitle">Solución de arquitectura para garantizar inmediatez sin bloqueos externos</div>
+        
+        <div class="grid-2">
+            <div style="background-color: #f8fafc; border: 1px dashed #B81C22; padding: 25px; border-radius: 6px; color: #555; font-size: 13px;">
+                <span style="font-weight: bold; color: #0c2340; display:block; margin-bottom: 8px;">⚠️ Restricción Financiera Externa</span>
+                Los portales bancarios (Scotiabank) cuentan con capas complejas de ReCAPTCHA y bloqueos de IP corporativas que detienen los bots, generando demoras críticas de hasta 45 segundos por consulta.
+            </div>
+            <div class="card-branch" style="border-left-color: #0c2340;">
+                <h3>Simulación Financiera Interna</h3>
+                <ul>
+                    <li><strong>Cero Latencia:</strong> El backend calcula los enganches (desde 10%) e intereses localmente en milisegundos durante la llamada de la IA.</li>
+                    <li><strong>Fórmula Francesa:</strong> Mapeo exacto de tablas de amortización en el servidor propio para coincidir con el banco.</li>
+                    <li><strong>Estabilidad Total:</strong> Cero dependencia de cambios repentinos en interfaces HTML externas.</li>
+                </ul>
+            </div>
+        </div>
+        
+        <div class="footer-text">Proyecto Auto-AI: Propuesta de Automatización para Autosell.mx</div>
+        <div class="slide-number">Slide 5 de 7</div>
+    </div>
+
+    <!-- Diapositiva 6: WhatsApp Open-Source -->
+    <div class="slide">
+        <h1 class="slide-title">Omnicanalidad con WhatsApp Abierto</h1>
+        <div class="subtitle">Estrategia open-source autohospedada para envíos instantáneos a costo cero</div>
+        
+        <div class="highlight-box" style="background-color: #f0fdf4; border-left-color: #15803d;">
+            <strong>Integración Core con `open-wa` / Evolution API:</strong> Emulación de WhatsApp Web mediante un contenedor Docker local. Al colgar la llamada de calificación de la IA de voz, el backend genera la cotización matemática en PDF y la despacha de inmediato al cliente.
+        </div>
+        
+        <div class="grid-2" style="margin-top: 20px;">
+            <div class="small-card">
+                <h4>Costo Fijo Cero</h4>
+                <p>Evita las altas tarifas de las API oficiales corporativas por cada mensaje enviado.</p>
+            </div>
+            <div class="small-card">
+                <h4>Hiper-personalización</h4>
+                <p>Adjunta fichas técnicas e imágenes directo desde Odoo usando metadatos limpios.</p>
+            </div>
+        </div>
+        
+        <div class="footer-text">Proyecto Auto-AI: Propuesta de Automatización para Autosell.mx</div>
+        <div class="slide-number">Slide 6 de 7</div>
+    </div>
+
+    <!-- Diapositiva 7: Proyección Financiera -->
+    <div class="slide">
+        <h1 class="slide-title">Proyección Financiera de Infraestructura</h1>
+        <div class="subtitle">Esquema eficiente basado 100% en consumo controlado sin rentas fijas mensuales</div>
+        
+        <table class="table-style">
+            <thead>
+                <tr>
+                    <th>Componente del Sistema</th>
+                    <th>Proveedor / Tooling</th>
+                    <th>Costo de Desarrollo</th>
+                    <th>Costo Mensual Estimado</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Base de Datos y CRM</strong></td>
+                    <td>Odoo API (Infraestructura Existente)</td>
+                    <td>$0 (In-house)</td>
+                    <td>$0 (Infraestructura actual)</td>
+                </tr>
+                <tr>
+                    <td><strong>Automatización de WhatsApp</strong></td>
+                    <td>open-wa / Evolution API</td>
+                    <td>$0 (Open-source)</td>
+                    <td>$0 (Servidor propio)</td>
+                </tr>
+                <tr>
+                    <td><strong>Orquestación de Voz AI</strong></td>
+                    <td>Vapi / Retell AI</td>
+                    <td>$0 (In-house)</td>
+                    <td>Variable: ~$0.14 USD / minuto</td>
+                </tr>
+                <tr>
+                    <td><strong>Modelos de Data Science</strong></td>
+                    <td>Python Scikit-Learn (Odoo backend)</td>
+                    <td>$0 (In-house)</td>
+                    <td>$0 (Procesamiento local)</td>
+                </tr>
+            </tbody>
+        </table>
+        
+        <div style="margin-top: 20px; font-size: 11px; color: #777; text-align: right;">*Modelo de negocio Pay-As-You-Go optimizado para evitar cargos por licenciamiento corporativo tradicional.</div>
+        
+        <div class="footer-text">Proyecto Auto-AI: Propuesta de Automatización para Autosell.mx</div>
+        <div class="slide-number">Slide 7 de 7</div>
+    </div>
+
+</body>
+</html>

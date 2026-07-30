@@ -1,4 +1,4 @@
-# Copy to .env for local runs. Mirror these as GitHub Secrets for the self-hosted runner.
+    # Copy to .env for local runs. Mirror these as GitHub Secrets for the self-hosted runner.
 
 AUTOSELL_BASE_URL=https://www.autosell.mx
 SYNC_TIMEZONE=America/Chihuahua
@@ -40,12 +40,8 @@ SNAPSHOT_DIR=data/snapshots
 # TELEGRAM_CHAT_ID=
 
 # Phase 2 — Odoo CRM (xmlrpc). Never commit real secrets.
-# CI secrets (sync.yml): ODOO_URL, ODOO_DB, ODOO_USER, ODOO_PASSWORD
-# Local aliases also accepted: ODOO_USERNAME, ODOO_API_KEY
-# ODOO_URL=https://autosellmx.odoo.com
-# ODOO_DB=autosellmx
-# ODOO_USER=api@autosell.mx
-# ODOO_PASSWORD=
+# ODOO_URL=https://odoo.example.com
+# ODOO_DB=autosell
 # ODOO_USERNAME=api@autosell.mx
 # ODOO_API_KEY=
 

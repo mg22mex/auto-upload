@@ -62,7 +62,22 @@ jobs:
       - name: Scrape autosell.mx public catalog
         env:
           AUTOSELL_BASE_URL: ${{ secrets.AUTOSELL_BASE_URL }}
-        run: python run_sync.py --scrape-only --output data/catalog_latest.json
+        run: |
+          set -eux
+          python run_sync.py --scrape-only --output data/catalog_latest.json
+          mkdir -p data/snapshots
+          cp -f data/catalog_latest.json data/snapshots/catalog_latest.json
+
+      - name: Sync Odoo product inventory
+        env:
+          ODOO_URL: ${{ secrets.ODOO_URL }}
+          ODOO_DB: ${{ secrets.ODOO_DB }}
+          ODOO_USER: ${{ secrets.ODOO_USER }}
+          ODOO_PASSWORD: ${{ secrets.ODOO_PASSWORD }}
+          # Canonical names also accepted by OdooCRMClient
+          ODOO_USERNAME: ${{ secrets.ODOO_USERNAME }}
+          ODOO_API_KEY: ${{ secrets.ODOO_API_KEY }}
+        run: python scripts/sync_odoo_inventory.py --from-snapshot data/snapshots/catalog_latest.json
 
       - name: Diff and sync (live on account_1 + account_2; account_3 via config active_accounts)
         env:

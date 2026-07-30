@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Proyecto Auto-AI: Autosell.mx</title>
+    <!-- Importación de Mermaid -->
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <script>
+        mermaid.initialize({
+            startOnLoad: true,
+            theme: 'dark',
+            themeVariables: {
+                background: '#111827',
+                primaryColor: '#0c2340',
+                primaryTextColor: '#fff',
+                lineColor: '#B81C22',
+                fontSize: '16px'
+            }
+        });
+    </script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #0b0f19;
+            color: #333;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .slide {
+            box-sizing: border-box;
+            width: 960px;
+            height: 540px;
+            position: relative;
+            background: #ffffff;
+            margin-bottom: 40px;
+            padding: 35px 50px;
+            border-radius: 8px;
+            box-shadow: 0 12px 30px rgba(0,0,0,0.4);
+            overflow: hidden;
+        }
+        
+        /* Slide 1: Portada */
+        .title-slide {
+            background: linear-gradient(135deg, #0f1c3f 0%, #080f24 100%);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            color: #ffffff;
+        }
+        .title-slide h1 {
+            font-size: 46px;
+            margin: 0 0 15px 0;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+        }
+        .title-slide h2 {
+            font-size: 16px;
+            color: #8fa1c4;
+            font-weight: 400;
+            margin: 0 0 45px 0;
+            letter-spacing: 0.5px;
+        }
+        .badge-proposal {
+            border: 1px solid #b81c22;
+            background-color: rgba(184, 28, 34, 0.1);
+            color: #ff4d5a;
+            padding: 10px 20px;
+            font-size: 12px;
+            border-radius: 4px;
+            font-weight: 600;
+        }
+        
+        /* Estilos de Contenido */
+        h1.slide-title {
+            color: #0c2340;
+            font-size: 26px;
+            margin-top: 0;
+            margin-bottom: 4px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+        }
+        h1.slide-title::before {
+            content: "";
+            display: inline-block;
+            width: 4px;
+            height: 24px;
+            background-color: #B81C22;
+            margin-right: 12px;
+            border-radius: 2px;
+        }
+        .subtitle {
+            color: #666;
+            font-size: 13px;
+            margin-bottom: 20px;
+        }
+        .grid-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        .card-branch {
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 20px;
+            background: #ffffff;
+            border-left: 4px solid #B81C22;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.02);
+        }
+        .card-branch h3 {
+            color: #0c2340;
+            font-size: 16px;
+            margin-top: 0;
+            margin-bottom: 10px;
+            font-weight: 700;
+        }
+        .card-branch p {
+            font-size: 12px;
+            color: #666;
+            line-height: 1.4;
+            margin-bottom: 10px;
+        }
+        .card-branch ul {
+            padding-left: 15px;
+            margin: 0;
+        }
+        .card-branch li {
+            font-size: 11px;
+            color: #444;
+            margin-bottom: 6px;
+        }
+        .footer-text {
+            position: absolute;
+            bottom: 20px;
+            left: 50px;
+            font-size: 11px;
+            color: #a0aec0;
+        }
+        .slide-number {
+            position: absolute;
+            bottom: 20px;
+            right: 50px;
+            font-size: 11px;
+            color: #a0aec0;
+        }
+        .small-card {
+            border: 1px solid #e2e8f0;
+            border-radius: 6px;
+            padding: 12px;
+            background: #f8fafc;
+            border-top: 3px solid #0c2340;
+        }
+        .small-card h4 {
+            margin-top: 0;
+            color: #0c2340;
+            font-size: 13px;
+            margin-bottom: 6px;
+        }
+        .small-card p {
+            font-size: 11px;
+            color: #666;
+            margin: 0;
+            line-height: 1.3;
+        }
+        .highlight-box {
+            background-color: #fff5f5;
+            border-left: 4px solid #B81C22;
+            padding: 12px;
+            border-radius: 0 6px 6px 0;
+            font-size: 11px;
+            color: #333;
+            margin-top: 15px;
+            line-height: 1.4;
+        }
+        .table-style {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+            font-size: 11px;
+        }
+        .table-style th {
+            background-color: #0c2340;
+            color: white;
+            padding: 10px;
+            text-align: left;
+        }
+        .table-style td {
+            padding: 9px;
+            border: 1px solid #e2e8f0;
+            color: #444;
+        }
+        .table-style tr:nth-child(even) {
+            background-color: #f8fafc;
+        }
+        
+        /* Contenedor del Diagrama Mermaid Ajustado */
+        .mermaid-container {
+            background: #111827;
+            padding: 15px;
+            border-radius: 6px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 290px;
+            border: 1px solid #1f2937;
+            box-sizing: border-box;
+        }
+        .mermaid svg {
+            max-height: 270px !important;
+            width: 100% !important;
+        }
+        
+        /* Layout Diapositivas de Imagen */
+        .img-slide-split {
+            display: grid;
+            grid-template-columns: 1.1fr 0.9fr;
+            gap: 25px;
+            align-items: center;
+            height: 360px;
+        }
+        .mockup-img {
+            width: 100%;
+            height: 340px;
+            border-radius: 6px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.15);
+            object-fit: contain;
+            background: #0f172a;
+            padding: 5px;
+            box-sizing: border-box;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Diapositiva 1: Portada -->
+    <div class="slide title-slide">
+        <h1>Proyecto Auto-AI</h1>
+        <h2>Ecosistema Inteligente de Conversión, Captura y Cotización de Leads</h2>
+        <div class="badge-proposal">Propuesta Tecnológica Exclusiva para Autosell.mx</div>
+        <div class="slide-number">Slide 1 de 8</div>
+    </div>
+
+    <!-- Diapositiva 2: Entrada Multicanal -->
+    <div class="slide">
+        <h1 class="slide-title">Entrada Multicanal y Flujo General</h1>
+        <div class="subtitle">Diagrama arquitectónico del procesamiento automatizado desde el contacto hasta Odoo</div>
+        
+        <div class="mermaid-container">
+            <div class="mermaid">
+                graph TD
+                    A[Web Autosell.mx] -->|Chat Agent AI| D[Backend Orquestador]
+                    B[Llamada Telefónica] -->|Vapi Voice AI| D
+                    C[Portales / CRM] -->|API Ingestion| D
+                    D --> E{Filtro Sucursal}
+                    E -->|Inventario Periférico| F[Asesores Periférico Odoo]
+                    E -->|Inventario Secundaria| G[Asesores Secundaria Odoo]
+                    F & G --> H[Trigger: WhatsApp PDF + Outbound Call]
+                    
+                    style A fill:#1e293b,stroke:#475569,stroke-width:2px
+                    style B fill:#1e293b,stroke:#475569,stroke-width:2px
+                    style C fill:#1e293b,stroke:#475569,stroke-width:2px
+                    style D fill:#0c2340,stroke:#B81C22,stroke-width:2px
+                    style E fill:#B81C22,stroke:#b81c22,stroke-width:1px,color:#fff
+                    style F fill:#1e3a8a,stroke:#3b82f6,stroke-width:1px
+                    style G fill:#1e3a8a,stroke:#3b82f6,stroke-width:1px
+                    style H fill:#14532d,stroke:#22c55e,stroke-width:2px
+            </div>
+        </div>
+
+        <div class="highlight-box">
+            <strong>Optimización del Enrutamiento:</strong> El flujo mitiga la fricción manual mapeando el SKU del auto contra el lote físico. Si se ubica en Periférico de la Juventud, se procesa bajo su respectivo esquema exclusivo de asignación balanceada.
+        </div>
+        
+        <div class="footer-text">Proyecto Auto-AI: Propuesta de Automatización para Autosell.mx</div>
+        <div class="slide-number">Slide 2 de 8</div>
+    </div>
+
+    <!-- Diapositiva 3: Asignación por Sucursal -->
+    <div class="slide">
+        <h1 class="slide-title">Asignación por Sucursal</h1>
+        <div class="subtitle">El motor de enrutamiento distribuye de manera balanceada los leads según la ubicación física del auto</div>
+        
+        <div class="grid-2">
+            <div class="card-branch">
+                <h3>Lógica de Sucursal Periférico</h3>
+                <p>Si el auto de interés consultado se encuentra físicamente en el Showroom de Periférico de la Juventud:</p>
+                <ul>
+                    <li>El lead se cataloga y asocia de forma exclusiva a los vendedores de esta locación en Odoo.</li>
+                    <li>Activa la cola Round-Robin exclusiva de Periférico para asignar equitativamente al vendedor en turno.</li>
+                </ul>
+            </div>
+            
+            <div class="card-branch">
+                <h3>Lógica de Sucursal Secundaria</h3>
+                <p>Si el auto consultado por el prospecto corresponds al inventario registrado de la segunda sucursal:</p>
+                <ul>
+                    <li>El motor de enrutamiento asigna inmediatamente el lead al roster local de dicha sucursal.</li>
+                    <li>Garantiza transparencia y un reparto balanceado del tráfico de leads sin disputas internas.</li>
+                </ul>
+            </div>
+        </div>
+        
+        <div class="footer-text">Proyecto Auto-AI: Propuesta de Automatización para Autosell.mx</div>
+        <div class="slide-number">Slide 3 de 8</div>
+    </div>
+
+    <!-- Diapositiva 4: Mockup Interfaz de Usuario Web -->
+    <div class="slide">
+        <h1 class="slide-title">Experiencia de Usuario: Interfaz del Portal</h1>
+        <div class="subtitle">Simulación de cara al cliente final e interacción con el agente conversacional inteligente</div>
+        
+        <div class="img-slide-split">
+            <div>
+                <p style="font-size:13px; line-height:1.5; color:#444; margin-top:0;">
+                    La captura del lead comienza directamente en la plataforma web mediante componentes minimalistas y limpios.
+                </p>
+                <ul style="font-size:12px; color:#555; padding-left:20px; line-height:1.6;">
+                    <li><strong>Widget Flotante Integrado:</strong> El asistente conversacional permanece activo en la esquina inferior derecha sin obstaculizar la navegación del catálogo.</li>
+                    <li><strong>Captura de Preferencias:</strong> Filtros directos de búsqueda por año, modelo y sucursal agilizan el contexto de compra previo al contacto telefónico o mensajería.</li>
+                </ul>
+            </div>
+            <div>
+                <svg class="mockup-img" viewBox="0 0 800 500" xmlns="http://www.w3.org/2000/svg">
+                    <rect width="800" height="500" fill="#f8fafc"/>
+                    <rect width="800" height="50" fill="#ffffff"/>
+                    <text x="30" y="32" font-family="Arial" font-size="20" font-weight="bold" fill="#0c2340">// Autosell</text>
+                    <line x1="0" y1="50" x2="800" y2="50" stroke="#e2e8f0" stroke-width="2"/>
+                    
+                    <rect x="50" y="100" width="210" height="130" rx="6" fill="#ffffff" stroke="#cbd5e1"/>
+                    <rect x="50" y="100" width="210" height="80" rx="4" fill="#e2e8f0"/>
+                    <text x="60" y="200" font-family="Arial" font-size="12" font-weight="bold" fill="#334155">Sedán Premium Sport</text>
+                    <text x="60" y="218" font-family="Arial" font-size="10" fill="#64748b">Sucursal Periférico</text>
+                    
+                    <rect x="295" y="100" width="210" height="130" rx="6" fill="#ffffff" stroke="#cbd5e1"/>
+                    <rect x="295" y="100" width="210" height="80" rx="4" fill="#cbd5e1"/>
+                    <text x="305" y="200" font-family="Arial" font-size="12" font-weight="bold" fill="#334155">SUV Familiar Confort</text>
+                    <text x="305" y="218" font-family="Arial" font-size="10" fill="#64748b">Sucursal Secundaria</text>
+
+                    <rect x="540" y="100" width="210" height="130" rx="6" fill="#ffffff" stroke="#cbd5e1"/>
+                    <rect x="540" y="100" width="210" height="80" rx="4" fill="#e2e8f0"/>
+                    <text x="550" y="200" font-family="Arial" font-size="12" font-weight="bold" fill="#334155">Coupe Deportivo v8</text>
+                    <text x="550" y="218" font-family="Arial" font-size="10" fill="#64748b">Sucursal Periférico</text>
+                    
+                    <rect x="50" y="260" width="700" height="60" rx="6" fill="#ffffff" stroke="#0c2340" stroke-width="1.5"/>
+                    <text x="70" y="295" font-family="Arial" font-size="12" fill="#94a3b8">Selecciona Marca...</text>
+                    <text x="280" y="295" font-family="Arial" font-size="12" fill="#94a3b8">Selecciona Modelo...</text>
+                    <rect x="560" y="272" width="170" height="36" rx="4" fill="#0c2340"/>
+                    <text x="610" y="294" font-family="Arial" font-size="12" font-weight="bold" fill="#ffffff">BUSCAR AUTO</text>
+
+                    <circle cx="730" cy="430" r="35" fill="#00f2fe" opacity="0.2"/>
+                    <circle cx="730" cy="430" r="28" fill="#0c2340"/>
+                    <circle cx="730" cy="430" r="14" fill="none" stroke="#00f2fe" stroke-width="2"/>
+                    <text x="724" y="434" font-family="Arial" font-size="11" font-weight="bold" fill="#00f2fe">AI</text>
+                    <rect x="560" y="375" width="135" height="30" rx="6" fill="#ffffff" stroke="#e2e8f0"/>
+                    <text x="570" y="394" font-family="Arial" font-size="10" fill="#334155">Hola, ¿en qué puedo ayudarte?</text>
+                </svg>
+            </div>
+        </div>
+        
+        <div class="footer-text">Proyecto Auto-AI: Propuesta de Automatización para Autosell.mx</div>
+        <div class="slide-number">Slide 4 de 8</div>
+    </div>
+
+    <!-- Diapositiva 5: Capa Data Science y Analytics -->
+    <div class="slide">
+        <h1 class="slide-title">Módulo de Data Science y Analítica Avanzada</h1>
+        <div class="subtitle">Modelos matemáticos aplicados para elevar el margen de utilidad y acelerar rotación</div>
+        
+        <div class="img-slide-split">
+            <div>
+                <svg class="mockup-img" viewBox="0 0 800 500" xmlns="http://www.w3.org/2000/svg">
+                    <rect width="800" height="500" fill="#0b0f19" rx="8"/>
+                    <rect x="30" y="30" width="350" height="250" rx="6" fill="#0f172a" stroke="#1e293b"/>
+                    <text x="45" y="55" font-family="Arial" font-size="14" font-weight="bold" fill="#ffffff">Global Market Overview</text>
+                    <path d="M 50 220 L 120 150 L 200 170 L 280 120 L 350 90" fill="none" stroke="#00f2fe" stroke-width="3"/>
+                    <path d="M 50 220 L 120 150 L 200 170 L 280 120 L 350 90 L 350 240 L 50 240 Z" fill="#00f2fe" opacity="0.05"/>
+                    
+                    <rect x="400" y="30" width="370" height="190" rx="6" fill="#0f172a" stroke="#1e293b"/>
+                    <text x="415" y="55" font-family="Arial" font-size="14" font-weight="bold" fill="#ffffff">Financial Secure Analysis</text>
+                    <circle cx="585" cy="125" r="50" fill="none" stroke="#1e293b" stroke-width="15"/>
+                    <circle cx="585" cy="125" r="50" fill="none" stroke="#b81c22" stroke-width="15" stroke-dasharray="200 314"/>
+                    
+                    <rect x="30" y="300" width="740" height="170" rx="6" fill="#0f172a" stroke="#1e293b"/>
+                    <text x="45" y="325" font-family="Arial" font-size="13" font-weight="bold" fill="#94a3b8">Key Performance Indicators</text>
+                    <text x="45" y="375" font-family="Arial" font-size="11" fill="#64748b">Total Revenue</text>
+                    <text x="45" y="415" font-family="Arial" font-size="28" font-weight="bold" fill="#ffffff">$1.2M</text>
+                    
+                    <rect x="400" y="430" width="25" height="20" fill="#00f2fe" rx="2"/>
+                    <rect x="440" y="390" width="25" height="60" fill="#00f2fe" rx="2"/>
+                    <rect x="480" y="360" width="25" height="90" fill="#b81c22" rx="2"/>
+                    <rect x="520" y="380" width="25" height="70" fill="#00f2fe" rx="2"/>
+                    <rect x="560" y="340" width="25" height="110" fill="#00f2fe" rx="2"/>
+                </svg>
+            </div>
+            <div>
+                <div class="card-branch" style="border-left-color: #0c2340; margin-bottom:10px; padding: 12px;">
+                    <h3 style="font-size:14px; margin-bottom:4px;">Forecast de Rotación</h3>
+                    <p style="font-size:11px; margin-bottom:0;">Modelado predictivo en Python para predecir los días estimados en piso basándose en marca, kilometraje e históricos de la plaza.</p>
+                </div>
+                <div class="card-branch" style="border-left-color: #0c2340; margin-bottom:10px; padding: 12px;">
+                    <h3 style="font-size:14px; margin-bottom:4px;">Precios Dinámicos</h3>
+                    <p style="font-size:11px; margin-bottom:0;">Análisis continuo y cruce de datos externos del mercado nacional automotriz para sugerir el precio de salida óptimo.</p>
+                </div>
+                <div class="card-branch" style="border-left-color: #0c2340; padding: 12px;">
+                    <h3 style="font-size:14px; margin-bottom:4px;">Auditoría del Embudo</h3>
+                    <p style="font-size:11px; margin-bottom:0;">Mapeo visual del performance, tasas de conversión seguras y tiempos reales de respuesta del equipo comercial de Autosell.</p>
+                </div>
+            </div>
+        </div>
+        
+        <div class="footer-text">Proyecto Auto-AI: Propuesta de Automatización para Autosell.mx</div>
+        <div class="slide-number">Slide 5 de 8</div>
+    </div>
+
+    <!-- Diapositiva 6: Motor de Cotización Local (NUEVO LAYOUT CON IMAGEN DE CAPTCHA REORGANIZADO) -->
+    <div class="slide">
+        <h1 class="slide-title">Motor de Cotización Local vs CAPTCHA Bancario</h1>
+        <div class="subtitle">Solución de arquitectura para garantizar inmediatez sin bloqueos externos</div>
+        
+        <div class="img-slide-split">
+            <div>
+                <div style="background-color: #fff5f5; border: 1px dashed #B81C22; padding: 16px; border-radius: 6px; color: #555; font-size: 11px; margin-bottom: 12px; line-height:1.4;">
+                    <span style="font-weight: bold; color: #0c2340; display:block; margin-bottom: 6px;">⚠️ Restricción por ReCAPTCHA Checkbox</span>
+                    Aunque el portal de Scotiabank requiere únicamente un clic ("No soy un robot"), emular este comportamiento de forma automatizada (vía headless browser) rompe la estabilidad operativa y eleva drásticamente el riesgo de denegación de servicio o bloqueo de IP.
+                </div>
+                <div class="card-branch" style="border-left-color: #0c2340; padding: 15px;">
+                    <h3 style="font-size:14px; margin-bottom: 6px;">Simulación Financiera Interna</h3>
+                    <ul style="font-size:11px; padding-left:15px; margin:0; line-height:1.4;">
+                        <li><strong>Cero Latencia:</strong> Cálculo de enganches (desde 10%) e intereses localmente en milisegundos durante la llamada.</li>
+                        <li><strong>Fórmula Francesa:</strong> Mapeo matemático exacto de amortizaciones para asegurar coincidencia plena con el banco.</li>
+                        <li><strong>Estabilidad:</strong> Cero dependencia de cambios de UI externos o clics de validación.</li>
+                    </ul>
+                </div>
+            </div>
+            <div>
+                <!-- Mockup Vectorial Exacto de la UI de Scotiabank con el Checkbox Validado -->
+                <svg class="mockup-img" viewBox="0 0 400 320" xmlns="http://www.w3.org/2000/svg" style="height:340px;">
+                    <rect width="400" height="320" fill="#ffffff" rx="6" stroke="#cbd5e1"/>
+                    
+                    <!-- Header Logotipo Banco -->
+                    <text x="30" y="40" font-family="Arial" font-size="18" font-weight="bold" fill="#b81c22">Scotiabank</text>
+                    
+                    <!-- Inputs Simulados -->
+                    <rect x="30" y="70" width="340" height="35" rx="4" fill="#f1f5f9" stroke="#e2e8f0"/>
+                    <text x="40" y="92" font-family="Arial" font-size="11" fill="#334155">norte_fve_sb@inter.mx</text>
+                    
+                    <rect x="30" y="115" width="340" height="35" rx="4" fill="#f1f5f9" stroke="#e2e8f0"/>
+                    <text x="40" y="136" font-family="Arial" font-size="11" fill="#94a3b8">••••••••••••••••••••</text>
+                    
+                    <!-- Contenedor del ReCAPTCHA v2 Checkbox -->
+                    <rect x="30" y="165" width="340" height="65" rx="3" fill="#f9f9f9" stroke="#d3d3d3"/>
+                    
+                    <!-- Casilla con la Palomita Verde Verificada -->
+                    <rect x="45" y="185" width="24" height="24" rx="3" fill="#ffffff" stroke="#c1c1c1" stroke-width="2"/>
+                    <!-- Icono Palomita (Checkmark verde) -->
+                    <path d="M 49 197 L 54 202 L 64 190" fill="none" stroke="#00aa4f" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+                    
+                    <text x="78" y="200" font-family="Arial" font-size="11" font-weight="bold" fill="#222222">No soy un robot</text>
+                    
+                    <!-- Logo reCAPTCHA oficial simulación derecha -->
+                    <path d="M 335 180 C 340 180, 345 185, 345 190 L 345 200 C 345 205, 340 210, 335 210 Z" fill="#4a90e2" opacity="0.1"/>
+                    <text x="332" y="218" font-family="Arial" font-size="7" fill="#9b9b9b">reCAPTCHA</text>
+                    
+                    <!-- Botón Acceder -->
+                    <rect x="30" y="245" width="340" height="35" rx="4" fill="#0070cd"/>
+                    <text x="175" y="267" font-family="Arial" font-size="12" font-weight="bold" fill="#ffffff">ACCEDER</text>
+                </svg>
+            </div>
+        </div>
+        
+        <div class="footer-text">Proyecto Auto-AI: Propuesta de Automatización para Autosell.mx</div>
+        <div class="slide-number">Slide 6 de 8</div>
+    </div>
+
+    <!-- Diapositiva 7: WhatsApp Open-Source -->
+    <div class="slide">
+        <h1 class="slide-title">Omnicanalidad con WhatsApp Abierto</h1>
+        <div class="subtitle">Estrategia open-source autohospedada para envíos instantáneos a costo cero</div>
+        
+        <div class="highlight-box" style="background-color: #f0fdf4; border-left-color: #15803d;">
+            <strong>Integración Core con `open-wa` / Evolution API:</strong> Emulación de WhatsApp Web mediante un contenedor Docker local. Al colgar la llamada de calificación de la IA de voz, el backend genera la cotización matemática en PDF y la despacha de inmediato al cliente.
+        </div>
+        
+        <div class="grid-2" style="margin-top: 15px;">
+            <div class="small-card">
+                <h4>Costo Fijo Cero</h4>
+                <p>Evita las altas tarifas de las API oficiales corporativas por cada mensaje enviado.</p>
+            </div>
+            <div class="small-card">
+                <h4>Hiper-personalización</h4>
+                <p>Adjunta fichas técnicas e imágenes directo desde Odoo usando metadatos limpios.</p>
+            </div>
+        </div>
+        
+        <div class="footer-text">Proyecto Auto-AI: Propuesta de Automatización para Autosell.mx</div>
+        <div class="slide-number">Slide 7 de 8</div>
+    </div>
+
+    <!-- Diapositiva 8: Proyección Financiera e Infraestructura VPS -->
+    <div class="slide">
+        <h1 class="slide-title">Proyección Financiera e Infraestructura</h1>
+        <div class="subtitle">Desglose de costos operativos integrando servidores en la nube (Instancia VPS)</div>
+        
+        <table class="table-style">
+            <thead>
+                <tr>
+                    <th>Componente del Sistema</th>
+                    <th>Proveedor / Tooling</th>
+                    <th>Costo de Desarrollo</th>
+                    <th>Costo Mensual Estimado</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Servidor de Despliegue (VPS)</strong></td>
+                    <td>Oracle Cloud Infrastructure (Compute E4)</td>
+                    <td>$0 (Setup Docker)</td>
+                    <td><strong>$0 a $15 USD</strong> <span style="color:#718096; font-size:10px;">(Free Tier / Excedente Amplitud)</span></td>
+                </tr>
+                <tr>
+                    <td><strong>Base de Datos y CRM</strong></td>
+                    <td>Odoo API (Infraestructura Existente)</td>
+                    <td>$0 (In-house)</td>
+                    <td>$0 (Estructura de la empresa)</td>
+                </tr>
+                <tr>
+                    <td><strong>Automatización de WhatsApp</strong></td>
+                    <td>open-wa / Evolution API</td>
+                    <td>$0 (Open-source)</td>
+                    <td>$0 (Montado en el mismo VPS)</td>
+                </tr>
+                <tr>
+                    <td><strong>Orquestación de Voz AI</strong></td>
+                    <td>Vapi / Retell AI</td>
+                    <td>$0 (In-house)</td>
+                    <td>Variable: ~$0.14 USD / minuto de uso</td>
+                </tr>
+                <tr>
+                    <td><strong>Modelos de Data Science</strong></td>
+                    <td>Python Scikit-Learn (Odoo backend)</td>
+                    <td>$0 (In-house)</td>
+                    <td>$0 (Procesamiento directo del servidor)</td>
+                </tr>
+            </tbody>
+        </table>
+        
+        <div style="margin-top: 15px; font-size: 11px; color: #777; text-align: right;">*Configuración modular optimizada en Docker para empaquetar toda la suite dentro de la capa actual del VPS de Oracle sin costos extras de licenciamiento.</div>
+        
+        <div class="footer-text">Proyecto Auto-AI: Propuesta de Automatización para Autosell.mx</div>
+        <div class="slide-number">Slide 8 de 8</div>
+    </div>
+
+</body>
+</html>

@@ -1,0 +1,71 @@
+# Auto-upload — Cursor Rules
+
+## Output Style (Caveman Mode)
+
+- Ultra-concise. Code/diff-first. Zero filler, greetings, or throat-clearing.
+- Prefer patches and file paths over prose. Explain only when architecture or risk is unclear.
+- No restating the task. No “here’s what I did” essays.
+
+## Repository Map (do not invent paths)
+
+| Path | Role |
+|------|------|
+| `run_sync.py` | Primary CLI entry (scrape / plan / execute sync) |
+| `config.yaml` | Accounts, sync caps, FB location, renew/repost |
+| `.env` / `.env.example` | Secrets & runtime toggles (`DRY_RUN`, delays, paths) |
+| `src/inventory/` | autosell.mx scrape + catalog snapshots |
+| `src/sync/` | Diff engine, repost planning |
+| `src/store/` | `sync.db` persistence |
+| `src/facebook/` | Playwright Marketplace workers |
+| `src/quote_engine/` | Phase 2 — local French Amortization calculator |
+| `src/odoo_sync/` | Phase 2 — Odoo CRM XML-RPC client |
+| `src/whatsapp_worker/` | Phase 2 — open-wa / Evolution API wrapper |
+| `scripts/` | Manual FB probes, login, debug |
+| `sessions/` | Playwright browser profiles (per account) |
+| `data/` | DB, snapshots, debug PNGs |
+| `docs/` | System design & project guide |
+
+**Do not restructure** existing trees under `src/`, `scripts/`, `data/`, or `sessions/`.
+
+## Context Integration
+
+- Entry point: `run_sync.py`. Wire new CLI flags / flows through it or dedicated `scripts/` — not ad-hoc top-level runners unless asked.
+- Settings: read `config.yaml` + env via `python-dotenv`. Prefer existing helpers (`env_bool`, `env_int`, account scoping).
+- Sessions: Playwright state lives in `sessions/account_*` as configured in `config.yaml`. Never commit session cookies. Never invent alternate session roots.
+- Persistence: `DB_PATH` / `SNAPSHOT_DIR` from env; default `data/sync.db`, `data/snapshots`.
+
+## Skill Hierarchy & Boundaries
+
+### MEMORY (`claude-mem`)
+- Background only: index/read project rules and design in `docs/` (esp. `docs/PROJECT_GUIDE.md`).
+- Do not dump memory tooling into user-facing chat noise.
+
+### DEVELOPMENT (`superpowers` / `ponytail`)
+- IDE-side: format, refactor, static analysis.
+- Match existing Python style (`from __future__ import annotations`, typed where present).
+
+### AUTOMATION & SCRAPING
+- Browser profile isolation: one profile per account under `sessions/`.
+- **Never** run live browser / Playwright scripts inside the LLM chat window.
+- Live FB work: operator or CI on `fb-worker` via `scripts/` / `run_sync.py`. Agent may edit code; operator runs headed login / posts.
+- Scraping workers (`src/facebook/`, inventory scrape) stay isolated from messaging workers (`src/whatsapp_worker/`). No shared browser profiles, no cross-worker session reuse.
+
+## Security & Performance
+
+- **Secrets:** never hardcode tokens, passwords, Odoo creds, WhatsApp API keys. Use `.env`; document new keys in `.env.example` only as placeholders.
+- **Finance:** French Amortization and all quote math run **locally in Python** inside `src/quote_engine/` (ms-scale). Compute fully before any payload to Odoo, WhatsApp, Telegram, or other external channels. No remote calc round-trips for amortization.
+- Do not log secrets, session cookies, or full `.env` contents.
+
+## Phase 2 Module Contracts (scaffold)
+
+- `quote_engine` — pure local finance; no network I/O.
+- `odoo_sync` — CRM lead/opportunity XML-RPC; credentials from env.
+- `whatsapp_worker` — outbound messaging API only; separate process/config from FB Playwright.
+
+Lead path (target): Web/Voice AI → Odoo (`odoo_sync`) → quote (`quote_engine`) → WhatsApp dispatch (`whatsapp_worker`). FB Marketplace sync remains a separate pipeline via `run_sync.py`.
+
+## Change Discipline
+
+- Touch only files needed for the request.
+- Do not commit unless explicitly asked.
+- Prefer extending existing modules over parallel duplicate helpers.

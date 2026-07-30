@@ -80,6 +80,19 @@ python run_sync.py --dry-run
 3. Follow **[SETUP.md](./SETUP.md)** — sessions, Spanish/English form fields, go-live checklist.
 4. Review **[docs/PROJECT_GUIDE.md](./docs/PROJECT_GUIDE.md)** — sync rules, account scoping, steady-state ops.
 
+### Required GitHub Actions secrets (sync.yml)
+
+| Secret | Purpose |
+|--------|---------|
+| `DRY_RUN` | `false` for live FB posts |
+| `AUTOSELL_BASE_URL` | Optional override (default https://www.autosell.mx) |
+| `ODOO_URL` | Odoo host, e.g. `https://autosellmx.odoo.com` |
+| `ODOO_DB` | Database name, e.g. `autosellmx` |
+| `ODOO_USER` | XML-RPC login (email). Alias: `ODOO_USERNAME` |
+| `ODOO_PASSWORD` | API key or password. Alias: `ODOO_API_KEY` |
+
+After each scrape, CI runs `scripts/sync_odoo_inventory.py` to upsert `product.template` from the catalog snapshot (`data/snapshots/catalog_latest.json`).
+
 Active accounts are set in **`config.yaml`** → `sync.active_accounts` (currently `account_1`, `account_2`). Override per run with `--accounts` or `SYNC_ACCOUNTS` env.
 
 Persistent state on fb-worker:
