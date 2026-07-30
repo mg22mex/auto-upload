@@ -20,6 +20,9 @@
 | `src/quote_engine/` | Phase 2 — local French Amortization calculator |
 | `src/odoo_sync/` | Phase 2 — Odoo CRM XML-RPC client |
 | `src/whatsapp_worker/` | Phase 2 — open-wa / Evolution API wrapper |
+| `src/voice_gateway/` | Phase 2 — FastAPI voice + Meta webhook entry |
+| `src/meta_gateway/` | Phase 2 — Facebook Page Messenger Graph API |
+| `src/pipeline.py` | Phase 2 — lead orchestration (quote → Odoo → WA) |
 | `scripts/` | Manual FB probes, login, debug |
 | `sessions/` | Playwright browser profiles (per account) |
 | `data/` | DB, snapshots, debug PNGs |
@@ -48,21 +51,23 @@
 - Browser profile isolation: one profile per account under `sessions/`.
 - **Never** run live browser / Playwright scripts inside the LLM chat window.
 - Live FB work: operator or CI on `fb-worker` via `scripts/` / `run_sync.py`. Agent may edit code; operator runs headed login / posts.
-- Scraping workers (`src/facebook/`, inventory scrape) stay isolated from messaging workers (`src/whatsapp_worker/`). No shared browser profiles, no cross-worker session reuse.
+- Scraping workers (`src/facebook/`, inventory scrape) stay isolated from messaging workers (`src/whatsapp_worker/`, `src/meta_gateway/`). No shared browser profiles, no cross-worker session reuse.
 
 ## Security & Performance
 
-- **Secrets:** never hardcode tokens, passwords, Odoo creds, WhatsApp API keys. Use `.env`; document new keys in `.env.example` only as placeholders.
-- **Finance:** French Amortization and all quote math run **locally in Python** inside `src/quote_engine/` (ms-scale). Compute fully before any payload to Odoo, WhatsApp, Telegram, or other external channels. No remote calc round-trips for amortization.
+- **Secrets:** never hardcode tokens, passwords, Odoo creds, WhatsApp / Meta Page API keys. Use `.env`; document new keys in `.env.example` only as placeholders.
+- **Finance:** French Amortization and all quote math run **locally in Python** inside `src/quote_engine/` (ms-scale). Compute fully before any payload to Odoo, WhatsApp, Messenger, Telegram, or other external channels. No remote calc round-trips for amortization.
 - Do not log secrets, session cookies, or full `.env` contents.
 
 ## Phase 2 Module Contracts (scaffold)
 
 - `quote_engine` — pure local finance; no network I/O.
-- `odoo_sync` — CRM lead/opportunity XML-RPC; credentials from env.
+- `odoo_sync` — CRM lead/opportunity + inventory XML-RPC; credentials from env.
 - `whatsapp_worker` — outbound messaging API only; separate process/config from FB Playwright.
+- `voice_gateway` — FastAPI entry for Voice AI + Meta webhook routes.
+- `meta_gateway` — Page Messenger verify/parse/quote/Odoo/Graph reply; uses `FB_VERIFY_TOKEN` / `FB_PAGE_ACCESS_TOKEN`.
 
-Lead path (target): Web/Voice AI → Odoo (`odoo_sync`) → quote (`quote_engine`) → WhatsApp dispatch (`whatsapp_worker`). FB Marketplace sync remains a separate pipeline via `run_sync.py`.
+Lead path (target): Web/Voice AI / Messenger → quote (`quote_engine`) → Odoo (`odoo_sync`) → WhatsApp or Graph reply. FB Marketplace sync remains a separate pipeline via `run_sync.py`.
 
 ## Change Discipline
 
