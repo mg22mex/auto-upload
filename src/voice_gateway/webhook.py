@@ -2,10 +2,16 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, Callable
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
+
+# Load repo .env before Odoo / Meta clients read os.environ.
+_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(_ROOT / ".env")
 
 from src.meta_gateway.gateway import MetaWebhookGateway, parse_messenger_events
 from src.pipeline import AutosellPipeline, PipelineResult

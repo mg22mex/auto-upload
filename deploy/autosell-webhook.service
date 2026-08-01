@@ -1,0 +1,31 @@
+[Unit]
+Description=Autosell FastAPI voice + Meta webhook gateway
+Documentation=file:///home/ubuntu/auto-upload/SETUP.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+
+# Standard Oracle fb-worker layout (SETUP.md Part B / E).
+# Clone:  /home/ubuntu/auto-upload
+# Venv:   /home/ubuntu/auto-upload/.venv  (pip install -r requirements.txt)
+# Secrets:/home/ubuntu/auto-upload/.env   (ODOO_*, FB_VERIFY_TOKEN, FB_PAGE_ACCESS_TOKEN)
+WorkingDirectory=/home/ubuntu/auto-upload
+EnvironmentFile=/home/ubuntu/auto-upload/.env
+Environment=PYTHONUNBUFFERED=1
+
+# Absolute venv uvicorn so PATH / system python cannot shadow deps (fastapi, uvicorn, dotenv).
+ExecStart=/home/ubuntu/auto-upload/.venv/bin/uvicorn src.voice_gateway.webhook:app --host 127.0.0.1 --port 8080
+
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+
+# Soft isolation from Playwright Marketplace sessions under sessions/
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

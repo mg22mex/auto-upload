@@ -378,6 +378,61 @@ python scripts/fb_repost_hold.py add obj1126 --account account_2 --until 2026-07
 
 ---
 
+## 24/7 Webhook Service Deployment (fb-worker)
+
+Runs FastAPI (`src.voice_gateway.webhook:app`) on **127.0.0.1:8080** via systemd. Coexists with the GitHub Actions runner; put nginx/Caddy in front for HTTPS before pointing Meta callbacks here.
+
+Unit paths (Oracle `ubuntu` user — must match `deploy/autosell-webhook.service`):
+
+| Setting | Path |
+|---------|------|
+| `WorkingDirectory` | `/home/ubuntu/auto-upload` |
+| `EnvironmentFile` | `/home/ubuntu/auto-upload/.env` |
+| `ExecStart` | `/home/ubuntu/auto-upload/.venv/bin/uvicorn … --host 127.0.0.1 --port 8080` |
+
+**Prereqs on Oracle (`ubuntu` user):**
+
+```bash
+cd ~/auto-upload && git pull
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt   # fastapi, uvicorn, python-dotenv, …
+# .env must include:
+#   ODOO_URL ODOO_DB ODOO_USERNAME|ODOO_USER ODOO_API_KEY|ODOO_PASSWORD
+#   FB_VERIFY_TOKEN FB_PAGE_ACCESS_TOKEN
+test -x .venv/bin/uvicorn && .venv/bin/python -c "import dotenv, fastapi, uvicorn; print('deps OK')"
+```
+
+**Validate before enabling systemd** (quote + Odoo lead; Graph API mocked):
+
+```bash
+cd ~/auto-upload && source .venv/bin/activate
+python scripts/test_webhook_local.py
+# one-liner against a foreground uvicorn (after: uvicorn … --port 8080):
+curl -s "http://127.0.0.1:8080/webhook/facebook?hub.mode=subscribe&hub.verify_token=$FB_VERIFY_TOKEN&hub.challenge=ok"
+```
+
+**Install unit:**
+
+```bash
+sudo cp ~/auto-upload/deploy/autosell-webhook.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable autosell-webhook
+sudo systemctl start autosell-webhook
+```
+
+**Ops:**
+
+```bash
+sudo systemctl status autosell-webhook
+sudo journalctl -u autosell-webhook -f
+curl -s http://127.0.0.1:8080/health
+python scripts/test_webhook_local.py --http http://127.0.0.1:8080
+```
+
+Routes: `GET /health`, `POST /webhook/voice-lead`, `GET|POST /webhook/facebook`. After TLS proxy, set Meta App callback to `https://YOUR_HOST/webhook/facebook`.
+
+---
+
 ## Local development (any machine)
 
 Full pipeline (scrape + diff):
