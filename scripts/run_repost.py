@@ -66,7 +66,7 @@ def main() -> int:
         "--max",
         type=int,
         default=None,
-        help="Max reposts per account this run (default: REPOST_MAX_PER_ACCOUNT or 10)",
+        help="Max reposts per account this run (default: REPOST_MAX_PER_ACCOUNT or 5)",
     )
     parser.add_argument(
         "--force",
@@ -92,7 +92,7 @@ def main() -> int:
     if max_per is None:
         max_per = env_int(
             "REPOST_MAX_PER_ACCOUNT_PER_RUN",
-            int(repost_cfg.get("max_per_account_per_run", 10)),
+            int(repost_cfg.get("max_per_account_per_run", 5)),
         )
 
     catalog_path = ROOT / args.catalog

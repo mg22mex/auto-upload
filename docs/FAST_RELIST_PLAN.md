@@ -11,8 +11,8 @@
 ## Production choice
 
 - **Sunday cron** (`.github/workflows/repost.yml`) → `scripts/run_weekly_bump.py`
-  - **Even ISO week** → native **Renovar** (`run_renew.py`) — same URL, ads-safe, seconds/listing, cap **25**/account.
-  - **Odd ISO week** → full **repost** (`run_repost.py`) — new URL, slower, cap **10**/account.
+  - **Even ISO week** → native **Renovar** (`run_renew.py`) — same URL, ads-safe, seconds/listing, cap **25**/account; Chromium restart every **10**.
+  - **Odd ISO week** → full **repost** (`run_repost.py`) — new URL, slower, cap **5**/account; Chromium restart every **3**; auto-reopen on `TargetClosedError`.
 - **Manual override** → Actions → Run workflow → mode `renew` / `repost` / `auto`.
 - **Holds** → `fb_repost_hold.py` skips both renew and full repost.
 

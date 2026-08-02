@@ -23,11 +23,15 @@ sync:
   renew:
     min_age_days: 7
     max_per_account_per_run: 25
+    restart_browser_every: 10  # close/reopen Chromium to limit VPS RAM flake
+    max_browser_reopens: 5
     schedule: "0 15 * * 0"  # Sunday 09:00 America/Chihuahua (UTC-6)
   # Full delete+recreate (slow; auto on odd ISO weeks, or run_repost.py manually)
   repost:
     min_age_days: 7
-    max_per_account_per_run: 10
+    max_per_account_per_run: 5  # smaller batches; browser restarts every N below
+    restart_browser_every: 3
+    max_browser_reopens: 5
 
 facebook:
   location_city: Chihuahua

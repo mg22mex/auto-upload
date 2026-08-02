@@ -7,11 +7,12 @@ from pathlib import Path
 
 from playwright.sync_api import Locator, Page
 
+from src.facebook.browser_health import is_browser_dead
 from src.facebook.errors import FacebookAutomationError, FacebookPostingError, FacebookSessionError
 from src.facebook.poster import _save_debug
 from src.facebook.session import get_page, is_logged_in, open_account_context, page_shows_login_form
 from src.facebook.ui import dismiss_overlays
-from src.facebook.util import ensure_log_dir, env_bool, env_float, random_delay
+from src.facebook.util import ensure_log_dir, env_bool, env_float, env_int, random_delay
 from src.models import SyncAction, Vehicle
 from src.store.db import SyncStore
 
@@ -23,6 +24,7 @@ SELLING_URL = "https://www.facebook.com/marketplace/you/selling"
 class RenewResult:
     renews: int = 0
     errors: list[str] = None  # type: ignore[assignment]
+    browser_reopens: int = 0
 
     def __post_init__(self) -> None:
         if self.errors is None:
@@ -41,9 +43,18 @@ def execute_renews(
         return RenewResult()
 
     fb_config = config.get("facebook", {})
+    renew_cfg = config.get("sync", {}).get("renew", {}) or {}
     headless = env_bool("FB_HEADLESS", bool(fb_config.get("headless", True)))
     delay_min = env_float("FB_RENEW_DELAY_MIN_SEC", 15.0, "FB_ACTION_DELAY_MIN_SEC")
     delay_max = env_float("FB_RENEW_DELAY_MAX_SEC", 30.0, "FB_ACTION_DELAY_MAX_SEC")
+    restart_every = env_int(
+        "FB_RENEW_BROWSER_EVERY",
+        int(renew_cfg.get("restart_browser_every", 10)),
+    )
+    max_reopens = env_int(
+        "FB_BROWSER_REOPEN_MAX",
+        int(renew_cfg.get("max_browser_reopens", 5)),
+    )
     log_dir = ensure_log_dir(root / "data" / "logs" / "facebook")
 
     by_account: dict[str, list[SyncAction]] = defaultdict(list)
@@ -56,56 +67,117 @@ def execute_renews(
     ordered_accounts = account_order or list(by_account.keys())
 
     for account_id in ordered_accounts:
-        account_actions = by_account.get(account_id)
-        if not account_actions:
+        remaining = list(by_account.get(account_id) or [])
+        if not remaining:
             continue
-        print(f"Renew: processing {len(account_actions)} listing(s) for {account_id}")
-        try:
-            with open_account_context(
-                config,
-                account_id,
-                root=root,
-                headless=headless,
-            ) as context:
-                page = get_page(context)
-                if not is_logged_in(page):
-                    raise FacebookSessionError(
-                        f"Not logged in for {account_id}. "
-                        f"Run: python scripts/fb_login.py --account {account_id}"
-                    )
+        print(f"Renew: processing {len(remaining)} listing(s) for {account_id}")
+        reopens = 0
 
-                # Open renew dialog once per account, renew each target, close between if needed
-                if not _open_renew_dialog(page):
-                    raise FacebookPostingError("Could not open Renew listings dialog (To renew)")
-
-                for action in account_actions:
-                    if page_shows_login_form(page):
+        while remaining:
+            reopen_requested = False
+            try:
+                with open_account_context(
+                    config,
+                    account_id,
+                    root=root,
+                    headless=headless,
+                ) as context:
+                    page = get_page(context)
+                    if not is_logged_in(page):
                         raise FacebookSessionError(
-                            f"Session expired for {account_id}. "
+                            f"Not logged in for {account_id}. "
                             f"Run: python scripts/fb_login.py --account {account_id}"
                         )
-                    try:
-                        _renew_one_in_dialog(
-                            page,
-                            action,
-                            store,
-                            log_dir=log_dir,
-                            result=result,
-                        )
-                    except Exception as exc:
-                        msg = f"renew {action.autosell_id} on {account_id}: {exc}"
-                        print(f"ERROR: {msg}")
-                        result.errors.append(msg)
-                        # Re-open dialog if it closed after an error
-                        if not _dialog_is_open(page):
-                            _open_renew_dialog(page)
-                    random_delay(delay_min, delay_max)
 
-                _close_dialog(page)
-        except FacebookSessionError as exc:
-            result.errors.append(str(exc))
-        except Exception as exc:
-            result.errors.append(f"{account_id}: {exc}")
+                    if not _open_renew_dialog(page):
+                        raise FacebookPostingError(
+                            "Could not open Renew listings dialog (To renew)"
+                        )
+
+                    done_in_session = 0
+                    while remaining:
+                        action = remaining[0]
+                        if page_shows_login_form(page):
+                            raise FacebookSessionError(
+                                f"Session expired for {account_id}. "
+                                f"Run: python scripts/fb_login.py --account {account_id}"
+                            )
+                        try:
+                            _renew_one_in_dialog(
+                                page,
+                                action,
+                                store,
+                                log_dir=log_dir,
+                                result=result,
+                            )
+                            remaining.pop(0)
+                            done_in_session += 1
+                        except Exception as exc:
+                            if is_browser_dead(exc):
+                                print(
+                                    f"WARN: renew {action.autosell_id} on {account_id}: "
+                                    f"browser died ({exc}); will reopen and retry"
+                                )
+                                reopen_requested = True
+                                break
+                            msg = f"renew {action.autosell_id} on {account_id}: {exc}"
+                            print(f"ERROR: {msg}")
+                            result.errors.append(msg)
+                            remaining.pop(0)
+                            if not _dialog_is_open(page):
+                                _open_renew_dialog(page)
+
+                        if remaining and not reopen_requested:
+                            random_delay(delay_min, delay_max)
+
+                        if (
+                            restart_every > 0
+                            and done_in_session >= restart_every
+                            and remaining
+                            and not reopen_requested
+                        ):
+                            print(
+                                f"Renew: restarting browser after {done_in_session} "
+                                f"listing(s) for {account_id} "
+                                f"({len(remaining)} left)"
+                            )
+                            break
+
+                    if not reopen_requested:
+                        _close_dialog(page)
+            except FacebookSessionError as exc:
+                result.errors.append(str(exc))
+                break
+            except Exception as exc:
+                if is_browser_dead(exc):
+                    reopen_requested = True
+                    print(
+                        f"WARN: renew on {account_id}: browser died ({exc}); "
+                        f"will reopen and retry"
+                    )
+                else:
+                    result.errors.append(f"{account_id}: {exc}")
+                    break
+
+            if not remaining:
+                break
+            if not reopen_requested and restart_every > 0:
+                continue
+            if reopen_requested:
+                reopens += 1
+                result.browser_reopens += 1
+                if reopens > max_reopens:
+                    result.errors.append(
+                        f"{account_id}: too many browser reopens ({reopens}); "
+                        f"{len(remaining)} listing(s) left"
+                    )
+                    break
+                print(
+                    f"Renew: reopening browser for {account_id} "
+                    f"({reopens}/{max_reopens}, {len(remaining)} left)"
+                )
+                continue
+            break
 
     return result
 

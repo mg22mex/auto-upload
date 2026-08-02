@@ -18,7 +18,7 @@ Visual reference for architecture, flows, user stories, quality checks, and roll
 | Posts per account per run | **10** | `MAX_POSTS_PER_ACCOUNT_PER_RUN` (configurable) |
 | Scheduled runs per day | **2** sync + **1/week** repost | ~08:00 & ~12:00 sync; Sun 09:00 repost |
 | Max new listings per day (active accounts) | **~40** | 10 × 2 × 2 sync runs |
-| Max reposts per week (active accounts) | **~20** | 10 × 2 accounts (configurable) |
+| Max reposts per week (active accounts) | **~10** | 5 × 2 accounts (configurable; browser restart every 3) |
 | CI job timeout | **120 min** | `.github/workflows/sync.yml` |
 | Verified manual test vehicle | **obj969** | 2020 Audi A3 on all 3 accounts |
 | Live scheduled posting | **On** | `DRY_RUN=false`; account_1 + account_2 at 134/134 |

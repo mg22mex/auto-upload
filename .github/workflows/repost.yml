@@ -105,7 +105,10 @@ jobs:
           RENEW_MIN_AGE_DAYS: ${{ secrets.RENEW_MIN_AGE_DAYS || secrets.REPOST_MIN_AGE_DAYS || '7' }}
           REPOST_MIN_AGE_DAYS: ${{ secrets.REPOST_MIN_AGE_DAYS || secrets.RENEW_MIN_AGE_DAYS || '7' }}
           RENEW_MAX_PER_ACCOUNT_PER_RUN: ${{ inputs.max_per_account || secrets.RENEW_MAX_PER_ACCOUNT_PER_RUN || '25' }}
-          REPOST_MAX_PER_ACCOUNT_PER_RUN: ${{ inputs.max_per_account || secrets.REPOST_MAX_PER_ACCOUNT_PER_RUN || '10' }}
+          REPOST_MAX_PER_ACCOUNT_PER_RUN: ${{ inputs.max_per_account || secrets.REPOST_MAX_PER_ACCOUNT_PER_RUN || '5' }}
+          FB_REPOST_BROWSER_EVERY: ${{ secrets.FB_REPOST_BROWSER_EVERY || '3' }}
+          FB_RENEW_BROWSER_EVERY: ${{ secrets.FB_RENEW_BROWSER_EVERY || '10' }}
+          FB_BROWSER_REOPEN_MAX: ${{ secrets.FB_BROWSER_REOPEN_MAX || '5' }}
           FB_RENEW_DELAY_MIN_SEC: ${{ secrets.FB_RENEW_DELAY_MIN_SEC || '20' }}
           FB_RENEW_DELAY_MAX_SEC: ${{ secrets.FB_RENEW_DELAY_MAX_SEC || '40' }}
           FB_HEADLESS: ${{ secrets.FB_HEADLESS || 'true' }}
