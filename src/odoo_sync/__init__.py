@@ -2,6 +2,6 @@
 
 Credentials and endpoints from environment variables — never hardcode secrets.
 """
-from src.odoo_sync.client import OdooCRMClient, OdooCRMError
+from src.odoo_sync.client import OdooCRMClient, OdooCRMError, QuoteLeadResult
 
-__all__ = ["OdooCRMClient", "OdooCRMError"]
+__all__ = ["OdooCRMClient", "OdooCRMError", "QuoteLeadResult"]

@@ -15,6 +15,7 @@ from src.meta_gateway.gateway import (
     MetaWebhookGateway,
     parse_messenger_events,
 )
+from src.odoo_sync.client import QuoteLeadResult
 from src.voice_gateway.webhook import create_app
 
 
@@ -88,7 +89,9 @@ class TestMessengerClient(unittest.TestCase):
 class TestMetaGateway(unittest.TestCase):
     def test_quote_upserts_odoo_and_replies(self):
         odoo = MagicMock()
-        odoo.create_or_update_lead.return_value = 501
+        odoo.create_or_update_lead.return_value = QuoteLeadResult(
+            lead_id=501, activity_id=880, tag_ids=(9, 11)
+        )
         odoo.post_quote_to_chatter.return_value = 701
         messenger = MagicMock()
         messenger.send_text_message.return_value = {"message_id": "mid.1"}
@@ -104,12 +107,13 @@ class TestMetaGateway(unittest.TestCase):
         self.assertEqual(result["status"], "quoted")
         self.assertEqual(result["lead_id"], 501)
         odoo.authenticate.assert_called_once()
-        odoo.create_or_update_lead.assert_called_once_with(
-            "Ana",
-            "messenger:PSID-123",
-            "Mazda CX-5 2020",
-            3,
-        )
+        odoo.create_or_update_lead.assert_called_once()
+        lead_kwargs = odoo.create_or_update_lead.call_args
+        self.assertEqual(lead_kwargs.args[0], "Ana")
+        self.assertEqual(lead_kwargs.args[1], "messenger:PSID-123")
+        self.assertEqual(lead_kwargs.kwargs.get("channel"), "facebook_messenger")
+        self.assertEqual(lead_kwargs.kwargs.get("term_months"), 36)
+        self.assertEqual(lead_kwargs.kwargs.get("stage_name"), "Quote Generated")
         odoo.post_quote_to_chatter.assert_called_once()
         messenger.send_text_message.assert_called_once()
         self.assertIn("Pago mensual estimado", messenger.send_text_message.call_args.args[1])

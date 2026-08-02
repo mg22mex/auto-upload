@@ -43,7 +43,7 @@ The workflow symlinks `data/` and `sessions/` to `~/auto-upload-data/` so `sync.
 
 **Not suitable:** Hugging Face Spaces, Streamlit Cloud, Render/Railway free tiers — they sleep and cannot keep Facebook browser sessions.
 
-**Scheduling:** GitHub Actions cron triggers sync (2× daily) and repost (weekly Sunday). You do not need cron on the worker itself.
+**Scheduling:** GitHub Actions cron triggers sync (2× daily) and weekly listing bump (Sunday — even ISO week renew / odd week full repost). You do not need cron on the worker itself.
 
 | Workflow | Schedule (Chihuahua) | Purpose |
 |----------|----------------------|---------|
@@ -349,19 +349,15 @@ python run_sync.py --dry-run
 **Weekly default = Renovar** (same item URL — ads-safe, fast):
 
 ```bash
+# Alternating Sunday bump (even week=renew, odd=repost)
+python scripts/run_weekly_bump.py --all-eligible --dry-run
+python scripts/run_weekly_bump.py --mode renew --account account_2 --ids obj1137
+python scripts/run_weekly_bump.py --mode repost --account account_2 --ids obj1126
+
+# Direct scripts
 python scripts/run_renew.py --account account_2 --ids obj1137 --dry-run
 python scripts/run_renew.py --account account_1 --all-eligible --max 25
-```
-
-**Extension-style new URL** (slow full create, or after Chrome extension):
-
-```bash
-# Our automation (mark sold → create)
 python scripts/run_repost.py --account account_2 --ids obj1126
-
-# After Chrome extension created a new item URL:
-python scripts/fb_set_listing_url.py --account account_2 --autosell-id obj1136 \
-  --url 'https://www.facebook.com/marketplace/item/NEWID/'
 ```
 
 **Protect listings during FB ads:**
@@ -372,8 +368,9 @@ python scripts/fb_repost_hold.py add obj1126 --account account_2 --until 2026-07
 
 | Flow | URL | Speed | Weekly job |
 |------|-----|-------|------------|
-| Renovar | Same | Seconds | Yes (`run_renew.py`) |
-| Extension / full repost | New | Minutes | Manual |
+| Renovar | Same | Seconds | Even ISO weeks (`run_weekly_bump.py`) |
+| Full repost | New | Minutes | Odd ISO weeks (`run_weekly_bump.py`) |
+| Extension + URL update | New | Manual | After Chrome extension |
 | FB “eliminar y volver a publicar” | New (when eligible) | — | Not offered for our stock (count 0) |
 
 ---

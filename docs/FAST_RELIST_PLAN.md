@@ -10,8 +10,10 @@
 
 ## Production choice
 
-- **Weekly job** → native **Renovar** (`scripts/run_renew.py`) — same URL, ads-safe, seconds per listing, cap **25**/account.
-- **New URL when needed** → Chrome extension or `scripts/run_repost.py` (full create), then `fb_set_listing_url.py`.
+- **Sunday cron** (`.github/workflows/repost.yml`) → `scripts/run_weekly_bump.py`
+  - **Even ISO week** → native **Renovar** (`run_renew.py`) — same URL, ads-safe, seconds/listing, cap **25**/account.
+  - **Odd ISO week** → full **repost** (`run_repost.py`) — new URL, slower, cap **10**/account.
+- **Manual override** → Actions → Run workflow → mode `renew` / `repost` / `auto`.
 - **Holds** → `fb_repost_hold.py` skips both renew and full repost.
 
 ## UI labels (es-MX / EN)
@@ -25,10 +27,15 @@
 ## Commands
 
 ```bash
-# Plan weekly-style renew
-python scripts/run_renew.py --all-eligible --dry-run
+# This Sunday's automatic mode (plan only)
+python scripts/run_weekly_bump.py --all-eligible --dry-run
 
-# Renew one listing
+# Force renew or repost regardless of week
+python scripts/run_weekly_bump.py --mode renew --all-eligible --dry-run
+python scripts/run_weekly_bump.py --mode repost --account account_2 --ids obj1126
+
+# Direct scripts (same as before)
+python scripts/run_renew.py --all-eligible --dry-run
 python scripts/run_renew.py --account account_2 --ids obj969
 
 # After extension repost

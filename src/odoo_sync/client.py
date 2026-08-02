@@ -3,11 +3,22 @@ from __future__ import annotations
 
 import os
 import xmlrpc.client
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 
 class OdooCRMError(RuntimeError):
     """Raised when Odoo auth or RPC calls fail."""
+
+
+@dataclass(frozen=True)
+class QuoteLeadResult:
+    """Result of quote lead upsert + follow-up scheduling."""
+
+    lead_id: int
+    activity_id: int | None = None
+    tag_ids: tuple[int, ...] = field(default_factory=tuple)
 
 
 class OdooCRMClient:
@@ -17,6 +28,7 @@ class OdooCRMClient:
     ENV_DB = "ODOO_DB"
     ENV_USER = "ODOO_USERNAME"
     ENV_KEY = "ODOO_API_KEY"
+    ENV_DEFAULT_ACTIVITY_USER = "ODOO_ACTIVITY_USER_ID"
 
     def __init__(
         self,
@@ -28,18 +40,24 @@ class OdooCRMClient:
         common: Any | None = None,
         models: Any | None = None,
     ) -> None:
-        self.url = (url or os.getenv(self.ENV_URL, "")).rstrip("/")
-        self.db = db or os.getenv(self.ENV_DB, "")
+        self.url = (os.getenv(self.ENV_URL, "") if url is None else url).rstrip("/")
+        self.db = os.getenv(self.ENV_DB, "") if db is None else db
         # CI secrets may use ODOO_USER / ODOO_PASSWORD aliases.
         self.username = (
-            username
-            or os.getenv(self.ENV_USER, "")
-            or os.getenv("ODOO_USER", "")
+            (
+                os.getenv(self.ENV_USER, "")
+                or os.getenv("ODOO_USER", "")
+            )
+            if username is None
+            else username
         )
         self.api_key = (
-            api_key
-            or os.getenv(self.ENV_KEY, "")
-            or os.getenv("ODOO_PASSWORD", "")
+            (
+                os.getenv(self.ENV_KEY, "")
+                or os.getenv("ODOO_PASSWORD", "")
+            )
+            if api_key is None
+            else api_key
         )
         self.uid: int | None = None
         self._common = common
@@ -180,12 +198,20 @@ class OdooCRMClient:
         """
         fields = ["id", "name", "list_price", "qty_available", "categ_id", "default_code"]
         if default_code:
-            rows = self.execute_kw(
-                "product.template",
-                "search_read",
-                [[("default_code", "=", default_code)]],
-                {"fields": fields, "limit": 1},
-            )
+            # Include archived so re-listed SKUs can be reactivated (active=True).
+            try:
+                rows = self.execute_kw(
+                    "product.template",
+                    "search_read",
+                    [[("default_code", "=", default_code)]],
+                    {
+                        "fields": fields,
+                        "limit": 1,
+                        "context": {"active_test": False},
+                    },
+                )
+            except Exception:
+                rows = []
             return rows[0] if rows else None
         if name:
             rows = self.execute_kw(
@@ -196,6 +222,64 @@ class OdooCRMClient:
             )
             return rows[0] if rows else None
         return None
+
+    # Inventory status labels (website gone = completed sale).
+    VEHICLE_STATE_FIELDS = (
+        "x_studio_state",
+        "x_studio_estatus",
+        "x_vehicle_state",
+        "state",
+    )
+    VEHICLE_STATE_SOLD = ("sold", "Sold", "Vendido", "vendido")
+    VEHICLE_STATE_AVAILABLE = ("available", "Available", "Disponible", "disponible")
+
+    def _write_product_inventory_status(
+        self,
+        product_id: int,
+        *,
+        inventory_status: str,
+        active: bool,
+    ) -> dict[str, Any]:
+        """Write active flag + best-effort sold/available state field.
+
+        Tries Studio/custom selection fields with EN/ES labels; falls back to
+        ``active`` only when no status field is accepted by the database.
+        """
+        status = (inventory_status or "").strip().lower()
+        labels = (
+            self.VEHICLE_STATE_SOLD
+            if status == "sold"
+            else self.VEHICLE_STATE_AVAILABLE
+        )
+        last_exc: BaseException | None = None
+        for field in self.VEHICLE_STATE_FIELDS:
+            for label in labels:
+                vals = {"active": bool(active), field: label}
+                try:
+                    self.execute_kw(
+                        "product.template",
+                        "write",
+                        [[int(product_id)], vals],
+                    )
+                    return {
+                        "active": bool(active),
+                        "state_field": field,
+                        "state_value": label,
+                    }
+                except Exception as exc:
+                    last_exc = exc
+                    continue
+        try:
+            self.execute_kw(
+                "product.template",
+                "write",
+                [[int(product_id)], {"active": bool(active)}],
+            )
+            return {"active": bool(active), "state_field": None, "state_value": None}
+        except Exception as exc:
+            raise OdooCRMError(
+                f"product status write failed id={product_id}: {exc or last_exc}"
+            ) from exc
 
     def upsert_vehicle_product(
         self,
@@ -209,7 +293,8 @@ class OdooCRMClient:
     ) -> dict[str, Any]:
         """Create or update product.template from scraped vehicle.
 
-        Returns {"id", "action": "created"|"updated", "name", "list_price"}.
+        Re-lists reset inventory status to available and ``active=True``.
+        Returns {"id", "action": "created"|"updated", "name", "list_price", ...}.
         """
         name = (name or "").strip()
         if not name:
@@ -228,6 +313,8 @@ class OdooCRMClient:
             "description_sale": description or False,
             "type": "consu",
             "is_storable": True,
+            "active": True,
+            "x_studio_state": "available",
         }
         if categ_id is not None:
             vals["categ_id"] = int(categ_id)
@@ -240,6 +327,14 @@ class OdooCRMClient:
                 ("is_storable",),
                 ("is_storable", "type"),
                 ("is_storable", "type", "description_sale"),
+                ("is_storable", "type", "description_sale", "x_studio_state"),
+                (
+                    "is_storable",
+                    "type",
+                    "description_sale",
+                    "x_studio_state",
+                    "active",
+                ),
             ):
                 for key in drop:
                     attempt.pop(key, None)
@@ -266,6 +361,13 @@ class OdooCRMClient:
             product_id = _write_or_create(None)
             action = "created"
 
+        # Always enforce available + active on website-present SKUs (incl. re-lists).
+        status_meta = self._write_product_inventory_status(
+            product_id,
+            inventory_status="available",
+            active=True,
+        )
+
         # Best-effort on-hand qty (Odoo 19 may ignore / compute qty_available).
         try:
             variants = self.execute_kw(
@@ -285,6 +387,9 @@ class OdooCRMClient:
             "name": name,
             "list_price": float(list_price),
             "default_code": default_code,
+            "inventory_status": "available",
+            "state_field": status_meta.get("state_field"),
+            "state_value": status_meta.get("state_value"),
         }
 
     def _ensure_product_qty(self, product_id: int, qty: float) -> None:
@@ -337,14 +442,96 @@ class OdooCRMClient:
         except Exception:
             pass
 
+    def list_active_vehicle_products(
+        self,
+        *,
+        categ_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Active vehicle templates with Autosell SKU (`default_code`)."""
+        domain: list[Any] = [
+            ("active", "=", True),
+            ("default_code", "!=", False),
+        ]
+        if categ_id is not None:
+            domain.append(("categ_id", "=", int(categ_id)))
+        else:
+            domain.append(("categ_id.name", "ilike", "vehicul"))
+        rows = self.execute_kw(
+            "product.template",
+            "search_read",
+            [domain],
+            {"fields": ["id", "name", "default_code", "list_price", "categ_id"]},
+        )
+        products: list[dict[str, Any]] = []
+        for row in rows:
+            code = str(row.get("default_code") or "").strip()
+            if not code:
+                continue
+            products.append(
+                {
+                    "id": int(row["id"]),
+                    "name": str(row.get("name") or ""),
+                    "default_code": code,
+                    "list_price": float(row.get("list_price") or 0),
+                }
+            )
+        return products
+
+    def archive_orphan_vehicles(
+        self,
+        active_default_codes: set[str] | list[str],
+        *,
+        categ_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Mark website-missing vehicles as sold, then soft-archive (`active=False`).
+
+        Website removal = completed sale. Preserves history; only templates with a
+        non-empty `default_code` in the vehicles category (or `categ_id`).
+        """
+        keep = {str(code).strip() for code in active_default_codes if str(code).strip()}
+        archived: list[dict[str, Any]] = []
+        for product in self.list_active_vehicle_products(categ_id=categ_id):
+            code = product["default_code"]
+            if code in keep:
+                continue
+            status_meta = self._write_product_inventory_status(
+                int(product["id"]),
+                inventory_status="sold",
+                active=False,
+            )
+            archived.append(
+                {
+                    **product,
+                    "inventory_status": "sold",
+                    "state_field": status_meta.get("state_field"),
+                    "state_value": status_meta.get("state_value"),
+                }
+            )
+        return archived
+
     def create_or_update_lead(
         self,
         name: str,
         phone: str,
         vehicle_name: str,
         branch_id: int,
-    ) -> int:
-        """Find crm.lead by phone; create or update. Returns lead_id."""
+        *,
+        down_payment: Any = None,
+        term_months: int | None = None,
+        quote_summary: str | None = None,
+        stage_name: str = "Quote Generated",
+        channel: str | None = None,
+        estimated_monthly_payment: Any = None,
+        vehicle_price: Any = None,
+        schedule_follow_up: bool = True,
+        user_id: int | None = None,
+    ) -> QuoteLeadResult:
+        """Find crm.lead by phone/chat id; create or update.
+
+        Captures vehicle, enganche, plazo, and quote notes. Sets pipeline stage
+        to ``stage_name`` when a matching ``crm.stage`` exists. Tags the lead
+        and schedules a Phone Call / To-Do follow-up (~24h).
+        """
         phone_norm = (phone or "").strip()
         if not phone_norm:
             raise OdooCRMError("phone is required")
@@ -363,25 +550,86 @@ class OdooCRMClient:
         except Exception as exc:
             raise OdooCRMError(f"lead search failed: {exc}") from exc
 
+        note_lines = [
+            f"Vehicle interest: {vehicle_name}".strip(),
+        ]
+        if channel:
+            note_lines.append(f"Channel: {channel}")
+        if vehicle_price not in (None, ""):
+            note_lines.append(f"Vehicle price: {vehicle_price}")
+        if down_payment not in (None, ""):
+            note_lines.append(f"Requested down payment: {down_payment}")
+        if term_months is not None:
+            note_lines.append(f"Requested term: {int(term_months)} months")
+        if estimated_monthly_payment not in (None, ""):
+            note_lines.append(
+                f"Estimated monthly payment: {estimated_monthly_payment}"
+            )
+        note_lines.append("Pipeline stage: Quote Generated")
+        if quote_summary:
+            note_lines.extend(["", "--- Quote breakdown ---", quote_summary.strip()])
+
+        description = "\n".join(note_lines)
+        opportunity_name = f"{name.strip()} — {vehicle_name}".strip(" —")
+
         vals: dict[str, Any] = {
-            "name": name.strip(),
+            "name": opportunity_name[:128],
             "contact_name": name.strip(),
             "phone": phone_norm,
-            "description": f"Vehicle interest: {vehicle_name}".strip(),
+            "description": description,
             "type": "opportunity",
             "team_id": int(branch_id),
         }
-        # Optional custom field when present on the database
+        # Optional custom fields when present on the database
         vals["x_vehicle_name"] = vehicle_name
+        if term_months is not None:
+            vals["x_term_months"] = int(term_months)
+        if down_payment not in (None, ""):
+            try:
+                vals["x_down_payment"] = float(down_payment)
+            except (TypeError, ValueError):
+                vals["x_down_payment"] = str(down_payment)
+
+        stage_id = self._resolve_crm_stage_id(stage_name)
+        if stage_id is not None:
+            vals["stage_id"] = stage_id
+
+        tag_ids = self._resolve_quote_lead_tag_ids(channel)
+        if tag_ids:
+            vals["tag_ids"] = [(6, 0, list(tag_ids))]
 
         def _write_or_create(existing_id: int | None) -> int:
             attempt_vals = dict(vals)
             last_exc: BaseException | None = None
             for drop in (
                 (),
-                ("x_vehicle_name",),
-                ("x_vehicle_name", "team_id"),
-                ("x_vehicle_name", "team_id", "type"),
+                ("x_down_payment", "x_term_months"),
+                ("x_vehicle_name", "x_down_payment", "x_term_months"),
+                ("x_vehicle_name", "x_down_payment", "x_term_months", "stage_id"),
+                (
+                    "x_vehicle_name",
+                    "x_down_payment",
+                    "x_term_months",
+                    "stage_id",
+                    "tag_ids",
+                ),
+                (
+                    "x_vehicle_name",
+                    "x_down_payment",
+                    "x_term_months",
+                    "stage_id",
+                    "tag_ids",
+                    "team_id",
+                ),
+                (
+                    "x_vehicle_name",
+                    "x_down_payment",
+                    "x_term_months",
+                    "stage_id",
+                    "tag_ids",
+                    "team_id",
+                    "type",
+                ),
             ):
                 for key in drop:
                     attempt_vals.pop(key, None)
@@ -399,9 +647,232 @@ class OdooCRMClient:
                 f"lead create/update failed after field fallbacks: {last_exc}"
             ) from last_exc
 
-        if found:
-            return _write_or_create(int(found[0]))
-        return _write_or_create(None)
+        lead_id = _write_or_create(int(found[0]) if found else None)
+
+        # Apply tags separately if create/write dropped tag_ids.
+        if tag_ids:
+            try:
+                self.execute_kw(
+                    "crm.lead",
+                    "write",
+                    [[lead_id], {"tag_ids": [(6, 0, list(tag_ids))]}],
+                )
+            except Exception:
+                pass
+
+        activity_id: int | None = None
+        if schedule_follow_up:
+            activity_id = self.schedule_quote_follow_up(
+                lead_id,
+                vehicle_name=vehicle_name,
+                down_payment=down_payment,
+                term_months=term_months,
+                estimated_monthly_payment=estimated_monthly_payment,
+                channel=channel,
+                branch_id=branch_id,
+                user_id=user_id,
+            )
+            if activity_id is not None:
+                print(
+                    f"Scheduled follow-up activity id={activity_id} "
+                    f"for lead id={lead_id}"
+                )
+
+        return QuoteLeadResult(
+            lead_id=lead_id,
+            activity_id=activity_id,
+            tag_ids=tuple(tag_ids),
+        )
+
+    def _follow_up_deadline(self, *, hours: int = 24) -> date:
+        """Deadline = now+hours, rolled to next weekday morning if weekend."""
+        when = datetime.now(timezone.utc) + timedelta(hours=hours)
+        day = when.date()
+        # Sat→Mon, Sun→Mon
+        if day.weekday() == 5:
+            day = day + timedelta(days=2)
+        elif day.weekday() == 6:
+            day = day + timedelta(days=1)
+        return day
+
+    def _resolve_activity_type_id(self) -> int | None:
+        """Prefer Phone Call; fall back to To-Do."""
+        try:
+            ref = self.execute_kw(
+                "ir.model.data",
+                "check_object_reference",
+                ["mail", "mail_activity_data_call"],
+            )
+            if isinstance(ref, (list, tuple)) and len(ref) >= 2:
+                return int(ref[1])
+        except Exception:
+            pass
+        for label in ("Call", "Phone Call", "Llamada", "To-Do", "To Do", "Todo"):
+            try:
+                found = self.execute_kw(
+                    "mail.activity.type",
+                    "search",
+                    [[("name", "ilike", label)]],
+                    {"limit": 1},
+                )
+                if found:
+                    return int(found[0])
+            except Exception:
+                continue
+        return None
+
+    def _resolve_quote_lead_tag_ids(self, channel: str | None) -> list[int]:
+        """Ensure AI Quote Lead (+ Messenger Bot when applicable) crm.tag ids."""
+        names = ["AI Quote Lead"]
+        channel_norm = (channel or "").strip().lower()
+        if "messenger" in channel_norm or channel_norm.startswith("facebook"):
+            names.append("Messenger Bot")
+
+        tag_ids: list[int] = []
+        seen_names: set[str] = set()
+        seen_ids: set[int] = set()
+        for name in names:
+            key = name.lower()
+            if key in seen_names:
+                continue
+            seen_names.add(key)
+            tag_id = self._ensure_crm_tag(name)
+            if tag_id is not None and tag_id not in seen_ids:
+                seen_ids.add(tag_id)
+                tag_ids.append(tag_id)
+        return tag_ids
+
+    def _ensure_crm_tag(self, name: str) -> int | None:
+        label = (name or "").strip()
+        if not label:
+            return None
+        for model in ("crm.tag", "crm.lead.tag"):
+            try:
+                rows = self.execute_kw(
+                    model,
+                    "search_read",
+                    [[("name", "=", label)]],
+                    {"fields": ["id"], "limit": 1},
+                )
+                if rows:
+                    return int(rows[0]["id"])
+                return int(self.execute_kw(model, "create", [{"name": label}]))
+            except Exception:
+                continue
+        return None
+
+    def _resolve_follow_up_user_id(
+        self,
+        *,
+        branch_id: int,
+        user_id: int | None = None,
+    ) -> int | None:
+        if user_id is not None:
+            return int(user_id)
+        env_raw = os.getenv(self.ENV_DEFAULT_ACTIVITY_USER, "").strip()
+        if env_raw.isdigit():
+            return int(env_raw)
+        try:
+            advisors = self._advisor_ids_for_branch(branch_id)
+            if advisors:
+                return int(advisors[0])
+        except Exception:
+            pass
+        return int(self.uid) if self.uid is not None else None
+
+    def schedule_quote_follow_up(
+        self,
+        lead_id: int,
+        *,
+        vehicle_name: str,
+        down_payment: Any = None,
+        term_months: int | None = None,
+        estimated_monthly_payment: Any = None,
+        channel: str | None = None,
+        branch_id: int = 1,
+        user_id: int | None = None,
+        hours: int = 24,
+    ) -> int | None:
+        """Create mail.activity Phone Call / To-Do due in ~24h on the lead."""
+        activity_type_id = self._resolve_activity_type_id()
+        if activity_type_id is None:
+            return None
+        assignee = self._resolve_follow_up_user_id(
+            branch_id=branch_id, user_id=user_id
+        )
+        if assignee is None:
+            return None
+
+        deadline = self._follow_up_deadline(hours=hours)
+        note_parts = [
+            f"Follow up on generated vehicle quote: {vehicle_name}",
+            f"Down payment: {down_payment if down_payment not in (None, '') else 'n/a'}",
+            f"Loan term: {term_months if term_months is not None else 'n/a'} months",
+            f"Monthly payment: {estimated_monthly_payment if estimated_monthly_payment not in (None, '') else 'n/a'}",
+            f"Preferred channel: {channel or 'n/a'}",
+        ]
+        note_html = "<br/>".join(
+            line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            for line in note_parts
+        )
+        vals: dict[str, Any] = {
+            "res_model": "crm.lead",
+            "res_id": int(lead_id),
+            "activity_type_id": int(activity_type_id),
+            "summary": f"Follow up on generated vehicle quote: {vehicle_name}"[:200],
+            "note": f"<p>{note_html}</p>",
+            "date_deadline": deadline.isoformat(),
+            "user_id": int(assignee),
+        }
+        # Odoo 14+ often wants res_model_id instead of / in addition to res_model
+        try:
+            model_ids = self.execute_kw(
+                "ir.model",
+                "search",
+                [[("model", "=", "crm.lead")]],
+                {"limit": 1},
+            )
+            if model_ids:
+                vals["res_model_id"] = int(model_ids[0])
+        except Exception:
+            pass
+
+        last_exc: BaseException | None = None
+        for drop in ((), ("res_model",), ("res_model_id",), ("note",)):
+            attempt = dict(vals)
+            for key in drop:
+                attempt.pop(key, None)
+            try:
+                return int(self.execute_kw("mail.activity", "create", [attempt]))
+            except Exception as exc:
+                last_exc = exc
+                continue
+        # Non-fatal: lead upsert still succeeded
+        print(f"WARN follow-up activity failed for lead id={lead_id}: {last_exc}")
+        return None
+
+    def _resolve_crm_stage_id(self, stage_name: str) -> int | None:
+        """Best-effort match for crm.stage by name (e.g. Quote Generated)."""
+        label = (stage_name or "").strip()
+        if not label:
+            return None
+        try:
+            rows = self.execute_kw(
+                "crm.stage",
+                "search_read",
+                [[("name", "ilike", label)]],
+                {"fields": ["id", "name"], "limit": 10},
+            )
+        except Exception:
+            return None
+        if not rows:
+            return None
+        lowered = label.lower()
+        for row in rows:
+            if str(row.get("name") or "").strip().lower() == lowered:
+                return int(row["id"])
+        return int(rows[0]["id"])
+
     def _advisor_ids_for_branch(self, branch_id: int) -> list[int]:
         """Salespeople on crm.team (branch)."""
         teams = self.execute_kw(
@@ -540,3 +1011,34 @@ class OdooCRMClient:
                 raise OdooCRMError(
                     f"chatter post failed: {exc2}"
                 ) from exc2
+
+    def attach_file(
+        self,
+        *,
+        model: str,
+        res_id: int,
+        filename: str,
+        content: bytes,
+        mimetype: str = "application/pdf",
+    ) -> int:
+        """Create ``ir.attachment`` linked to ``model`` / ``res_id``. Returns id."""
+        import base64
+
+        if not model or not str(model).strip():
+            raise OdooCRMError("model is required")
+        if not filename or not str(filename).strip():
+            raise OdooCRMError("filename is required")
+        if not content:
+            raise OdooCRMError("attachment content is empty")
+        vals = {
+            "name": str(filename).strip(),
+            "res_model": str(model).strip(),
+            "res_id": int(res_id),
+            "type": "binary",
+            "datas": base64.b64encode(content).decode("ascii"),
+            "mimetype": mimetype or "application/octet-stream",
+        }
+        try:
+            return int(self.execute_kw("ir.attachment", "create", [vals]))
+        except Exception as exc:
+            raise OdooCRMError(f"ir.attachment create failed: {exc}") from exc

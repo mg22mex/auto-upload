@@ -13,12 +13,18 @@ sync:
   active_accounts:
     - account_1
     - account_2
-  # Weekly bump: native FB Renovar (same URL). Extension-style = run_repost.py.
+  # Weekly bump: even ISO weeks = Renovar; odd = full repost (new URL).
+  # Cron: Sunday 09:00 America/Chihuahua via .github/workflows/repost.yml
+  weekly_bump:
+    timezone: America/Chihuahua
+    even_week: renew
+    odd_week: repost
+    schedule: "0 15 * * 0"
   renew:
     min_age_days: 7
     max_per_account_per_run: 25
     schedule: "0 15 * * 0"  # Sunday 09:00 America/Chihuahua (UTC-6)
-  # Full delete+recreate (slow; use manually when you need a new item URL)
+  # Full delete+recreate (slow; auto on odd ISO weeks, or run_repost.py manually)
   repost:
     min_age_days: 7
     max_per_account_per_run: 10

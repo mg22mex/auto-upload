@@ -69,7 +69,7 @@ def main() -> int:
     # Step 2 — create/update lead
     print("\n[2/3] create_or_update_lead()")
     try:
-        lead_id = client.create_or_update_lead(
+        lead_result = client.create_or_update_lead(
             TEST_NAME,
             TEST_PHONE,
             TEST_VEHICLE,
@@ -85,7 +85,12 @@ def main() -> int:
         if os_getenv_debug():
             traceback.print_exc()
         return 2
+    lead_id = lead_result.lead_id
     print(f"OK  lead_id={lead_id}")
+    if lead_result.activity_id is not None:
+        print(f"OK  follow-up activity_id={lead_result.activity_id}")
+    if lead_result.tag_ids:
+        print(f"OK  tag_ids={list(lead_result.tag_ids)}")
 
     # Step 3 — chatter quote
     print("\n[3/3] post_quote_to_chatter()")

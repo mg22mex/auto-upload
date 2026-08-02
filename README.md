@@ -4,10 +4,11 @@ Sync [autosell.mx](https://www.autosell.mx) public catalog to **Facebook Marketp
 
 **Status:**
 
-- **AI Voice & lead webhook:** Live. FastAPI `POST /webhook/voice-lead` → quote engine → Odoo lead + chatter.
-- **Meta Messenger webhook:** Scaffolded. `GET`/`POST /webhook/facebook` → quote → Odoo lead/chatter → Graph API reply.
+- **AI Voice & lead webhook:** Live. FastAPI `POST /webhook/voice-lead` (also `/voice/webhook`, `/voice/stream`) → intent/STT → quote → Odoo lead + 24h follow-up → PDF attachment → TTS text.
+- **Meta Messenger webhook:** `[WIP - Paused awaiting Fanpage Administrator permissions]`. FastAPI `GET`/`POST /webhook/facebook` + quote engine + Odoo lead/chatter + Graph reply are **100% complete in code**; only Meta Developers Page token / webhook subscription remains once Fanpage admin rights are granted.
 - **Scrape, diff & FB posting:** Live (`DRY_RUN=false`) for **account_1** and **account_2**. **account_3** excluded until old listings cleared.
-- **Odoo inventory sync:** Live. Catalog → upsert `product.template` (`default_code = autosell_id`).
+- **Weekly listing bump:** Alternating Sundays — even ISO week **Renovar**, odd week **full repost** (`scripts/run_weekly_bump.py`).
+- **Odoo inventory sync:** Live. Catalog → upsert `product.template` (`default_code = autosell_id`); website-missing SKUs marked **sold** then soft-archived (`active=False`).
 
 📖 **[Full project guide](./docs/PROJECT_GUIDE.md)** · **[Setup](./SETUP.md)**
 
@@ -16,13 +17,13 @@ Sync [autosell.mx](https://www.autosell.mx) public catalog to **Facebook Marketp
 | | |
 |--:|--|
 | **AI Voice gateway** | FastAPI `POST /webhook/voice-lead` |
-| **Meta Messenger** | FastAPI `GET`/`POST /webhook/facebook` (Page Graph API) |
+| **Meta Messenger** | WIP paused — code done; awaiting Fanpage admin / Page token |
 | **Quote engine** | Local French Amortization (Scotiabank profile) |
 | **Vehicles** | ~130–134 public catalog from `autosell.mx` |
 | **FB accounts** | 3 sessions; **2 live** (`account_1`, `account_2`) |
 | **Target FB listings** | ~268 (134 × 2 active accounts) |
 | **Odoo** | XML-RPC → `crm.lead` + `product.template` (`vehiculos`) |
-| **Schedule** | 2× daily scrape + Odoo sync + FB sync; weekly renew |
+| **Schedule** | 2× daily scrape + Odoo sync + FB sync; Sunday bump alternates renew/repost |
 
 ## System overview
 
@@ -64,7 +65,7 @@ The FB planner only manages listings in **`sync.db`**. It does not scan Facebook
 | **Catalog scrape** | GitHub Actions / `fb-worker` | `autosell.mx` → `catalog_latest.json` |
 | **Odoo inventory** | CI step / `fb-worker` | `sync_odoo_inventory.py` → upsert `product.template` |
 | **FB sync** | Self-hosted `fb-worker` | Diff → create / update / remove on active accounts |
-| **Repost / renew** | Weekly cron / `fb-worker` | **Renovar**; optional full repost via CLI |
+| **Repost / renew** | Weekly cron / `fb-worker` | Alternating Sundays: **even ISO week = Renovar**, **odd = full repost** |
 
 ## Key scripts
 
@@ -78,6 +79,7 @@ The FB planner only manages listings in **`sync.db`**. It does not scan Facebook
 | `src/quote_engine/` | Local amortization + Scotiabank profile |
 | `src/odoo_sync/client.py` | XML-RPC: auth, leads, chatter, inventory |
 | `src/whatsapp_worker/client.py` | open-wa / Evolution outbound messages |
+| `src/pdf_engine/` | ReportLab quote / vehicle spec PDF (+ optional Odoo `ir.attachment`) |
 | `scripts/sync_odoo_inventory.py` | Upsert catalog into `product.template` |
 | `scripts/test_live_odoo.py` | Live Odoo smoke (lead + chatter) |
 | `scripts/inspect_odoo_inventory.py` | Audit Odoo vehicle products |
@@ -87,9 +89,10 @@ The FB planner only manages listings in **`sync.db`**. It does not scan Facebook
 | Script | Purpose |
 |--------|---------|
 | `run_sync.py` | Full sync (scrape + diff + FB; `sync.active_accounts`) |
-| `scripts/run_renew.py` | **Renovar** (same URL) — weekly default |
+| `scripts/run_renew.py` | **Renovar** (same URL) |
 | `scripts/run_repost.py` | Full repost (sold → create → new URL) |
-| `scripts/fb_repost_hold.py` | Skip renew during FB ads |
+| `scripts/run_weekly_bump.py` | Alternating Sunday job (even=renew, odd=repost) |
+| `scripts/fb_repost_hold.py` | Skip renew/repost during FB ads |
 | `scripts/fb_login.py` | Headed login per account |
 | `scripts/fb_test_session.py` | Verify session |
 | `scripts/fb_post_test.py` | Post one vehicle (`--autosell-id obj969`) |

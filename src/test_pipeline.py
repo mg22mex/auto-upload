@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.odoo_sync.client import QuoteLeadResult
 from src.pipeline import AutosellPipeline
 from src.quote_engine.calculator import QuoteResult
 from src.quote_engine.engine import CalibratedQuoteEngine
@@ -62,7 +63,9 @@ class TestAutosellPipeline(unittest.TestCase):
 
         odoo = MagicMock()
         odoo.authenticate.return_value = 1
-        odoo.create_or_update_lead.return_value = 501
+        odoo.create_or_update_lead.return_value = QuoteLeadResult(
+            lead_id=501, activity_id=777, tag_ids=(9,)
+        )
         odoo.round_robin_assign_advisor.return_value = 42
         odoo.assign_lead_advisor.return_value = True
         odoo.post_quote_to_chatter.return_value = 9001
@@ -79,6 +82,7 @@ class TestAutosellPipeline(unittest.TestCase):
             quote_engine=quote_engine,
             odoo=odoo,
             whatsapp=wa,
+            attach_pdf=False,
         )
 
         lead = {
@@ -122,12 +126,110 @@ class TestAutosellPipeline(unittest.TestCase):
         kwargs = quote_engine.calculate.call_args.kwargs
         self.assertEqual(kwargs["net_trade_in_equity"], Decimal("50000.00"))
         odoo.authenticate.assert_called_once()
-        odoo.create_or_update_lead.assert_called_once_with(
-            "Ana Pérez", "6141234567", "Mazda CX-5 2020", 3
+        odoo.create_or_update_lead.assert_called_once()
+        lead_call = odoo.create_or_update_lead.call_args
+        self.assertEqual(
+            lead_call.args[:4],
+            ("Ana Pérez", "6141234567", "Mazda CX-5 2020", 3),
         )
+        self.assertEqual(lead_call.kwargs.get("channel"), "Voice / Phone")
+        self.assertEqual(lead_call.kwargs.get("stage_name"), "Quote Generated")
+        self.assertEqual(lead_call.kwargs.get("term_months"), 36)
         odoo.post_quote_to_chatter.assert_called_once()
         wa.send_text_message.assert_called_once()
         self.assertEqual(wa.send_text_message.call_args.args[0], "6141234567")
+
+    def test_pdf_attached_to_lead(self):
+        quote_engine = MagicMock(spec=CalibratedQuoteEngine)
+        quote_engine.calculate.return_value = _sample_quote(
+            net_trade_in_equity=Decimal("0.00"),
+            cash_down_payment=Decimal("30000.00"),
+            down_payment=Decimal("30000.00"),
+        )
+        odoo = MagicMock()
+        odoo.authenticate.return_value = 1
+        odoo.create_or_update_lead.return_value = QuoteLeadResult(
+            lead_id=501, activity_id=777, tag_ids=(9,)
+        )
+        odoo.round_robin_assign_advisor.return_value = 42
+        odoo.post_quote_to_chatter.return_value = 1
+        odoo.attach_file.return_value = 9001
+        wa = MagicMock()
+        wa.format_quote_message.return_value = "msg"
+        wa.send_text_message.return_value = {"ok": True}
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pipeline = AutosellPipeline(
+                quote_engine=quote_engine,
+                odoo=odoo,
+                whatsapp=wa,
+                assign_advisor=False,
+                dispatch_whatsapp=False,
+                attach_pdf=True,
+                pdf_output_dir=tmp,
+            )
+            result = pipeline.process_lead(
+                {
+                    "name": "Ana",
+                    "phone": "6141234567",
+                    "vehicle_name": "Mazda CX-5 2020",
+                    "vehicle_price": 300000,
+                    "term_months": 36,
+                    "branch_id": 1,
+                    "sku": "obj969",
+                    "channel": "Voice / Phone",
+                }
+            )
+
+            self.assertTrue(result.ok, result.error)
+            self.assertEqual(result.pdf_attachment_id, 9001)
+            self.assertIsNotNone(result.pdf_path)
+            self.assertTrue(Path(result.pdf_path).exists())
+
+        odoo.attach_file.assert_called_once()
+        att_kwargs = odoo.attach_file.call_args.kwargs
+        self.assertEqual(att_kwargs["model"], "crm.lead")
+        self.assertEqual(att_kwargs["res_id"], 501)
+        self.assertEqual(att_kwargs["mimetype"], "application/pdf")
+        steps = {s["step"]: s for s in result.steps}
+        self.assertEqual(steps["pdf_spec_sheet"]["status"], "ok")
+        self.assertEqual(steps["odoo_follow_up"]["activity_id"], 777)
+
+    def test_soft_capture_skips_quote_pdf(self):
+        odoo = MagicMock()
+        odoo.authenticate.return_value = 1
+        odoo.create_or_update_lead.return_value = QuoteLeadResult(
+            lead_id=88, activity_id=9, tag_ids=()
+        )
+        quote_engine = MagicMock(spec=CalibratedQuoteEngine)
+        pipeline = AutosellPipeline(
+            quote_engine=quote_engine,
+            odoo=odoo,
+            whatsapp=MagicMock(),
+            attach_pdf=True,
+            dispatch_whatsapp=False,
+            assign_advisor=False,
+        )
+        result = pipeline.process_lead(
+            {
+                "name": "Pedro",
+                "phone": "6145556677",
+                "vehicle_name": "Consulta telefónica",
+                "branch_id": 1,
+                "channel": "Voice / Phone",
+                "soft_capture": True,
+            }
+        )
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(result.lead_id, 88)
+        quote_engine.calculate.assert_not_called()
+        odoo.attach_file.assert_not_called()
+        steps = {s["step"]: s for s in result.steps}
+        self.assertTrue(steps["odoo_lead"].get("soft_capture"))
+        self.assertEqual(steps["quote"]["status"], "skipped")
+        self.assertEqual(steps["pdf_spec_sheet"]["status"], "skipped")
 
     def test_no_trade_in_skips_valuation(self):
         trade = MagicMock(spec=TradeInEngine)
@@ -139,7 +241,7 @@ class TestAutosellPipeline(unittest.TestCase):
         )
         odoo = MagicMock()
         odoo.authenticate.return_value = 1
-        odoo.create_or_update_lead.return_value = 7
+        odoo.create_or_update_lead.return_value = QuoteLeadResult(lead_id=7)
         odoo.round_robin_assign_advisor.return_value = 1
         odoo.post_quote_to_chatter.return_value = 1
         wa = MagicMock()
@@ -151,6 +253,7 @@ class TestAutosellPipeline(unittest.TestCase):
             quote_engine=quote_engine,
             odoo=odoo,
             whatsapp=wa,
+            attach_pdf=False,
         )
         result = pipeline.process_lead(
             {
@@ -187,7 +290,7 @@ class TestAutosellPipeline(unittest.TestCase):
                 "category_name": "vehiculos",
             }
         ]
-        odoo.create_or_update_lead.return_value = 1851
+        odoo.create_or_update_lead.return_value = QuoteLeadResult(lead_id=1851)
         odoo.post_quote_to_chatter.return_value = 13540
         wa = MagicMock()
         wa.format_quote_message.return_value = "Scotiabank quote"
@@ -198,6 +301,7 @@ class TestAutosellPipeline(unittest.TestCase):
             whatsapp=wa,
             assign_advisor=False,
             dispatch_whatsapp=False,
+            attach_pdf=False,
         )
         result = pipeline.process_lead(
             {

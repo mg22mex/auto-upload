@@ -263,19 +263,29 @@ class MetaWebhookGateway:
             _context_value(context, "customer_name", "lead_name")
             or f"Prospecto Messenger {event.sender_id}"
         ).strip()
-        lead_id = self.odoo.create_or_update_lead(
+        reply = format_messenger_quote(lead_name, vehicle_name, quote)
+        lead_result = self.odoo.create_or_update_lead(
             lead_name,
             f"messenger:{event.sender_id}",
             vehicle_name,
             self.branch_id,
+            down_payment=quote.down_payment,
+            term_months=quote.term_months,
+            quote_summary=reply,
+            stage_name="Quote Generated",
+            channel="facebook_messenger",
+            estimated_monthly_payment=quote.estimated_monthly_payment,
+            vehicle_price=quote.vehicle_price,
         )
-        reply = format_messenger_quote(lead_name, vehicle_name, quote)
+        lead_id = lead_result.lead_id
         chatter_id = self.odoo.post_quote_to_chatter(lead_id, reply)
         graph_response = self.messenger.send_text_message(event.sender_id, reply)
         return {
             "status": "quoted",
             "sender_id": event.sender_id,
             "lead_id": lead_id,
+            "activity_id": lead_result.activity_id,
+            "tag_ids": list(lead_result.tag_ids),
             "chatter_id": chatter_id,
             "estimated_monthly_payment": str(quote.estimated_monthly_payment),
             "graph_response": graph_response,

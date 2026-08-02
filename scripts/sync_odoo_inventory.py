@@ -98,6 +98,11 @@ def main() -> int:
         help="Parse/match only; no Odoo writes",
     )
     parser.add_argument(
+        "--no-archive",
+        action="store_true",
+        help="Skip soft-delete of Odoo vehicles missing from catalog",
+    )
+    parser.add_argument(
         "--config",
         default="config.yaml",
         help="Path to config.yaml",
@@ -137,9 +142,12 @@ def main() -> int:
     updated: list[dict] = []
     skipped: list[str] = []
     errors: list[str] = []
+    archived: list[dict] = []
+    catalog_codes: set[str] = set()
 
     for index, vehicle in enumerate(vehicles, start=1):
         label = f"{vehicle.autosell_id} {product_name(vehicle)}"
+        catalog_codes.add(vehicle.autosell_id)
         try:
             price = parse_price(vehicle)
         except ValueError as exc:
@@ -175,22 +183,77 @@ def main() -> int:
             f"list_price={result['list_price']}"
         )
 
+    # Soft-delete orphans only on full-catalog runs (never with --limit).
+    do_archive = not args.no_archive and not (args.limit and args.limit > 0)
+    if do_archive:
+        try:
+            if args.dry_run:
+                active = client.list_active_vehicle_products(categ_id=categ_id)
+                would = [p for p in active if p["default_code"] not in catalog_codes]
+                archived = would
+                print(
+                    f"\nDRY archive orphans: {len(would)} "
+                    f"(catalog keep={len(catalog_codes)})"
+                )
+                for product in would[:20]:
+                    print(
+                        f"  would_archive SKU {product['default_code']} as SOLD "
+                        f"id={product['id']} {product['name']!r}"
+                    )
+                if len(would) > 20:
+                    print(f"  … +{len(would) - 20} more")
+            else:
+                archived = client.archive_orphan_vehicles(
+                    catalog_codes, categ_id=categ_id
+                )
+                print(
+                    f"\nArchived orphans as SOLD (active=False): {len(archived)} "
+                    f"(catalog keep={len(catalog_codes)})"
+                )
+                for product in archived:
+                    print(
+                        f"  Archived orphan SKU {product['default_code']} as SOLD "
+                        f"id={product['id']} {product['name']!r}"
+                        + (
+                            f" field={product.get('state_field')}="
+                            f"{product.get('state_value')}"
+                            if product.get("state_field")
+                            else ""
+                        )
+                    )
+        except Exception as exc:
+            msg = f"orphan archive failed: {fault_message(exc)}"
+            errors.append(msg)
+            print(f"ERR {msg}")
+    elif args.limit and args.limit > 0:
+        print("\nSkip orphan archive (--limit set; partial catalog unsafe)")
+    else:
+        print("\nSkip orphan archive (--no-archive)")
+
     print("\n=== SUMMARY ===")
     print(f"catalog:  {len(vehicles)}")
     print(f"created:  {len(created)}")
     print(f"updated:  {len(updated)}")
+    print(f"archived: {len(archived)}")
     print(f"skipped:  {len(skipped)}")
     print(f"errors:   {len(errors)}")
     if created[:5]:
         print("sample created:", ", ".join(str(r["id"]) for r in created[:5]))
     if updated[:5]:
         print("sample updated:", ", ".join(str(r["id"]) for r in updated[:5]))
+    if archived[:5]:
+        print(
+            "sample archived:",
+            ", ".join(
+                f"{r['default_code']}(id={r['id']})" for r in archived[:5]
+            ),
+        )
     if errors[:5]:
         print("sample errors:")
         for err in errors[:5]:
             print(f"  - {err}")
 
-    return 1 if errors and not (created or updated) else 0
+    return 1 if errors and not (created or updated or archived) else 0
 
 
 if __name__ == "__main__":

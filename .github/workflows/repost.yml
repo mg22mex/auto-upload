@@ -1,4 +1,4 @@
-name: Weekly Facebook renew
+name: Weekly Facebook renew / repost
 
 on:
   schedule:
@@ -6,22 +6,31 @@ on:
     - cron: "0 15 * * 0"
   workflow_dispatch:
     inputs:
+      mode:
+        description: "auto = alternate weeks (even=renew, odd=repost); or force"
+        required: false
+        default: auto
+        type: choice
+        options:
+          - auto
+          - renew
+          - repost
       dry_run:
         description: Plan only (no Facebook actions)
         required: false
         default: false
         type: boolean
       max_per_account:
-        description: Max renews per account (empty = config default)
+        description: Max renews/reposts per account (empty = config default)
         required: false
         type: string
 
 jobs:
-  renew:
-    name: Renew eligible listings (account_1 + account_2)
+  weekly-bump:
+    name: Alternating renew / full repost (account_1 + account_2)
     runs-on: [self-hosted, fb-worker]
-    # Renew is fast (~seconds each); 90 min is plenty for 25×2
-    timeout-minutes: 90
+    # Repost weeks are slow (full create); renew weeks finish much faster
+    timeout-minutes: 180
 
     steps:
       - name: Checkout
@@ -60,20 +69,48 @@ jobs:
           ln -s ~/auto-upload-data/data data
           ln -s ~/auto-upload-data/sessions sessions
 
-      - name: Scrape autosell.mx (fresh catalog for renew eligibility)
+      - name: Scrape autosell.mx (fresh catalog for eligibility)
         env:
           AUTOSELL_BASE_URL: ${{ secrets.AUTOSELL_BASE_URL }}
         run: python run_sync.py --scrape-only --output data/catalog_latest.json
 
-      - name: Weekly renew / Renovar (same URL; respects holds)
+      - name: Resolve bump mode (even ISO week=renew, odd=repost)
+        id: mode
+        run: |
+          set -eux
+          MODE_INPUT="${{ inputs.mode || 'auto' }}"
+          if [ -n "${{ secrets.WEEKLY_BUMP_MODE }}" ]; then
+            MODE_INPUT="${{ secrets.WEEKLY_BUMP_MODE }}"
+          fi
+          RESOLVED=$(python - <<PY
+          from src.sync.weekly_bump import resolve_weekly_bump_mode, weekly_bump_config
+          import yaml
+          from pathlib import Path
+          cfg = yaml.safe_load(Path("config.yaml").read_text(encoding="utf-8")) or {}
+          bump = weekly_bump_config(cfg)
+          print(resolve_weekly_bump_mode(
+              timezone=bump["timezone"],
+              even_week=bump["even_week"],
+              odd_week=bump["odd_week"],
+              force_mode="${MODE_INPUT}" or None,
+          ))
+          PY
+          )
+          echo "resolved=${RESOLVED}" >> "$GITHUB_OUTPUT"
+          echo "Weekly bump mode: ${RESOLVED} (input=${MODE_INPUT})"
+
+      - name: Weekly renew or full repost
         env:
           AUTOSELL_BASE_URL: ${{ secrets.AUTOSELL_BASE_URL }}
           RENEW_MIN_AGE_DAYS: ${{ secrets.RENEW_MIN_AGE_DAYS || secrets.REPOST_MIN_AGE_DAYS || '7' }}
+          REPOST_MIN_AGE_DAYS: ${{ secrets.REPOST_MIN_AGE_DAYS || secrets.RENEW_MIN_AGE_DAYS || '7' }}
           RENEW_MAX_PER_ACCOUNT_PER_RUN: ${{ inputs.max_per_account || secrets.RENEW_MAX_PER_ACCOUNT_PER_RUN || '25' }}
+          REPOST_MAX_PER_ACCOUNT_PER_RUN: ${{ inputs.max_per_account || secrets.REPOST_MAX_PER_ACCOUNT_PER_RUN || '10' }}
           FB_RENEW_DELAY_MIN_SEC: ${{ secrets.FB_RENEW_DELAY_MIN_SEC || '20' }}
           FB_RENEW_DELAY_MAX_SEC: ${{ secrets.FB_RENEW_DELAY_MAX_SEC || '40' }}
           FB_HEADLESS: ${{ secrets.FB_HEADLESS || 'true' }}
           DB_PATH: data/sync.db
+          WEEKLY_BUMP_MODE: ${{ inputs.mode || secrets.WEEKLY_BUMP_MODE || 'auto' }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
@@ -85,4 +122,8 @@ jobs:
           if [ -n "${{ secrets.RENEW_DRY_RUN }}" ] && [ "${{ secrets.RENEW_DRY_RUN }}" = "true" ]; then
             EXTRA="--dry-run"
           fi
-          python scripts/run_renew.py --all-eligible $EXTRA
+          if [ -n "${{ secrets.REPOST_DRY_RUN }}" ] && [ "${{ secrets.REPOST_DRY_RUN }}" = "true" ]; then
+            EXTRA="--dry-run"
+          fi
+          MODE="${{ inputs.mode || 'auto' }}"
+          python scripts/run_weekly_bump.py --mode "$MODE" --all-eligible $EXTRA

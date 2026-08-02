@@ -22,7 +22,10 @@
 | `src/whatsapp_worker/` | Phase 2 — open-wa / Evolution API wrapper |
 | `src/voice_gateway/` | Phase 2 — FastAPI voice + Meta webhook entry |
 | `src/meta_gateway/` | Phase 2 — Facebook Page Messenger Graph API |
-| `src/pipeline.py` | Phase 2 — lead orchestration (quote → Odoo → WA) |
+| `src/pdf_engine/` | Phase 2 — ReportLab quote / vehicle spec PDF |
+| `src/pipeline.py` | Phase 2 — lead orchestration (quote → Odoo → PDF → WA) |
+| `src/sync/weekly_bump.py` | Alternate Sunday renew vs full repost |
+| `scripts/run_weekly_bump.py` | CLI / CI entry for weekly bump |
 | `scripts/` | Manual FB probes, login, debug |
 | `sessions/` | Playwright browser profiles (per account) |
 | `data/` | DB, snapshots, debug PNGs |

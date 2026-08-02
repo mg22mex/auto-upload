@@ -1,14 +1,19 @@
-"""Phase 2 master pipeline — trade-in → quote → Odoo → WhatsApp."""
+"""Phase 2 master pipeline — trade-in → quote → Odoo → PDF → WhatsApp."""
 from __future__ import annotations
 
+import os
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 from src.odoo_sync.client import OdooCRMClient
+from src.pdf_engine.generator import generate_vehicle_quote_pdf
 from src.quote_engine.engine import CalibratedQuoteEngine
 from src.quote_engine.trade_in import TradeInEngine, TradeInVehicle
 from src.whatsapp_worker.client import WhatsAppWorkerClient
+
+DEFAULT_CHANNEL = "Voice / Phone"
 
 
 @dataclass
@@ -19,6 +24,10 @@ class PipelineResult:
     net_trade_in_equity: Decimal = Decimal("0.00")
     estimated_monthly_payment: Decimal | None = None
     whatsapp_message: str = ""
+    channel: str = DEFAULT_CHANNEL
+    pdf_path: str | None = None
+    pdf_attachment_id: int | None = None
+    vehicle_sku: str | None = None
     steps: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
 
@@ -31,7 +40,7 @@ class PipelineResult:
 
 
 class AutosellPipeline:
-    """Lead → trade-in → Scotiabank quote → Odoo chatter → WhatsApp dispatch."""
+    """Lead → trade-in → Scotiabank quote → Odoo → PDF → WhatsApp."""
 
     def __init__(
         self,
@@ -42,6 +51,8 @@ class AutosellPipeline:
         whatsapp: WhatsAppWorkerClient | None = None,
         assign_advisor: bool = True,
         dispatch_whatsapp: bool = True,
+        attach_pdf: bool = True,
+        pdf_output_dir: str | Path | None = None,
     ) -> None:
         self.trade_in = trade_in or TradeInEngine()
         self.quote_engine = quote_engine or CalibratedQuoteEngine()
@@ -49,6 +60,12 @@ class AutosellPipeline:
         self.whatsapp = whatsapp or WhatsAppWorkerClient()
         self.assign_advisor = assign_advisor
         self.dispatch_whatsapp = dispatch_whatsapp
+        self.attach_pdf = attach_pdf
+        self.pdf_output_dir = (
+            Path(pdf_output_dir)
+            if pdf_output_dir is not None
+            else Path(os.getenv("PDF_OUTPUT_DIR") or "data/quotes")
+        )
 
     def process_lead(self, lead_data: dict[str, Any]) -> PipelineResult:
         """Run full Phase 2 flow; return structured execution log."""
@@ -61,10 +78,65 @@ class AutosellPipeline:
             vehicle_name = str(
                 lead_data.get("vehicle_name") or lead_data.get("vehicle") or ""
             ).strip()
-            branch_id = int(lead_data["branch_id"])
+            branch_id = int(lead_data.get("branch_id") or os.getenv("VOICE_DEFAULT_BRANCH_ID") or 1)
             term_months = int(lead_data.get("term_months") or 36)
+            channel = str(lead_data.get("channel") or DEFAULT_CHANNEL).strip() or DEFAULT_CHANNEL
+            result.channel = channel
+            sku = str(
+                lead_data.get("sku")
+                or lead_data.get("autosell_id")
+                or vehicle_name
+                or "vehicle"
+            ).strip()
+            result.vehicle_sku = sku
+
             if not name or not phone or not vehicle_name:
                 raise ValueError("lead_data requires name, phone, vehicle_name")
+
+            # Soft CRM capture (degraded STT) — no quote/PDF math.
+            if bool(lead_data.get("soft_capture")):
+                self.odoo.authenticate()
+                note = str(
+                    lead_data.get("notes")
+                    or "Voice capture with degraded audio / failed STT. "
+                    "Advisor follow-up required."
+                )
+                lead_result = self.odoo.create_or_update_lead(
+                    name,
+                    phone,
+                    vehicle_name,
+                    branch_id,
+                    quote_summary=note,
+                    stage_name=str(lead_data.get("stage_name") or "New"),
+                    channel=channel,
+                )
+                result.lead_id = lead_result.lead_id
+                log.append(
+                    {
+                        "step": "odoo_lead",
+                        "status": "ok",
+                        "lead_id": lead_result.lead_id,
+                        "tag_ids": list(lead_result.tag_ids),
+                        "channel": channel,
+                        "soft_capture": True,
+                    }
+                )
+                if lead_result.activity_id is not None:
+                    log.append(
+                        {
+                            "step": "odoo_follow_up",
+                            "status": "ok",
+                            "activity_id": lead_result.activity_id,
+                            "lead_id": lead_result.lead_id,
+                        }
+                    )
+                else:
+                    log.append({"step": "odoo_follow_up", "status": "skipped"})
+                log.append({"step": "quote", "status": "skipped"})
+                log.append({"step": "pdf_spec_sheet", "status": "skipped"})
+                log.append({"step": "whatsapp", "status": "skipped"})
+                result.ok = True
+                return result
 
             # Resolve missing/zero price from live Odoo inventory.
             odoo_authenticated = False
@@ -85,6 +157,9 @@ class AutosellPipeline:
                     )
                 selected = priced[0]
                 vehicle_price = Decimal(str(selected["list_price"]))
+                if not lead_data.get("sku") and selected.get("default_code"):
+                    sku = str(selected["default_code"])
+                    result.vehicle_sku = sku
                 log.append(
                     {
                         "step": "inventory_lookup",
@@ -172,16 +247,44 @@ class AutosellPipeline:
             )
             result.whatsapp_message = quote_summary
 
-            # 3) Odoo CRM + chatter
+            # 3) Odoo CRM + chatter + 24h follow-up activity
             if not odoo_authenticated:
                 self.odoo.authenticate()
-            lead_id = self.odoo.create_or_update_lead(
-                name, phone, vehicle_name, branch_id
+            lead_result = self.odoo.create_or_update_lead(
+                name,
+                phone,
+                vehicle_name,
+                branch_id,
+                down_payment=quote.down_payment,
+                term_months=quote.term_months,
+                quote_summary=quote_summary,
+                stage_name="Quote Generated",
+                channel=channel,
+                estimated_monthly_payment=quote.estimated_monthly_payment,
+                vehicle_price=quote.vehicle_price,
             )
+            lead_id = lead_result.lead_id
             result.lead_id = lead_id
             log.append(
-                {"step": "odoo_lead", "status": "ok", "lead_id": lead_id}
+                {
+                    "step": "odoo_lead",
+                    "status": "ok",
+                    "lead_id": lead_id,
+                    "tag_ids": list(lead_result.tag_ids),
+                    "channel": channel,
+                }
             )
+            if lead_result.activity_id is not None:
+                log.append(
+                    {
+                        "step": "odoo_follow_up",
+                        "status": "ok",
+                        "activity_id": lead_result.activity_id,
+                        "lead_id": lead_id,
+                    }
+                )
+            else:
+                log.append({"step": "odoo_follow_up", "status": "skipped"})
 
             advisor_id: int | None = None
             if self.assign_advisor:
@@ -207,8 +310,68 @@ class AutosellPipeline:
                 }
             )
 
-            # 4) WhatsApp dispatch
-            if self.dispatch_whatsapp:
+            # 4) PDF spec sheet → disk + ir.attachment on crm.lead
+            want_pdf = self.attach_pdf and bool(lead_data.get("generate_pdf", True))
+            if want_pdf:
+                quote_data = {
+                    "vehicle_price": quote.vehicle_price,
+                    "down_payment": quote.down_payment,
+                    "cash_down_payment": quote.cash_down_payment,
+                    "net_trade_in_equity": quote.net_trade_in_equity,
+                    "financed_principal": quote.financed_principal,
+                    "origination_fee": quote.origination_fee,
+                    "term_months": quote.term_months,
+                    "estimated_monthly_payment": quote.estimated_monthly_payment,
+                    "monthly_admin_fee": quote.monthly_admin_fee,
+                }
+                vehicle_data = {
+                    "name": vehicle_name,
+                    "sku": sku,
+                    "autosell_id": sku,
+                    "year": lead_data.get("year"),
+                    "make": lead_data.get("make"),
+                    "model": lead_data.get("model"),
+                    "vin": lead_data.get("vin"),
+                    "mileage_km": lead_data.get("mileage_km"),
+                    "transmission": lead_data.get("transmission"),
+                    "features": lead_data.get("features") or [],
+                }
+                pdf_meta: dict[str, Any] = {}
+                pdf_result = generate_vehicle_quote_pdf(
+                    quote_data,
+                    vehicle_data,
+                    output_dir=self.pdf_output_dir,
+                    lead_id=lead_id,
+                    attach_to_odoo=True,
+                    odoo_client=self.odoo,
+                    odoo_model="crm.lead",
+                    odoo_res_id=lead_id,
+                    result_meta=pdf_meta,
+                )
+                if isinstance(pdf_result, Path):
+                    result.pdf_path = str(pdf_result)
+                elif pdf_meta.get("path"):
+                    result.pdf_path = str(pdf_meta["path"])
+                att = pdf_meta.get("attachment_id")
+                result.pdf_attachment_id = int(att) if att is not None else None
+                log.append(
+                    {
+                        "step": "pdf_spec_sheet",
+                        "status": "ok",
+                        "path": result.pdf_path,
+                        "attachment_id": result.pdf_attachment_id,
+                        "lead_id": lead_id,
+                        "sku": sku,
+                    }
+                )
+            else:
+                log.append({"step": "pdf_spec_sheet", "status": "skipped"})
+
+            # 5) WhatsApp dispatch
+            do_wa = self.dispatch_whatsapp and bool(
+                lead_data.get("dispatch_whatsapp", True)
+            )
+            if do_wa:
                 wa_resp = self.whatsapp.send_text_message(phone, quote_summary)
                 log.append(
                     {

@@ -255,7 +255,7 @@ flowchart TD
 |------|----------|-------|
 | Enable **account_3** in scheduled sync | High | After operator clears old FB listings; add to `active_accounts` |
 | **Repost with holds** | Done | `run_repost.py`, `fb_repost_hold.py`, `repost_holds` table |
-| Scheduled weekly repost job | Done | `.github/workflows/repost.yml` — Sun 09:00 Chihuahua |
+| Scheduled weekly renew/repost | Done | `.github/workflows/repost.yml` — Sun 09:00 Chihuahua; even ISO week=renew, odd=repost |
 | Richer **update** (photos, title, mileage) | Medium | Today: price + description only |
 | Inventory FB dashboard (discover untracked listings) | Low | Avoids manual wipe; complex / fragile |
 | One-off `fb_clear_listings.py` (mark sold) | Low | Only if inventory is huge; prefer manual |
@@ -471,11 +471,13 @@ Scaffolded modules under `src/` for lead-to-quote-to-message automation. They do
 | Module | Path | Responsibility |
 |--------|------|----------------|
 | **quote_engine** | `src/quote_engine/` | Local French Amortization calculator. Pure Python, no network I/O. All payment schedules and quote figures are computed in-process (milliseconds) **before** any CRM or messaging payload is built. |
-| **odoo_sync** | `src/odoo_sync/` | Odoo CRM XML-RPC client. Creates/updates leads and opportunities; inventory upsert (`product.template`); chatter quotes. Credentials from `.env` only. |
+| **odoo_sync** | `src/odoo_sync/` | Odoo CRM XML-RPC: leads with quote fields + tags + ~24h follow-up activity; inventory upsert; orphans → sold + archive; `ir.attachment` PDF attach. Credentials from `.env` only. |
 | **whatsapp_worker** | `src/whatsapp_worker/` | Thin API wrapper for open-wa / Evolution API. Outbound dispatch of approved quotes and follow-ups. Separate config and process boundary from Playwright. |
-| **voice_gateway** | `src/voice_gateway/` | FastAPI app entry: `POST /webhook/voice-lead` and Meta routes (`/webhook/facebook`). Invokes `AutosellPipeline` / `MetaWebhookGateway`. |
-| **meta_gateway** | `src/meta_gateway/` | Official Facebook Page Messenger webhook: verify token, parse events, quote via `quote_engine`, upsert Odoo lead + chatter, reply via Graph API `/me/messages`. |
-| **pipeline** | `src/pipeline.py` | Orchestrates trade-in → Scotiabank quote → Odoo → WhatsApp for Voice / Web leads. |
+| **voice_gateway** | `src/voice_gateway/` | FastAPI: `POST /webhook/voice-lead`, `/voice/webhook`, `/voice/stream` → intent/STT parse → `AutosellPipeline` (quote → Odoo lead + 24h activity → PDF `ir.attachment`) with TTS text; Meta routes on same app. |
+| **pdf_engine** | `src/pdf_engine/` | ReportLab vehicle quote / spec PDF. Optional save under `PDF_OUTPUT_DIR` and attach to `crm.lead` via `ir.attachment`. |
+| **meta_gateway** | `src/meta_gateway/` | Official Facebook Page Messenger webhook: verify token, parse events, quote via `quote_engine`, upsert Odoo lead + chatter, reply via Graph API `/me/messages`. **Status:** `[WIP - Paused awaiting Fanpage Administrator permissions]` — implementation complete; Meta Page subscription pending admin rights. |
+| **pipeline** | `src/pipeline.py` | Orchestrates trade-in → Scotiabank quote → Odoo (`channel` e.g. Voice / Phone) → PDF attach → WhatsApp. Soft-capture path for degraded STT. |
+| **weekly_bump** | `src/sync/weekly_bump.py` + `scripts/run_weekly_bump.py` | Sunday cron alternate: even ISO week = Renovar; odd = full Marketplace repost. |
 
 ### Incoming lead flow (Web / Voice AI / Messenger → Odoo → channel)
 
@@ -501,12 +503,13 @@ flowchart LR
     MG --> GRAPH
 ```
 
-1. **Capture** — Voice AI hits `POST /webhook/voice-lead`; Messenger hits `POST /webhook/facebook` (after `GET` verify with `FB_VERIFY_TOKEN`).
+1. **Capture** — Voice AI hits `POST /webhook/voice-lead` (aliases `/voice/webhook`, `/voice/stream`); Messenger hits `POST /webhook/facebook` (after `GET` verify with `FB_VERIFY_TOKEN`).
 2. **Quote** — `quote_engine` runs French Amortization locally (Scotiabank profile when configured). No external calc service.
-3. **Persist** — `odoo_sync` upserts `crm.lead` and posts quote text to chatter.
-4. **Dispatch** — Voice/Web path may use `whatsapp_worker`; Messenger path replies via Graph API (`FB_PAGE_ACCESS_TOKEN`).
+3. **Persist** — `odoo_sync` upserts `crm.lead` (`channel="Voice / Phone"` for voice), tags, schedules ~24h follow-up activity, posts quote to chatter.
+4. **PDF** — `pdf_engine` builds a spec/quote sheet and attaches it to the lead (`ir.attachment`).
+5. **Dispatch** — Voice/Web path may use `whatsapp_worker`; Messenger path replies via Graph API (`FB_PAGE_ACCESS_TOKEN`). Degraded STT falls back to soft CRM capture + transfer TTS.
 
-Facebook Marketplace sync remains independent: catalog scrape → Odoo inventory sync → `sync.db` diff → Playwright on `sessions/account_*`.
+Facebook Marketplace sync remains independent: catalog scrape → Odoo inventory sync → `sync.db` diff → Playwright on `sessions/account_*`. Weekly bump: even ISO week Renovar / odd week full repost via `run_weekly_bump.py`.
 
 ### Isolation rules (scraping vs messaging)
 
