@@ -283,6 +283,34 @@ def parse_voice_intent(payload: dict[str, Any]) -> VoiceIntent:
         except (KeyError, TypeError, ValueError):
             trade_in = None
 
+    test_drive_raw = (
+        payload.get("test_drive")
+        or payload.get("test_drive_info")
+        or payload.get("appointment")
+    )
+    test_drive: dict[str, Any] | None = None
+    if isinstance(test_drive_raw, dict) and (
+        test_drive_raw.get("start")
+        or test_drive_raw.get("start_datetime")
+        or test_drive_raw.get("datetime")
+    ):
+        start = (
+            test_drive_raw.get("start")
+            or test_drive_raw.get("start_datetime")
+            or test_drive_raw.get("datetime")
+        )
+        test_drive = {
+            "start": start,
+            "stop": test_drive_raw.get("stop") or test_drive_raw.get("end"),
+            "vehicle_model": str(
+                test_drive_raw.get("vehicle_model")
+                or test_drive_raw.get("vehicle")
+                or vehicle_name
+                or ""
+            ).strip(),
+            "duration_hours": test_drive_raw.get("duration_hours") or 1.0,
+        }
+
     conf_raw = payload.get("stt_confidence")
     try:
         stt_confidence = float(conf_raw) if conf_raw is not None else None
@@ -305,6 +333,8 @@ def parse_voice_intent(payload: dict[str, Any]) -> VoiceIntent:
     ):
         if key in payload and payload[key] is not None:
             extras[key] = payload[key]
+    if test_drive is not None:
+        extras["test_drive"] = test_drive
     if isinstance(interest, dict):
         for key in (
             "year",

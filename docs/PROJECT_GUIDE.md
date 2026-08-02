@@ -471,45 +471,62 @@ Scaffolded modules under `src/` for lead-to-quote-to-message automation. They do
 | Module | Path | Responsibility |
 |--------|------|----------------|
 | **quote_engine** | `src/quote_engine/` | Local French Amortization calculator. Pure Python, no network I/O. All payment schedules and quote figures are computed in-process (milliseconds) **before** any CRM or messaging payload is built. |
-| **odoo_sync** | `src/odoo_sync/` | Odoo CRM XML-RPC: leads with quote fields + tags + ~24h follow-up activity; inventory upsert; orphans → sold + archive; `ir.attachment` PDF attach. Credentials from `.env` only. |
+| **odoo_sync** | `src/odoo_sync/` | See modular breakdown below. Credentials from `.env` only. |
 | **whatsapp_worker** | `src/whatsapp_worker/` | Thin API wrapper for open-wa / Evolution API. Outbound dispatch of approved quotes and follow-ups. Separate config and process boundary from Playwright. |
-| **voice_gateway** | `src/voice_gateway/` | FastAPI: `POST /webhook/voice-lead`, `/voice/webhook`, `/voice/stream` → intent/STT parse → `AutosellPipeline` (quote → Odoo lead + 24h activity → PDF `ir.attachment`) with TTS text; Meta routes on same app. |
+| **voice_gateway** | `src/voice_gateway/` | FastAPI: `POST /webhook/voice-lead`, `/voice/webhook`, `/voice/stream` → intent/STT parse → `AutosellPipeline` (quote → Odoo lead + 24h activity → optional test-drive calendar → PDF `ir.attachment`) with TTS text; Meta routes on same app. |
 | **pdf_engine** | `src/pdf_engine/` | ReportLab vehicle quote / spec PDF. Optional save under `PDF_OUTPUT_DIR` and attach to `crm.lead` via `ir.attachment`. |
 | **meta_gateway** | `src/meta_gateway/` | Official Facebook Page Messenger webhook: verify token, parse events, quote via `quote_engine`, upsert Odoo lead + chatter, reply via Graph API `/me/messages`. **Status:** `[WIP - Paused awaiting Fanpage Administrator permissions]` — implementation complete; Meta Page subscription pending admin rights. |
-| **pipeline** | `src/pipeline.py` | Orchestrates trade-in → Scotiabank quote → Odoo (`channel` e.g. Voice / Phone) → PDF attach → WhatsApp. Soft-capture path for degraded STT. |
+| **pipeline** | `src/pipeline.py` | Orchestrates trade-in → Scotiabank quote → Odoo (`channel` e.g. Voice / Phone) → test-drive calendar when requested → PDF attach → WhatsApp. Soft-capture path for degraded STT. |
 | **weekly_bump** | `src/sync/weekly_bump.py` + `scripts/run_weekly_bump.py` | Sunday cron alternate: even ISO week = Renovar; odd = full Marketplace repost. |
 
-### Incoming lead flow (Web / Voice AI / Messenger → Odoo → channel)
+### `src/odoo_sync/` modular layout
+
+| File | Role |
+|------|------|
+| `base.py` | Central `OdooClient` — auth, `execute_kw`, `dry_run` / `ODOO_DRY_RUN` |
+| `client.py` | `OdooCRMClient(WhatsAppMixin, FleetMixin, DocumentsMixin, OdooClient)` — leads, inventory, calendar test-drive, activities |
+| `whatsapp.py` | `send_whatsapp_template(lead_id, template_name, variables)` via `whatsapp.template` / `whatsapp.composer`. Standard names: Sale Order, Payment Link, Invoice, Payment Receipt. Soft-fails if module/templates missing |
+| `fleet.py` | `find_fleet_vehicle_by_vin` / plate; `link_fleet_vehicle_to_lead` → `x_vin` or description/chatter |
+| `documents.py` | `attach_document_to_lead` / `attach_file` → `ir.attachment` |
+| `crm.py` | Package marker; CRM methods remain on `OdooCRMClient` for backward compatibility |
+
+### End-to-end flow (FB ➔ Voice ➔ Odoo ➔ WhatsApp ➔ Fleet)
 
 ```mermaid
 flowchart LR
-    WEB[Web AI / Voice AI]
-    MSG[Page Messenger]
+    FB[FB Reposter / weekly bump]
+    CAT[Catalog scrape]
     VG[voice_gateway]
-    MG[meta_gateway]
     QE[quote_engine]
-    ODOO[odoo_sync]
+    OC[OdooCRMClient]
     LEAD[(crm.lead)]
-    WA[whatsapp_worker]
-    GRAPH[Graph API reply]
+    CAL[calendar.event]
+    WA[WhatsApp templates]
+    FLEET[fleet.vehicle VIN]
+    DOC[ir.attachment PDF/docs]
+    MSG[meta_gateway]
 
-    WEB --> VG
+    CAT --> FB
+    CAT --> OC
     VG --> QE
-    MSG --> MG
-    MG --> QE
-    QE --> ODOO
-    ODOO --> LEAD
-    VG --> WA
-    MG --> GRAPH
+    MSG --> QE
+    QE --> OC
+    OC --> LEAD
+    OC --> CAL
+    OC --> WA
+    OC --> FLEET
+    OC --> DOC
 ```
 
-1. **Capture** — Voice AI hits `POST /webhook/voice-lead` (aliases `/voice/webhook`, `/voice/stream`); Messenger hits `POST /webhook/facebook` (after `GET` verify with `FB_VERIFY_TOKEN`).
-2. **Quote** — `quote_engine` runs French Amortization locally (Scotiabank profile when configured). No external calc service.
-3. **Persist** — `odoo_sync` upserts `crm.lead` (`channel="Voice / Phone"` for voice), tags, schedules ~24h follow-up activity, posts quote to chatter.
-4. **PDF** — `pdf_engine` builds a spec/quote sheet and attaches it to the lead (`ir.attachment`).
-5. **Dispatch** — Voice/Web path may use `whatsapp_worker`; Messenger path replies via Graph API (`FB_PAGE_ACCESS_TOKEN`). Degraded STT falls back to soft CRM capture + transfer TTS.
+1. **Marketplace** — Scrape → inventory upsert + Playwright create/update/remove; Sunday renew/repost.
+2. **Capture** — Voice AI (`/webhook/voice-lead`, `/voice/webhook`, `/voice/stream`) or Messenger (`/webhook/facebook` after verify).
+3. **Quote** — Local `quote_engine` (Scotiabank profile; no remote calc).
+4. **CRM** — Upsert lead (`channel="Voice / Phone"` for voice), tags, ~24h `mail.activity`, chatter; optional `calendar.event` test drive + stage `Cita/Prueba de manejo`.
+5. **Spec & pay** — `pdf_engine` → `ir.attachment`; optional native WhatsApp templates (Sale Order / Payment Link / Invoice / Payment Receipt) via `odoo_sync.whatsapp`.
+6. **Fleet** — Map VIN/plate from `fleet.vehicle` onto the lead (`x_vin` or chatter).
+7. **Dispatch** — Voice path may also use `whatsapp_worker` (Evolution/open-wa); Messenger replies via Graph API. Degraded STT → soft CRM capture + transfer TTS.
 
-Facebook Marketplace sync remains independent: catalog scrape → Odoo inventory sync → `sync.db` diff → Playwright on `sessions/account_*`. Weekly bump: even ISO week Renovar / odd week full repost via `run_weekly_bump.py`.
+Facebook Marketplace sync remains independent for browser work: `sync.db` + Playwright on `sessions/account_*`. Weekly bump: even ISO week Renovar / odd week full repost via `run_weekly_bump.py`.
 
 ### Isolation rules (scraping vs messaging)
 

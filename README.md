@@ -4,11 +4,12 @@ Sync [autosell.mx](https://www.autosell.mx) public catalog to **Facebook Marketp
 
 **Status:**
 
-- **AI Voice & lead webhook:** Live. FastAPI `POST /webhook/voice-lead` (also `/voice/webhook`, `/voice/stream`) → intent/STT → quote → Odoo lead + 24h follow-up → PDF attachment → TTS text.
+- **AI Voice & lead webhook:** Live. FastAPI `POST /webhook/voice-lead` (also `/voice/webhook`, `/voice/stream`) → intent/STT → quote → Odoo lead + 24h follow-up → optional test-drive calendar → PDF attachment → TTS text.
 - **Meta Messenger webhook:** `[WIP - Paused awaiting Fanpage Administrator permissions]`. FastAPI `GET`/`POST /webhook/facebook` + quote engine + Odoo lead/chatter + Graph reply are **100% complete in code**; only Meta Developers Page token / webhook subscription remains once Fanpage admin rights are granted.
 - **Scrape, diff & FB posting:** Live (`DRY_RUN=false`) for **account_1** and **account_2**. **account_3** excluded until old listings cleared.
 - **Weekly listing bump:** Alternating Sundays — even ISO week **Renovar**, odd week **full repost** (`scripts/run_weekly_bump.py`).
 - **Odoo inventory sync:** Live. Catalog → upsert `product.template` (`default_code = autosell_id`); website-missing SKUs marked **sold** then soft-archived (`active=False`).
+- **Modular Odoo sync:** CRM + calendar, native WhatsApp templates, Fleet VIN mapping, and document attachments via `src/odoo_sync/`.
 
 📖 **[Full project guide](./docs/PROJECT_GUIDE.md)** · **[Setup](./SETUP.md)**
 
@@ -22,37 +23,48 @@ Sync [autosell.mx](https://www.autosell.mx) public catalog to **Facebook Marketp
 | **Vehicles** | ~130–134 public catalog from `autosell.mx` |
 | **FB accounts** | 3 sessions; **2 live** (`account_1`, `account_2`) |
 | **Target FB listings** | ~268 (134 × 2 active accounts) |
-| **Odoo** | XML-RPC → `crm.lead` + `product.template` (`vehiculos`) |
+| **Odoo** | Modular XML-RPC: CRM, calendar, WhatsApp templates, Fleet VIN, documents, inventory |
 | **Schedule** | 2× daily scrape + Odoo sync + FB sync; Sunday bump alternates renew/repost |
 
 ## System overview
 
 ```mermaid
 flowchart LR
-    CALLER["AI Voice / caller"]
-    WEBHOOK["FastAPI voice webhook"]
-    MSG["Page Messenger"]
-    META["FastAPI Meta webhook"]
-    QUOTE["quote_engine"]
-    LEAD["Odoo crm.lead"]
     SC["Scrape autosell.mx"]
     SNAP["catalog_latest.json"]
-    ERP["Odoo product.template"]
-    FB["Playwright Marketplace"]
+    FB["FB Marketplace<br/>sync / renew / repost"]
     DB["sync.db"]
+    CALLER["AI Voice / caller"]
+    VG["voice_gateway"]
+    QE["quote_engine"]
+    ODOO["odoo_sync<br/>CRM · Calendar · WA · Fleet · Docs"]
+    LEAD["crm.lead"]
+    CAL["calendar.event"]
+    WA["WhatsApp templates<br/>Sale Order / Payment Link"]
+    FLEET["fleet.vehicle VIN"]
+    PDF["PDF / ir.attachment"]
+    MSG["Page Messenger"]
+    META["meta_gateway"]
 
-    CALLER --> WEBHOOK
-    WEBHOOK --> QUOTE
-    MSG --> META
-    META --> QUOTE
-    QUOTE --> LEAD
     SC --> SNAP
-    SNAP --> ERP
     SNAP --> FB
     FB --> DB
+    SNAP --> ODOO
+    CALLER --> VG
+    VG --> QE
+    QE --> ODOO
+    ODOO --> LEAD
+    ODOO --> CAL
+    ODOO --> WA
+    ODOO --> FLEET
+    ODOO --> PDF
+    MSG --> META
+    META --> QE
 ```
 
-Voice / Meta inbound and catalog / FB Marketplace paths are separate. Scrape, Odoo upsert, and FB posting run on **`fb-worker`**. Quote math runs locally before any Odoo / WhatsApp / Messenger payload.
+**Automated path:** FB reposter (catalog sync + weekly bump) ➔ Voice Gateway ➔ quote ➔ Odoo CRM / calendar ➔ WhatsApp templates & payment links ➔ Fleet VIN on lead ➔ PDF/documents on `ir.attachment`.
+
+Voice / Meta inbound and catalog / FB Marketplace paths share Odoo inventory but keep separate browser sessions. Quote math runs locally before any Odoo / WhatsApp / Messenger payload.
 
 The FB planner only manages listings in **`sync.db`**. It does not scan Facebook’s “Your listings”. Clear old inventory before enabling new accounts (see [PROJECT_GUIDE](./docs/PROJECT_GUIDE.md#go-live-checklist)).
 
@@ -60,7 +72,7 @@ The FB planner only manages listings in **`sync.db`**. It does not scan Facebook
 
 | Job | Host | Action |
 |-----|------|--------|
-| **Voice webhook** | API host | Payload → quote → create/update `crm.lead` + chatter |
+| **Voice webhook** | API host | Payload → quote → `crm.lead` + activity + optional test-drive calendar + PDF |
 | **Meta webhook** | API host | Messenger event → quote → Odoo lead/chatter → Graph API reply |
 | **Catalog scrape** | GitHub Actions / `fb-worker` | `autosell.mx` → `catalog_latest.json` |
 | **Odoo inventory** | CI step / `fb-worker` | `sync_odoo_inventory.py` → upsert `product.template` |
@@ -75,14 +87,25 @@ The FB planner only manages listings in **`sync.db`**. It does not scan Facebook
 |------|---------|
 | `src/voice_gateway/webhook.py` | FastAPI app: voice + Meta webhook routes |
 | `src/meta_gateway/` | Messenger parse, quote orchestration, Graph API reply |
-| `src/pipeline.py` | End-to-end lead: trade-in → quote → Odoo → WhatsApp |
+| `src/pipeline.py` | End-to-end lead: trade-in → quote → Odoo → PDF → WhatsApp |
 | `src/quote_engine/` | Local amortization + Scotiabank profile |
-| `src/odoo_sync/client.py` | XML-RPC: auth, leads, chatter, inventory |
+| `src/odoo_sync/` | Modular Odoo XML-RPC (see below) |
 | `src/whatsapp_worker/client.py` | open-wa / Evolution outbound messages |
 | `src/pdf_engine/` | ReportLab quote / vehicle spec PDF (+ optional Odoo `ir.attachment`) |
 | `scripts/sync_odoo_inventory.py` | Upsert catalog into `product.template` |
 | `scripts/test_live_odoo.py` | Live Odoo smoke (lead + chatter) |
 | `scripts/inspect_odoo_inventory.py` | Audit Odoo vehicle products |
+
+### `src/odoo_sync/` modules
+
+| File | Role |
+|------|------|
+| `base.py` | Shared `OdooClient` session (`authenticate`, `execute_kw`, `ODOO_DRY_RUN`) |
+| `client.py` | `OdooCRMClient` — CRM leads, inventory, calendar test-drive, activities (+ all mixins) |
+| `whatsapp.py` | Native Odoo WhatsApp templates: Sale Order, Payment Link, Invoice, Payment Receipt |
+| `fleet.py` | `fleet.vehicle` by VIN/plate → link to `crm.lead` (`x_vin` or chatter) |
+| `documents.py` | `attach_document_to_lead` / `attach_file` via `ir.attachment` |
+| `crm.py` | Package slice marker (CRM APIs live on `OdooCRMClient`) |
 
 ### Facebook Marketplace
 

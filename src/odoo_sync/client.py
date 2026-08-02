@@ -1,15 +1,22 @@
-"""Odoo CRM XML-RPC client — leads, round-robin advisors, chatter."""
+"""Odoo CRM XML-RPC client — leads, round-robin advisors, chatter + extensions."""
 from __future__ import annotations
 
 import os
-import xmlrpc.client
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+from src.odoo_sync.base import OdooClient, OdooCRMError
+from src.odoo_sync.documents import DocumentsMixin
+from src.odoo_sync.fleet import FleetMixin
+from src.odoo_sync.whatsapp import WhatsAppMixin
 
-class OdooCRMError(RuntimeError):
-    """Raised when Odoo auth or RPC calls fail."""
+__all__ = [
+    "OdooCRMClient",
+    "OdooCRMError",
+    "QuoteLeadResult",
+    "TestDriveEventResult",
+]
 
 
 @dataclass(frozen=True)
@@ -19,104 +26,30 @@ class QuoteLeadResult:
     lead_id: int
     activity_id: int | None = None
     tag_ids: tuple[int, ...] = field(default_factory=tuple)
+    calendar_event_id: int | None = None
 
 
-class OdooCRMClient:
-    """Thin xmlrpc.client wrapper. Secrets from env only."""
+@dataclass(frozen=True)
+class TestDriveEventResult:
+    """Result of calendar.event booking for a test drive."""
 
-    ENV_URL = "ODOO_URL"
-    ENV_DB = "ODOO_DB"
-    ENV_USER = "ODOO_USERNAME"
-    ENV_KEY = "ODOO_API_KEY"
-    ENV_DEFAULT_ACTIVITY_USER = "ODOO_ACTIVITY_USER_ID"
+    event_id: int | None
+    lead_id: int
+    stage_updated: bool = False
+    activity_id: int | None = None
+    partner_id: int | None = None
+    dry_run: bool = False
+    error: str | None = None
 
-    def __init__(
-        self,
-        *,
-        url: str | None = None,
-        db: str | None = None,
-        username: str | None = None,
-        api_key: str | None = None,
-        common: Any | None = None,
-        models: Any | None = None,
-    ) -> None:
-        self.url = (os.getenv(self.ENV_URL, "") if url is None else url).rstrip("/")
-        self.db = os.getenv(self.ENV_DB, "") if db is None else db
-        # CI secrets may use ODOO_USER / ODOO_PASSWORD aliases.
-        self.username = (
-            (
-                os.getenv(self.ENV_USER, "")
-                or os.getenv("ODOO_USER", "")
-            )
-            if username is None
-            else username
-        )
-        self.api_key = (
-            (
-                os.getenv(self.ENV_KEY, "")
-                or os.getenv("ODOO_PASSWORD", "")
-            )
-            if api_key is None
-            else api_key
-        )
-        self.uid: int | None = None
-        self._common = common
-        self._models = models
-        # In-process RR cursor fallback when ir.config_parameter unavailable
-        self._rr_cursor: dict[int, int] = {}
 
-    def authenticate(self) -> int:
-        """Authenticate; set uid. Reads URL/DB/username/API key from env if unset."""
-        missing = [
-            name
-            for name, val in (
-                (self.ENV_URL, self.url),
-                (self.ENV_DB, self.db),
-                (self.ENV_USER, self.username),
-                (self.ENV_KEY, self.api_key),
-            )
-            if not val
-        ]
-        if missing:
-            raise OdooCRMError(f"Missing Odoo env: {', '.join(missing)}")
+class OdooCRMClient(WhatsAppMixin, FleetMixin, DocumentsMixin, OdooClient):
+    """CRM + WhatsApp + Fleet + Documents on one shared Odoo XML-RPC session."""
 
-        common = self._common or xmlrpc.client.ServerProxy(
-            f"{self.url}/xmlrpc/2/common", allow_none=True
-        )
-        self._common = common
-        uid = common.authenticate(self.db, self.username, self.api_key, {})
-        if not uid:
-            raise OdooCRMError("Odoo authenticate failed (check DB/user/API key)")
-        self.uid = int(uid)
-        if self._models is None:
-            self._models = xmlrpc.client.ServerProxy(
-                f"{self.url}/xmlrpc/2/object", allow_none=True
-            )
-        return self.uid
+    TEST_DRIVE_STAGE = "Cita/Prueba de manejo"
+    DEFAULT_ACTIVITY_SUMMARY = "Seguimiento post-cotización / Confirmación de Cita"
 
-    def _ensure_auth(self) -> tuple[int, Any]:
-        if self.uid is None or self._models is None:
-            self.authenticate()
-        assert self.uid is not None and self._models is not None
-        return self.uid, self._models
-
-    def execute_kw(
-        self,
-        model: str,
-        method: str,
-        args: list[Any] | None = None,
-        kwargs: dict[str, Any] | None = None,
-    ) -> Any:
-        uid, models = self._ensure_auth()
-        return models.execute_kw(
-            self.db,
-            uid,
-            self.api_key,
-            model,
-            method,
-            args or [],
-            kwargs or {},
-        )
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
 
     def search_vehicle_inventory(self, query_string: str) -> list[dict[str, Any]]:
         """Search vehicle product templates and return normalized inventory rows."""
@@ -695,19 +628,50 @@ class OdooCRMClient:
             day = day + timedelta(days=1)
         return day
 
-    def _resolve_activity_type_id(self) -> int | None:
-        """Prefer Phone Call; fall back to To-Do."""
-        try:
-            ref = self.execute_kw(
-                "ir.model.data",
-                "check_object_reference",
-                ["mail", "mail_activity_data_call"],
+    def _resolve_activity_type_id(
+        self,
+        *,
+        kind: str = "call",
+    ) -> int | None:
+        """Prefer Phone Call or Meeting; fall back to To-Do."""
+        kind_norm = (kind or "call").strip().lower()
+        if kind_norm in {"meeting", "cita", "appointment"}:
+            xmlids = [("mail", "mail_activity_data_meeting")]
+            labels = (
+                "Meeting",
+                "Reunión",
+                "Cita",
+                "Call",
+                "Phone Call",
+                "Llamada",
+                "To-Do",
+                "To Do",
+                "Todo",
             )
-            if isinstance(ref, (list, tuple)) and len(ref) >= 2:
-                return int(ref[1])
-        except Exception:
-            pass
-        for label in ("Call", "Phone Call", "Llamada", "To-Do", "To Do", "Todo"):
+        else:
+            xmlids = [("mail", "mail_activity_data_call")]
+            labels = (
+                "Call",
+                "Phone Call",
+                "Llamada",
+                "Meeting",
+                "Reunión",
+                "To-Do",
+                "To Do",
+                "Todo",
+            )
+        for module, xmlid in xmlids:
+            try:
+                ref = self.execute_kw(
+                    "ir.model.data",
+                    "check_object_reference",
+                    [module, xmlid],
+                )
+                if isinstance(ref, (list, tuple)) and len(ref) >= 2:
+                    return int(ref[1])
+            except Exception:
+                pass
+        for label in labels:
             try:
                 found = self.execute_kw(
                     "mail.activity.type",
@@ -780,6 +744,99 @@ class OdooCRMClient:
             pass
         return int(self.uid) if self.uid is not None else None
 
+    def schedule_activity(
+        self,
+        lead_id: int,
+        *,
+        summary: str | None = None,
+        activity_kind: str = "call",
+        hours: int = 24,
+        user_id: int | None = None,
+        branch_id: int = 1,
+        note: str | None = None,
+        dry_run: bool | None = None,
+    ) -> int | None:
+        """Create ``mail.activity`` on ``crm.lead`` (Call/Meeting, ~+24h).
+
+        Failures are logged and return ``None`` so the pipeline can continue.
+        """
+        use_dry = self.dry_run if dry_run is None else bool(dry_run)
+        summary_text = (summary or self.DEFAULT_ACTIVITY_SUMMARY).strip()[:200]
+        if use_dry:
+            print(
+                f"DRY-RUN schedule_activity lead={lead_id} "
+                f"summary={summary_text!r} kind={activity_kind}"
+            )
+            return -1
+
+        try:
+            activity_type_id = self._resolve_activity_type_id(kind=activity_kind)
+            if activity_type_id is None:
+                print(
+                    f"WARN schedule_activity: no activity type for lead id={lead_id}"
+                )
+                return None
+            assignee = self._resolve_follow_up_user_id(
+                branch_id=branch_id, user_id=user_id
+            )
+            if assignee is None:
+                print(
+                    f"WARN schedule_activity: no assignee for lead id={lead_id}"
+                )
+                return None
+
+            deadline = self._follow_up_deadline(hours=hours)
+            note_body = note or summary_text
+            note_html = (
+                note_body.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+            )
+            vals: dict[str, Any] = {
+                "res_model": "crm.lead",
+                "res_id": int(lead_id),
+                "activity_type_id": int(activity_type_id),
+                "summary": summary_text,
+                "note": f"<p>{note_html}</p>",
+                "date_deadline": deadline.isoformat(),
+                "user_id": int(assignee),
+            }
+            try:
+                model_ids = self.execute_kw(
+                    "ir.model",
+                    "search",
+                    [[("model", "=", "crm.lead")]],
+                    {"limit": 1},
+                )
+                if model_ids:
+                    vals["res_model_id"] = int(model_ids[0])
+            except Exception:
+                pass
+
+            last_exc: BaseException | None = None
+            for drop in ((), ("res_model",), ("res_model_id",), ("note",)):
+                attempt = dict(vals)
+                for key in drop:
+                    attempt.pop(key, None)
+                try:
+                    activity_id = int(
+                        self.execute_kw("mail.activity", "create", [attempt])
+                    )
+                    print(
+                        f"Scheduled activity id={activity_id} for lead id={lead_id}"
+                    )
+                    return activity_id
+                except Exception as exc:
+                    last_exc = exc
+                    continue
+            print(
+                f"WARN schedule_activity failed for lead id={lead_id}: {last_exc}"
+            )
+            return None
+        except Exception as exc:
+            print(f"WARN schedule_activity error for lead id={lead_id}: {exc}")
+            return None
+
     def schedule_quote_follow_up(
         self,
         lead_id: int,
@@ -792,18 +849,9 @@ class OdooCRMClient:
         branch_id: int = 1,
         user_id: int | None = None,
         hours: int = 24,
+        dry_run: bool | None = None,
     ) -> int | None:
         """Create mail.activity Phone Call / To-Do due in ~24h on the lead."""
-        activity_type_id = self._resolve_activity_type_id()
-        if activity_type_id is None:
-            return None
-        assignee = self._resolve_follow_up_user_id(
-            branch_id=branch_id, user_id=user_id
-        )
-        if assignee is None:
-            return None
-
-        deadline = self._follow_up_deadline(hours=hours)
         note_parts = [
             f"Follow up on generated vehicle quote: {vehicle_name}",
             f"Down payment: {down_payment if down_payment not in (None, '') else 'n/a'}",
@@ -811,45 +859,16 @@ class OdooCRMClient:
             f"Monthly payment: {estimated_monthly_payment if estimated_monthly_payment not in (None, '') else 'n/a'}",
             f"Preferred channel: {channel or 'n/a'}",
         ]
-        note_html = "<br/>".join(
-            line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            for line in note_parts
+        return self.schedule_activity(
+            lead_id,
+            summary=f"Follow up on generated vehicle quote: {vehicle_name}"[:200],
+            activity_kind="call",
+            hours=hours,
+            user_id=user_id,
+            branch_id=branch_id,
+            note="<br/>".join(note_parts),
+            dry_run=dry_run,
         )
-        vals: dict[str, Any] = {
-            "res_model": "crm.lead",
-            "res_id": int(lead_id),
-            "activity_type_id": int(activity_type_id),
-            "summary": f"Follow up on generated vehicle quote: {vehicle_name}"[:200],
-            "note": f"<p>{note_html}</p>",
-            "date_deadline": deadline.isoformat(),
-            "user_id": int(assignee),
-        }
-        # Odoo 14+ often wants res_model_id instead of / in addition to res_model
-        try:
-            model_ids = self.execute_kw(
-                "ir.model",
-                "search",
-                [[("model", "=", "crm.lead")]],
-                {"limit": 1},
-            )
-            if model_ids:
-                vals["res_model_id"] = int(model_ids[0])
-        except Exception:
-            pass
-
-        last_exc: BaseException | None = None
-        for drop in ((), ("res_model",), ("res_model_id",), ("note",)):
-            attempt = dict(vals)
-            for key in drop:
-                attempt.pop(key, None)
-            try:
-                return int(self.execute_kw("mail.activity", "create", [attempt]))
-            except Exception as exc:
-                last_exc = exc
-                continue
-        # Non-fatal: lead upsert still succeeded
-        print(f"WARN follow-up activity failed for lead id={lead_id}: {last_exc}")
-        return None
 
     def _resolve_crm_stage_id(self, stage_name: str) -> int | None:
         """Best-effort match for crm.stage by name (e.g. Quote Generated)."""
@@ -864,7 +883,29 @@ class OdooCRMClient:
                 {"fields": ["id", "name"], "limit": 10},
             )
         except Exception:
-            return None
+            rows = []
+        if not rows:
+            lowered = label.lower()
+            alts: list[str] = []
+            if "prueba" in lowered or "cita" in lowered or "manejo" in lowered:
+                alts = [
+                    "Prueba de manejo",
+                    "Cita",
+                    "Test Drive",
+                    "Appointment",
+                ]
+            for alt in alts:
+                try:
+                    rows = self.execute_kw(
+                        "crm.stage",
+                        "search_read",
+                        [[("name", "ilike", alt)]],
+                        {"fields": ["id", "name"], "limit": 5},
+                    )
+                except Exception:
+                    rows = []
+                if rows:
+                    break
         if not rows:
             return None
         lowered = label.lower()
@@ -1012,33 +1053,274 @@ class OdooCRMClient:
                     f"chatter post failed: {exc2}"
                 ) from exc2
 
-    def attach_file(
+    @staticmethod
+    def _parse_odoo_datetime(value: Any) -> datetime:
+        """Parse ISO / Odoo datetime into aware UTC datetime."""
+        if isinstance(value, datetime):
+            when = value
+        else:
+            text = str(value or "").strip()
+            if not text:
+                raise ValueError("datetime is required")
+            text = text.replace("Z", "+00:00")
+            when = datetime.fromisoformat(text)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return when.astimezone(timezone.utc)
+
+    @staticmethod
+    def _format_odoo_datetime(when: datetime) -> str:
+        return when.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+    def _ensure_partner_for_lead(
+        self,
+        lead_id: int,
+        *,
+        customer_name: str | None = None,
+        phone: str | None = None,
+    ) -> tuple[int | None, int | None]:
+        """Return (partner_id, salesperson_user_id) for a lead."""
+        rows = self.execute_kw(
+            "crm.lead",
+            "read",
+            [[int(lead_id)]],
+            {"fields": ["partner_id", "contact_name", "phone", "user_id", "name"]},
+        )
+        if not rows:
+            raise OdooCRMError(f"crm.lead id={lead_id} not found")
+        row = rows[0]
+        user_raw = row.get("user_id")
+        user_id = (
+            int(user_raw[0])
+            if isinstance(user_raw, (list, tuple)) and user_raw
+            else (int(user_raw) if user_raw else None)
+        )
+        partner_raw = row.get("partner_id")
+        if isinstance(partner_raw, (list, tuple)) and partner_raw:
+            return int(partner_raw[0]), user_id
+        if partner_raw:
+            return int(partner_raw), user_id
+
+        name = (
+            (customer_name or "").strip()
+            or str(row.get("contact_name") or "").strip()
+            or str(row.get("name") or "").strip()
+            or "Prospecto"
+        )
+        phone_norm = (phone or str(row.get("phone") or "")).strip()
+        partner_vals: dict[str, Any] = {"name": name, "type": "contact"}
+        if phone_norm:
+            partner_vals["phone"] = phone_norm
+        partner_id = int(self.execute_kw("res.partner", "create", [partner_vals]))
+        try:
+            self.execute_kw(
+                "crm.lead",
+                "write",
+                [[int(lead_id)], {"partner_id": partner_id}],
+            )
+        except Exception:
+            pass
+        return partner_id, user_id
+
+    def create_test_drive_event(
         self,
         *,
-        model: str,
-        res_id: int,
-        filename: str,
-        content: bytes,
-        mimetype: str = "application/pdf",
-    ) -> int:
-        """Create ``ir.attachment`` linked to ``model`` / ``res_id``. Returns id."""
-        import base64
+        lead_id: int,
+        vehicle_model: str,
+        customer_name: str,
+        start: Any,
+        stop: Any | None = None,
+        user_id: int | None = None,
+        partner_id: int | None = None,
+        phone: str | None = None,
+        duration_hours: float = 1.0,
+        advance_stage: bool = True,
+        schedule_confirmation_activity: bool = True,
+        branch_id: int = 1,
+        dry_run: bool | None = None,
+    ) -> TestDriveEventResult:
+        """Create ``calendar.event`` for a test drive linked to ``crm.lead``.
 
-        if not model or not str(model).strip():
-            raise OdooCRMError("model is required")
-        if not filename or not str(filename).strip():
-            raise OdooCRMError("filename is required")
-        if not content:
-            raise OdooCRMError("attachment content is empty")
-        vals = {
-            "name": str(filename).strip(),
-            "res_model": str(model).strip(),
-            "res_id": int(res_id),
-            "type": "binary",
-            "datas": base64.b64encode(content).decode("ascii"),
-            "mimetype": mimetype or "application/octet-stream",
-        }
+        Advances stage to ``Cita/Prueba de manejo`` when possible. Calendar /
+        activity failures are caught so the voice pipeline can continue.
+        """
+        use_dry = self.dry_run if dry_run is None else bool(dry_run)
+        vehicle = (vehicle_model or "").strip() or "Vehículo"
+        customer = (customer_name or "").strip() or "Cliente"
+        event_name = f"Prueba de Manejo - {vehicle} - {customer}"[:200]
+
         try:
-            return int(self.execute_kw("ir.attachment", "create", [vals]))
+            start_dt = self._parse_odoo_datetime(start)
+            if stop is None:
+                stop_dt = start_dt + timedelta(hours=float(duration_hours or 1.0))
+            else:
+                stop_dt = self._parse_odoo_datetime(stop)
+            if stop_dt <= start_dt:
+                stop_dt = start_dt + timedelta(hours=1)
         except Exception as exc:
-            raise OdooCRMError(f"ir.attachment create failed: {exc}") from exc
+            msg = f"invalid test-drive datetime: {exc}"
+            print(f"WARN create_test_drive_event lead={lead_id}: {msg}")
+            return TestDriveEventResult(
+                event_id=None, lead_id=int(lead_id), error=msg, dry_run=use_dry
+            )
+
+        if use_dry:
+            print(
+                f"DRY-RUN create_test_drive_event lead={lead_id} "
+                f"name={event_name!r} start={start_dt.isoformat()} "
+                f"stop={stop_dt.isoformat()}"
+            )
+            activity_id = None
+            if schedule_confirmation_activity:
+                activity_id = self.schedule_activity(
+                    int(lead_id),
+                    summary=self.DEFAULT_ACTIVITY_SUMMARY,
+                    activity_kind="meeting",
+                    hours=24,
+                    user_id=user_id,
+                    branch_id=branch_id,
+                    dry_run=True,
+                )
+            return TestDriveEventResult(
+                event_id=-1,
+                lead_id=int(lead_id),
+                stage_updated=advance_stage,
+                activity_id=activity_id,
+                partner_id=partner_id or -1,
+                dry_run=True,
+            )
+
+        try:
+            resolved_partner = partner_id
+            resolved_user = user_id
+            if resolved_partner is None or resolved_user is None:
+                p_id, u_id = self._ensure_partner_for_lead(
+                    int(lead_id),
+                    customer_name=customer,
+                    phone=phone,
+                )
+                if resolved_partner is None:
+                    resolved_partner = p_id
+                if resolved_user is None:
+                    resolved_user = u_id
+            if resolved_user is None:
+                resolved_user = self._resolve_follow_up_user_id(
+                    branch_id=branch_id, user_id=None
+                )
+
+            partner_ids: list[int] = []
+            if resolved_partner:
+                partner_ids.append(int(resolved_partner))
+            if resolved_user:
+                try:
+                    users = self.execute_kw(
+                        "res.users",
+                        "read",
+                        [[int(resolved_user)]],
+                        {"fields": ["partner_id"]},
+                    )
+                    if users:
+                        up = users[0].get("partner_id")
+                        uid_partner = (
+                            int(up[0])
+                            if isinstance(up, (list, tuple)) and up
+                            else (int(up) if up else None)
+                        )
+                        if uid_partner and uid_partner not in partner_ids:
+                            partner_ids.append(uid_partner)
+                except Exception:
+                    pass
+
+            vals: dict[str, Any] = {
+                "name": event_name,
+                "start": self._format_odoo_datetime(start_dt),
+                "stop": self._format_odoo_datetime(stop_dt),
+                "user_id": int(resolved_user) if resolved_user else False,
+                "partner_ids": [(6, 0, partner_ids)] if partner_ids else False,
+                "opportunity_id": int(lead_id),
+                "description": (
+                    f"Prueba de manejo agendada vía Voice AI.\n"
+                    f"Vehículo: {vehicle}\nCliente: {customer}"
+                ),
+            }
+
+            event_id: int | None = None
+            last_exc: BaseException | None = None
+            for drop in (
+                (),
+                ("opportunity_id",),
+                ("opportunity_id", "description"),
+                ("opportunity_id", "description", "partner_ids"),
+                ("opportunity_id", "description", "partner_ids", "user_id"),
+            ):
+                attempt = dict(vals)
+                for key in drop:
+                    attempt.pop(key, None)
+                if attempt.get("partner_ids") is False:
+                    attempt.pop("partner_ids", None)
+                if attempt.get("user_id") is False:
+                    attempt.pop("user_id", None)
+                try:
+                    event_id = int(
+                        self.execute_kw("calendar.event", "create", [attempt])
+                    )
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    continue
+
+            if event_id is None:
+                msg = f"calendar.event create failed: {last_exc}"
+                print(f"WARN create_test_drive_event lead={lead_id}: {msg}")
+                return TestDriveEventResult(
+                    event_id=None,
+                    lead_id=int(lead_id),
+                    partner_id=resolved_partner,
+                    error=msg,
+                )
+
+            print(
+                f"Created test-drive calendar.event id={event_id} "
+                f"for lead id={lead_id}"
+            )
+
+            stage_updated = False
+            if advance_stage:
+                stage_id = self._resolve_crm_stage_id(self.TEST_DRIVE_STAGE)
+                if stage_id is not None:
+                    try:
+                        self.execute_kw(
+                            "crm.lead",
+                            "write",
+                            [[int(lead_id)], {"stage_id": int(stage_id)}],
+                        )
+                        stage_updated = True
+                    except Exception as exc:
+                        print(
+                            f"WARN test-drive stage update lead={lead_id}: {exc}"
+                        )
+
+            activity_id = None
+            if schedule_confirmation_activity:
+                activity_id = self.schedule_activity(
+                    int(lead_id),
+                    summary=self.DEFAULT_ACTIVITY_SUMMARY,
+                    activity_kind="meeting",
+                    hours=24,
+                    user_id=resolved_user,
+                    branch_id=branch_id,
+                )
+
+            return TestDriveEventResult(
+                event_id=event_id,
+                lead_id=int(lead_id),
+                stage_updated=stage_updated,
+                activity_id=activity_id,
+                partner_id=resolved_partner,
+            )
+        except Exception as exc:
+            msg = str(exc)
+            print(f"WARN create_test_drive_event lead={lead_id}: {msg}")
+            return TestDriveEventResult(
+                event_id=None, lead_id=int(lead_id), error=msg
+            )

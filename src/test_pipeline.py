@@ -231,6 +231,58 @@ class TestAutosellPipeline(unittest.TestCase):
         self.assertEqual(steps["quote"]["status"], "skipped")
         self.assertEqual(steps["pdf_spec_sheet"]["status"], "skipped")
 
+    def test_test_drive_booking_step(self):
+        from src.odoo_sync.client import TestDriveEventResult
+
+        quote_engine = MagicMock(spec=CalibratedQuoteEngine)
+        quote_engine.calculate.return_value = _sample_quote(
+            net_trade_in_equity=Decimal("0.00"),
+            cash_down_payment=Decimal("30000.00"),
+            down_payment=Decimal("30000.00"),
+        )
+        odoo = MagicMock()
+        odoo.authenticate.return_value = 1
+        odoo.create_or_update_lead.return_value = QuoteLeadResult(
+            lead_id=501, activity_id=1, tag_ids=()
+        )
+        odoo.round_robin_assign_advisor.return_value = 42
+        odoo.post_quote_to_chatter.return_value = 1
+        odoo.create_test_drive_event.return_value = TestDriveEventResult(
+            event_id=9001,
+            lead_id=501,
+            stage_updated=True,
+            activity_id=777,
+        )
+        wa = MagicMock()
+        wa.format_quote_message.return_value = "msg"
+        pipeline = AutosellPipeline(
+            quote_engine=quote_engine,
+            odoo=odoo,
+            whatsapp=wa,
+            assign_advisor=True,
+            dispatch_whatsapp=False,
+            attach_pdf=False,
+        )
+        result = pipeline.process_lead(
+            {
+                "name": "Ana",
+                "phone": "6141234567",
+                "vehicle_name": "Mazda CX-5",
+                "vehicle_price": 300000,
+                "term_months": 36,
+                "branch_id": 1,
+                "test_drive": {
+                    "start": "2026-08-10T16:00:00-06:00",
+                    "vehicle_model": "Mazda CX-5",
+                },
+            }
+        )
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(result.calendar_event_id, 9001)
+        odoo.create_test_drive_event.assert_called_once()
+        steps = {s["step"]: s for s in result.steps}
+        self.assertEqual(steps["odoo_test_drive"]["event_id"], 9001)
+
     def test_no_trade_in_skips_valuation(self):
         trade = MagicMock(spec=TradeInEngine)
         quote_engine = MagicMock(spec=CalibratedQuoteEngine)

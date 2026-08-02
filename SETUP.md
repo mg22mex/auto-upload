@@ -396,6 +396,8 @@ pip install -r requirements.txt   # fastapi, uvicorn, python-dotenv, …
 # .env must include:
 #   ODOO_URL ODOO_DB ODOO_USERNAME|ODOO_USER ODOO_API_KEY|ODOO_PASSWORD
 #   FB_VERIFY_TOKEN FB_PAGE_ACCESS_TOKEN
+# Optional: ODOO_DRY_RUN=true (calendar / WA templates / fleet / attachments plan-only)
+# Modular Odoo helpers: src/odoo_sync/{client,whatsapp,fleet,documents}.py
 test -x .venv/bin/uvicorn && .venv/bin/python -c "import dotenv, fastapi, uvicorn; print('deps OK')"
 ```
 

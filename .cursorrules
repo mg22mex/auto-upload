@@ -18,7 +18,7 @@
 | `src/store/` | `sync.db` persistence |
 | `src/facebook/` | Playwright Marketplace workers |
 | `src/quote_engine/` | Phase 2 — local French Amortization calculator |
-| `src/odoo_sync/` | Phase 2 — Odoo CRM XML-RPC client |
+| `src/odoo_sync/` | Phase 2 — Odoo XML-RPC (CRM + WhatsApp + Fleet + Documents) |
 | `src/whatsapp_worker/` | Phase 2 — open-wa / Evolution API wrapper |
 | `src/voice_gateway/` | Phase 2 — FastAPI voice + Meta webhook entry |
 | `src/meta_gateway/` | Phase 2 — Facebook Page Messenger Graph API |

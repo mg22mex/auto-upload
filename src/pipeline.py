@@ -28,6 +28,7 @@ class PipelineResult:
     pdf_path: str | None = None
     pdf_attachment_id: int | None = None
     vehicle_sku: str | None = None
+    calendar_event_id: int | None = None
     steps: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
 
@@ -309,6 +310,49 @@ class AutosellPipeline:
                     "message_id": chatter_id,
                 }
             )
+
+            # 3b) Optional test-drive calendar booking (non-fatal)
+            test_drive = lead_data.get("test_drive")
+            if isinstance(test_drive, dict) and test_drive.get("start"):
+                try:
+                    td = self.odoo.create_test_drive_event(
+                        lead_id=lead_id,
+                        vehicle_model=str(
+                            test_drive.get("vehicle_model")
+                            or test_drive.get("vehicle")
+                            or vehicle_name
+                        ),
+                        customer_name=name,
+                        start=test_drive.get("start"),
+                        stop=test_drive.get("stop"),
+                        user_id=advisor_id or result.advisor_user_id,
+                        phone=phone,
+                        duration_hours=float(
+                            test_drive.get("duration_hours") or 1.0
+                        ),
+                        branch_id=branch_id,
+                        dry_run=bool(lead_data.get("odoo_dry_run", False)),
+                    )
+                    result.calendar_event_id = td.event_id
+                    log.append(
+                        {
+                            "step": "odoo_test_drive",
+                            "status": "ok" if td.event_id is not None and not td.error else "error",
+                            "event_id": td.event_id,
+                            "stage_updated": td.stage_updated,
+                            "activity_id": td.activity_id,
+                            "dry_run": td.dry_run,
+                            "error": td.error,
+                        }
+                    )
+                except Exception as exc:
+                    log.append(
+                        {
+                            "step": "odoo_test_drive",
+                            "status": "error",
+                            "error": str(exc),
+                        }
+                    )
 
             # 4) PDF spec sheet → disk + ir.attachment on crm.lead
             want_pdf = self.attach_pdf and bool(lead_data.get("generate_pdf", True))
