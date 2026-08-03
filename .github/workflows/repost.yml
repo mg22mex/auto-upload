@@ -24,6 +24,14 @@ on:
         description: Max renews/reposts per account (empty = config default)
         required: false
         type: string
+      account:
+        description: Limit to one account (e.g. account_2). Empty = active accounts
+        required: false
+        type: string
+      ids:
+        description: Comma-separated autosell ids (skips --all-eligible). Empty = eligible
+        required: false
+        type: string
 
 jobs:
   weekly-bump:
@@ -118,6 +126,10 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           set -eux
+          # Clear leftover Chromium from cancelled runs (VPS RAM)
+          pkill -f 'chromium|chrome' 2>/dev/null || true
+          sleep 2
+
           EXTRA=""
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             EXTRA="--dry-run"
@@ -129,4 +141,14 @@ jobs:
             EXTRA="--dry-run"
           fi
           MODE="${{ inputs.mode || 'auto' }}"
-          python scripts/run_weekly_bump.py --mode "$MODE" --all-eligible $EXTRA
+          ACCOUNT_ARGS=()
+          if [ -n "${{ inputs.account }}" ]; then
+            ACCOUNT_ARGS=(--account "${{ inputs.account }}")
+          fi
+          if [ -n "${{ inputs.ids }}" ]; then
+            python scripts/run_weekly_bump.py --mode "$MODE" \
+              "${ACCOUNT_ARGS[@]}" --ids "${{ inputs.ids }}" $EXTRA
+          else
+            python scripts/run_weekly_bump.py --mode "$MODE" \
+              "${ACCOUNT_ARGS[@]}" --all-eligible $EXTRA
+          fi
