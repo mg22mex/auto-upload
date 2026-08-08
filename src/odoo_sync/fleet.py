@@ -19,6 +19,37 @@ class _OdooSession(Protocol):
     def _use_dry_run(self, dry_run: bool | None) -> bool: ...
 
 
+def _m2o_label(value: Any) -> str:
+    if isinstance(value, (list, tuple)) and len(value) > 1:
+        return str(value[1] or "")
+    if isinstance(value, str):
+        return value
+    return ""
+
+
+def _extract_location_label(row: dict[str, Any]) -> str:
+    """Best-effort human location string from a fleet.vehicle row."""
+    for key in (
+        "x_studio_ubicacion",
+        "x_ubicacion",
+        "x_branch",
+        "x_sucursal",
+        "x_studio_sucursal",
+        "location",
+        "location_id",
+        "company_id",
+        "name",
+    ):
+        raw = row.get(key)
+        if raw in (None, False, ""):
+            continue
+        label = _m2o_label(raw) if not isinstance(raw, str) else raw
+        label = str(label or "").strip()
+        if label:
+            return label
+    return ""
+
+
 @dataclass(frozen=True)
 class FleetVehicle:
     id: int
@@ -28,6 +59,7 @@ class FleetVehicle:
     model_id: int | None = None
     model_name: str = ""
     driver_id: int | None = None
+    location_label: str = ""
     raw: dict[str, Any] | None = None
 
 
@@ -52,6 +84,15 @@ class FleetMixin:
         "license_plate",
         "model_id",
         "driver_id",
+        # Location / branch (Studio custom fields vary by DB)
+        "location",
+        "location_id",
+        "x_studio_ubicacion",
+        "x_ubicacion",
+        "x_branch",
+        "x_sucursal",
+        "x_studio_sucursal",
+        "company_id",
     ]
 
     def find_fleet_vehicle_by_vin(self: _OdooSession, vin: str) -> FleetVehicle | None:
@@ -60,19 +101,9 @@ class FleetMixin:
         if not code:
             return None
         try:
-            rows = self.execute_kw(
-                "fleet.vehicle",
-                "search_read",
-                [[("vin_sn", "=", code)]],
-                {"fields": self.FLEET_FIELDS, "limit": 1},  # type: ignore[attr-defined]
-            )
+            rows = self._fleet_search_read([("vin_sn", "=", code)])  # type: ignore[attr-defined]
             if not rows:
-                rows = self.execute_kw(
-                    "fleet.vehicle",
-                    "search_read",
-                    [[("vin_sn", "ilike", code)]],
-                    {"fields": self.FLEET_FIELDS, "limit": 1},  # type: ignore[attr-defined]
-                )
+                rows = self._fleet_search_read([("vin_sn", "ilike", code)])  # type: ignore[attr-defined]
             if not rows:
                 return None
             return self._fleet_row_to_vehicle(rows[0])  # type: ignore[attr-defined]
@@ -95,12 +126,7 @@ class FleetMixin:
             ]
             rows: list[dict[str, Any]] = []
             for domain in domain_opts:
-                rows = self.execute_kw(
-                    "fleet.vehicle",
-                    "search_read",
-                    [domain],
-                    {"fields": self.FLEET_FIELDS, "limit": 1},  # type: ignore[attr-defined]
-                )
+                rows = self._fleet_search_read(domain)  # type: ignore[attr-defined]
                 if rows:
                     break
             if not rows:
@@ -109,6 +135,31 @@ class FleetMixin:
         except Exception as exc:
             print(f"WARN find_fleet_vehicle_by_plate: {exc}")
             return None
+
+    def _fleet_search_read(
+        self: _OdooSession,
+        domain: list[Any],
+    ) -> list[dict[str, Any]]:
+        """search_read with progressive field drop if extras don't exist on DB."""
+        fields: list[str] = list(self.FLEET_FIELDS)  # type: ignore[attr-defined]
+        while fields:
+            try:
+                return self.execute_kw(
+                    "fleet.vehicle",
+                    "search_read",
+                    [domain],
+                    {"fields": fields, "limit": 1},
+                )
+            except Exception as exc:
+                msg = str(exc).lower()
+                if "invalid field" in msg or "unknown field" in msg or "does not exist" in msg:
+                    # Drop optional location fields from the end until core works
+                    if len(fields) <= 6:
+                        raise
+                    fields = fields[:-1]
+                    continue
+                raise
+        return []
 
     def find_fleet_vehicle(
         self: _OdooSession,
@@ -139,6 +190,7 @@ class FleetMixin:
             if isinstance(driver_raw, (list, tuple)) and driver_raw
             else (int(driver_raw) if driver_raw else None)
         )
+        location_label = _extract_location_label(row)
         return FleetVehicle(
             id=int(row["id"]),
             name=str(row.get("name") or ""),
@@ -147,6 +199,7 @@ class FleetMixin:
             model_id=model_id,
             model_name=model_name,
             driver_id=driver_id,
+            location_label=location_label,
             raw=dict(row),
         )
 
@@ -179,11 +232,8 @@ class FleetMixin:
         vehicle: FleetVehicle | None = None
         if vehicle_id is not None:
             try:
-                rows = self.execute_kw(
-                    "fleet.vehicle",
-                    "read",
-                    [[int(vehicle_id)]],
-                    {"fields": self.FLEET_FIELDS},  # type: ignore[attr-defined]
+                rows = self._fleet_search_read(  # type: ignore[attr-defined]
+                    [("id", "=", int(vehicle_id))]
                 )
                 if rows:
                     vehicle = self._fleet_row_to_vehicle(rows[0])  # type: ignore[attr-defined]

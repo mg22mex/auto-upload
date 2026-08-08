@@ -65,12 +65,12 @@
 ## Phase 2 Module Contracts (scaffold)
 
 - `quote_engine` — pure local finance; no network I/O.
-- `odoo_sync` — CRM lead/opportunity + inventory XML-RPC; credentials from env.
+- `odoo_sync` — CRM (`CRMLeadManager`), fleet, quote PDF, stage triggers, inventory XML-RPC; credentials from env. Native Odoo WhatsApp **paused** until Meta Manager + `ODOO_WA_ACCOUNT_*`.
 - `whatsapp_worker` — outbound messaging API only; separate process/config from FB Playwright.
 - `voice_gateway` — FastAPI entry for Voice AI + Meta webhook routes.
 - `meta_gateway` — Page Messenger verify/parse/quote/Odoo/Graph reply; uses `FB_VERIFY_TOKEN` / `FB_PAGE_ACCESS_TOKEN`.
 
-Lead path (target): Web/Voice AI / Messenger → quote (`quote_engine`) → Odoo (`odoo_sync`) → WhatsApp or Graph reply. FB Marketplace sync remains a separate pipeline via `run_sync.py`.
+Lead path (target): Web/Voice AI / Messenger → quote (`quote_engine`) → Odoo CRM/PDF → WA queue or `whatsapp_worker` / Graph. FB Marketplace sync remains a separate pipeline via `run_sync.py`.
 
 ## Change Discipline
 

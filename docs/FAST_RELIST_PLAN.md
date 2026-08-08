@@ -1,41 +1,43 @@
-# Fast renew / relist — findings & implementation
+# Fast repost / relist — findings & production config
 
 ## Comparison results (Jul 2026)
 
 | Flow | Result | URL | Notes |
 |------|--------|-----|--------|
-| **Renovar** | Works at 7+ days | **Same** | Confirmed on Mazda CX-5 (`obj1137`) |
-| **FB delete & relist** | Not available | — | Dashboard count **0**; dialog empty |
+| **Renovar** | Works at 7+ days (FB often gates earlier) | **Same** | Confirmed on Mazda CX-5 (`obj1137`) |
+| **Full repost (our Playwright)** | Works | **New** | Mark sold → create; preferred for momentum |
+| **FB delete & relist menu** | Not available | — | Dashboard count **0**; dialog empty |
 | **Chrome extension** | Works | **New** | Corvette `obj1136` account_2: `1773…` → `2579…` |
 
-## Production choice
+## Production choice (relist-first)
 
-- **Sunday cron** (`.github/workflows/repost.yml`) → `scripts/run_weekly_bump.py`
-  - **Even ISO week** → native **Renovar** (`run_renew.py`) — same URL, ads-safe, seconds/listing, cap **25**/account; Chromium restart every **10**.
-  - **Odd ISO week** → full **repost** (`run_repost.py`) — new URL, slower, cap **5**/account; Chromium restart every **3**; auto-reopen on `TargetClosedError`.
+- **Wed + Sun cron** (`.github/workflows/repost.yml` `0 15 * * 0,3`) → `scripts/run_weekly_bump.py`
+  - **Default (`auto`)** → full **repost/relist** (`run_repost.py`) for live rows with `posted_at` age ≥ **3 days**. Cap **5**/account; Chromium restart every **3**; auto-reopen on `TargetClosedError`.
+  - **Optional** `--mode renew` or config `even_week`/`odd_week` → native **Renovar**.
 - **Manual override** → Actions → Run workflow → mode `renew` / `repost` / `auto`.
 - **Holds** → `fb_repost_hold.py` skips both renew and full repost.
+- **Age defaults** → `REPOST_MIN_AGE_DAYS=3`, `RENEW_MIN_AGE_DAYS=3`, `config.yaml` `sync.repost.min_age_days: 3`.
 
 ## UI labels (es-MX / EN)
 
 | Action | Spanish | English |
 |--------|---------|---------|
-| Renew | Renovar publicación / Renovar (7 días) | Renew listing / Renew (7 days) |
+| Renew | Renovar publicación / Renovar | Renew listing / Renew |
 | More menu | Más | More |
 | Selling list | Tus publicaciones | Your listings |
 
 ## Commands
 
 ```bash
-# This Sunday's automatic mode (plan only)
+# Default plan (repost ≥3d)
 python scripts/run_weekly_bump.py --all-eligible --dry-run
 
-# Force renew or repost regardless of week
+# Force renew or repost
 python scripts/run_weekly_bump.py --mode renew --all-eligible --dry-run
 python scripts/run_weekly_bump.py --mode repost --account account_2 --ids obj1126
 
-# Direct scripts (same as before)
-python scripts/run_renew.py --all-eligible --dry-run
+# Direct scripts
+python scripts/run_repost.py --all-eligible --older-than 3 --dry-run
 python scripts/run_renew.py --account account_2 --ids obj969
 
 # After extension repost

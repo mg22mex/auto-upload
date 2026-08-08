@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sunday Marketplace bump — alternates renew (even ISO week) / full repost (odd)."""
+"""Marketplace listing bump — default full relist (repost); renew optional."""
 from __future__ import annotations
 
 import argparse
@@ -25,15 +25,15 @@ def load_config(path: Path) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Weekly Facebook listing bump: even ISO weeks → Renovar (same URL); "
-            "odd ISO weeks → full repost (new URL). Override with --mode."
+            "Marketplace listing bump: default full repost/relist (delete+recreate). "
+            "Optional --mode renew for FB native Renovar. Age floor defaults to 3 days."
         )
     )
     parser.add_argument(
         "--mode",
         choices=("auto", "renew", "repost"),
         default="auto",
-        help="auto = calendar alternate (default); or force renew/repost",
+        help="auto = config calendar (default both weeks=repost); or force renew/repost",
     )
     parser.add_argument("--account", nargs="+", help="Limit to these accounts")
     group = parser.add_mutually_exclusive_group(required=True)
@@ -41,9 +41,13 @@ def main() -> int:
     group.add_argument(
         "--all-eligible",
         action="store_true",
-        help="Process all eligible live listings",
+        help="Process all eligible live listings (age ≥ min days)",
     )
-    parser.add_argument("--older-than", default=None, help="Min age days filter")
+    parser.add_argument(
+        "--older-than",
+        default=None,
+        help="Min age days (default: REPOST_MIN_AGE_DAYS / config, usually 3)",
+    )
     parser.add_argument("--max", type=int, default=None, help="Max per account")
     parser.add_argument("--force", action="store_true", help="Ignore repost holds")
     parser.add_argument("--dry-run", action="store_true", help="Plan only")
@@ -87,10 +91,14 @@ def main() -> int:
         cmd.append("--dry-run")
     cmd.extend(["--catalog", args.catalog, "--config", args.config])
 
-    print("=== Weekly listing bump ===", flush=True)
-    print(f"Mode:      {mode} ({'forced' if force else 'auto ISO week'})", flush=True)
+    print("=== Listing bump (relist-first) ===", flush=True)
+    print(f"Mode:      {mode} ({'forced' if force else 'auto config'})", flush=True)
     print(f"Timezone:  {bump['timezone']}", flush=True)
-    print(f"Even week: {bump['even_week']} | Odd week: {bump['odd_week']}", flush=True)
+    print(
+        f"Even/odd:  {bump['even_week']} / {bump['odd_week']} "
+        f"(min_age_days={bump.get('min_age_days', 3)})",
+        flush=True,
+    )
     print(f"Command:   {' '.join(cmd)}", flush=True)
     print("", flush=True)
 

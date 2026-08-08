@@ -12,11 +12,17 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.odoo_sync.client import QuoteLeadResult
+from src.odoo_sync.fleet import FleetLinkResult
 from src.pipeline import AutosellPipeline
 from src.quote_engine.calculator import QuoteResult
 from src.quote_engine.engine import CalibratedQuoteEngine
 from src.quote_engine.scotiabank_profile import SCOTIABANK_PROFILE
 from src.quote_engine.trade_in import TradeInEngine, TradeInValuation, ValuationSource
+
+try:
+    from src.pdf_engine.generator import _HAS_REPORTLAB
+except ImportError:
+    _HAS_REPORTLAB = False
 
 
 def _sample_quote(**overrides) -> QuoteResult:
@@ -119,6 +125,7 @@ class TestAutosellPipeline(unittest.TestCase):
         self.assertEqual(steps["odoo_lead"]["lead_id"], 501)
         self.assertEqual(steps["odoo_assign_advisor"]["user_id"], 42)
         self.assertEqual(steps["odoo_chatter"]["message_id"], 9001)
+        self.assertEqual(steps["odoo_fleet_vin"]["status"], "skipped")
         self.assertEqual(steps["whatsapp"]["status"], "ok")
 
         trade.value.assert_called_once()
@@ -139,6 +146,7 @@ class TestAutosellPipeline(unittest.TestCase):
         wa.send_text_message.assert_called_once()
         self.assertEqual(wa.send_text_message.call_args.args[0], "6141234567")
 
+    @unittest.skipUnless(_HAS_REPORTLAB, "reportlab not installed")
     def test_pdf_attached_to_lead(self):
         quote_engine = MagicMock(spec=CalibratedQuoteEngine)
         quote_engine.calculate.return_value = _sample_quote(
@@ -196,6 +204,109 @@ class TestAutosellPipeline(unittest.TestCase):
         steps = {s["step"]: s for s in result.steps}
         self.assertEqual(steps["pdf_spec_sheet"]["status"], "ok")
         self.assertEqual(steps["odoo_follow_up"]["activity_id"], 777)
+
+    def test_fleet_vin_linked_to_lead(self):
+        """Next pipeline step after Meta-blocked WA: attach fleet VIN on create."""
+        quote_engine = MagicMock(spec=CalibratedQuoteEngine)
+        quote_engine.calculate.return_value = _sample_quote(
+            net_trade_in_equity=Decimal("0.00"),
+            cash_down_payment=Decimal("30000.00"),
+            down_payment=Decimal("30000.00"),
+        )
+        odoo = MagicMock()
+        odoo.authenticate.return_value = 1
+        odoo.create_or_update_lead.return_value = QuoteLeadResult(
+            lead_id=501, activity_id=1, tag_ids=()
+        )
+        odoo.post_quote_to_chatter.return_value = 1
+        odoo.link_fleet_vehicle_to_lead.return_value = FleetLinkResult(
+            ok=True,
+            lead_id=501,
+            vehicle_id=9,
+            vin="JM3KFBCM5L0123456",
+            linked_via="x_vin",
+            dry_run=False,
+        )
+        wa = MagicMock()
+        wa.format_quote_message.return_value = "msg"
+        pipeline = AutosellPipeline(
+            quote_engine=quote_engine,
+            odoo=odoo,
+            whatsapp=wa,
+            assign_advisor=False,
+            dispatch_whatsapp=False,
+            attach_pdf=False,
+        )
+        result = pipeline.process_lead(
+            {
+                "name": "Ana",
+                "phone": "6141234567",
+                "vehicle_name": "Mazda CX-5 2020",
+                "vehicle_price": 300000,
+                "term_months": 36,
+                "branch_id": 1,
+                "sku": "obj969",
+                "vin": "JM3KFBCM5L0123456",
+                "channel": "Voice / Phone",
+            }
+        )
+        self.assertTrue(result.ok, result.error)
+        odoo.link_fleet_vehicle_to_lead.assert_called_once()
+        call_kw = odoo.link_fleet_vehicle_to_lead.call_args
+        self.assertEqual(call_kw.args[0], 501)
+        self.assertEqual(call_kw.kwargs.get("vin"), "JM3KFBCM5L0123456")
+        steps = {s["step"]: s for s in result.steps}
+        self.assertEqual(steps["odoo_fleet_vin"]["status"], "ok")
+        self.assertEqual(steps["odoo_fleet_vin"]["linked_via"], "x_vin")
+        self.assertEqual(steps["odoo_fleet_vin"]["vin"], "JM3KFBCM5L0123456")
+
+    def test_fleet_vin_dry_run_flag(self):
+        quote_engine = MagicMock(spec=CalibratedQuoteEngine)
+        quote_engine.calculate.return_value = _sample_quote(
+            net_trade_in_equity=Decimal("0.00"),
+            cash_down_payment=Decimal("30000.00"),
+            down_payment=Decimal("30000.00"),
+        )
+        odoo = MagicMock()
+        odoo.authenticate.return_value = 1
+        odoo.create_or_update_lead.return_value = QuoteLeadResult(
+            lead_id=55, activity_id=1, tag_ids=()
+        )
+        odoo.post_quote_to_chatter.return_value = 1
+        odoo.link_fleet_vehicle_to_lead.return_value = FleetLinkResult(
+            ok=True,
+            lead_id=55,
+            vin="ABC123VIN",
+            linked_via="dry_run",
+            dry_run=True,
+        )
+        pipeline = AutosellPipeline(
+            quote_engine=quote_engine,
+            odoo=odoo,
+            whatsapp=MagicMock(),
+            assign_advisor=False,
+            dispatch_whatsapp=False,
+            attach_pdf=False,
+        )
+        result = pipeline.process_lead(
+            {
+                "name": "Luis",
+                "phone": "6149998877",
+                "vehicle_name": "CX-5",
+                "vehicle_price": 300000,
+                "term_months": 36,
+                "branch_id": 1,
+                "vin": "ABC123VIN",
+                "odoo_dry_run": True,
+            }
+        )
+        self.assertTrue(result.ok, result.error)
+        self.assertTrue(
+            odoo.link_fleet_vehicle_to_lead.call_args.kwargs.get("dry_run")
+        )
+        steps = {s["step"]: s for s in result.steps}
+        self.assertEqual(steps["odoo_fleet_vin"]["status"], "ok")
+        self.assertTrue(steps["odoo_fleet_vin"]["dry_run"])
 
     def test_soft_capture_skips_quote_pdf(self):
         odoo = MagicMock()

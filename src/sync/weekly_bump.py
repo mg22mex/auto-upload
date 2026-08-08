@@ -1,4 +1,4 @@
-"""Alternate weekly Marketplace bump: renew one week, full repost the next."""
+"""Marketplace bump schedule: prefer full repost/relist; renew optional."""
 from __future__ import annotations
 
 from datetime import datetime
@@ -7,20 +7,25 @@ from zoneinfo import ZoneInfo
 
 DEFAULT_TIMEZONE = "America/Chihuahua"
 VALID_MODES = frozenset({"renew", "repost"})
+# Relist-first: both ISO weeks default to full delete+recreate.
+DEFAULT_EVEN_WEEK = "repost"
+DEFAULT_ODD_WEEK = "repost"
+DEFAULT_MIN_AGE_DAYS = 3
 
 
 def resolve_weekly_bump_mode(
     now: datetime | None = None,
     *,
     timezone: str = DEFAULT_TIMEZONE,
-    even_week: str = "renew",
-    odd_week: str = "repost",
+    even_week: str = DEFAULT_EVEN_WEEK,
+    odd_week: str = DEFAULT_ODD_WEEK,
     force_mode: str | None = None,
 ) -> str:
     """Pick renew vs repost from ISO week number (or an explicit override).
 
-    Even ISO weeks → ``even_week`` (default renew).
-    Odd ISO weeks → ``odd_week`` (default repost).
+    Defaults favor **repost** every week (even and odd both ``repost``).
+    Operators can still alternate by setting ``even_week`` / ``odd_week``
+    differently, or force ``renew`` | ``repost`` | ``auto``.
     """
     if force_mode:
         mode = str(force_mode).strip().lower()
@@ -48,12 +53,29 @@ def resolve_weekly_bump_mode(
 
 
 def weekly_bump_config(config: dict[str, Any] | None) -> dict[str, Any]:
-    """Read ``sync.weekly_bump`` with safe defaults."""
+    """Read ``sync.weekly_bump`` with relist-first safe defaults."""
     sync = (config or {}).get("sync") or {}
     bump = sync.get("weekly_bump") or {}
+    repost = sync.get("repost") or {}
+    renew = sync.get("renew") or {}
+    min_age = (
+        bump.get("min_age_days")
+        if bump.get("min_age_days") is not None
+        else repost.get("min_age_days")
+        if repost.get("min_age_days") is not None
+        else renew.get("min_age_days")
+        if renew.get("min_age_days") is not None
+        else DEFAULT_MIN_AGE_DAYS
+    )
     return {
         "timezone": str(bump.get("timezone") or DEFAULT_TIMEZONE),
-        "even_week": str(bump.get("even_week") or "renew"),
-        "odd_week": str(bump.get("odd_week") or "repost"),
-        "schedule": str(bump.get("schedule") or sync.get("renew", {}).get("schedule") or ""),
+        "even_week": str(bump.get("even_week") or DEFAULT_EVEN_WEEK),
+        "odd_week": str(bump.get("odd_week") or DEFAULT_ODD_WEEK),
+        "schedule": str(
+            bump.get("schedule")
+            or repost.get("schedule")
+            or renew.get("schedule")
+            or ""
+        ),
+        "min_age_days": int(min_age),
     }

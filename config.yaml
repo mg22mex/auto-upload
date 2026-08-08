@@ -13,25 +13,27 @@ sync:
   active_accounts:
     - account_1
     - account_2
-  # Weekly bump: even ISO weeks = Renovar; odd = full repost (new URL).
-  # Cron: Sunday 09:00 America/Chihuahua via .github/workflows/repost.yml
+  # Listing bump: relist-first (full delete+recreate). Cron Wed + Sun 09:00 Chihuahua.
+  # renew remains optional via weekly_bump.even_week / --mode renew.
   weekly_bump:
     timezone: America/Chihuahua
-    even_week: renew
+    even_week: repost
     odd_week: repost
-    schedule: "0 15 * * 0"
+    min_age_days: 3
+    schedule: "0 15 * * 0,3"  # Sun + Wed 15:00 UTC ≈ 09:00 America/Chihuahua
   renew:
-    min_age_days: 7
+    min_age_days: 3
     max_per_account_per_run: 25
     restart_browser_every: 10  # close/reopen Chromium to limit VPS RAM flake
     max_browser_reopens: 5
-    schedule: "0 15 * * 0"  # Sunday 09:00 America/Chihuahua (UTC-6)
-  # Full delete+recreate (slow; auto on odd ISO weeks, or run_repost.py manually)
+    schedule: "0 15 * * 0,3"
+  # Full delete+recreate (primary bump path; listings ≥ min_age_days old)
   repost:
-    min_age_days: 7
+    min_age_days: 3
     max_per_account_per_run: 5  # smaller batches; browser restarts every N below
     restart_browser_every: 3
     max_browser_reopens: 5
+    schedule: "0 15 * * 0,3"
 
 facebook:
   location_city: Chihuahua

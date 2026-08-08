@@ -13,14 +13,14 @@ DRY_RUN=false
 # Override active accounts (comma-separated); default from config.yaml
 # SYNC_ACCOUNTS=account_1,account_2
 
-# Weekly renew (Renovar — same URL). Full delete+create = run_repost.py
-RENEW_MIN_AGE_DAYS=7
+# Listing bump: primary path is full repost/relist (3-day age). Renew is optional.
+RENEW_MIN_AGE_DAYS=3
 RENEW_MAX_PER_ACCOUNT_PER_RUN=25
 FB_RENEW_DELAY_MIN_SEC=20
 FB_RENEW_DELAY_MAX_SEC=40
 
-# Optional: full recreate repost (manual)
-REPOST_MIN_AGE_DAYS=7
+# Full recreate repost (primary via run_weekly_bump.py / run_repost.py)
+REPOST_MIN_AGE_DAYS=3
 REPOST_MAX_PER_ACCOUNT_PER_RUN=10
 
 MAX_POSTS_PER_ACCOUNT_PER_RUN=10

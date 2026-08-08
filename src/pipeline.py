@@ -354,6 +354,57 @@ class AutosellPipeline:
                         }
                     )
 
+            # 3c) Fleet VIN / plate → lead (non-fatal; independent of Meta WA)
+            vin = str(
+                lead_data.get("vin") or lead_data.get("vin_sn") or ""
+            ).strip()
+            plate = str(
+                lead_data.get("plate") or lead_data.get("license_plate") or ""
+            ).strip()
+            fleet_vehicle_id = lead_data.get("fleet_vehicle_id")
+            want_fleet = bool(lead_data.get("link_fleet", True)) and bool(
+                vin or plate or fleet_vehicle_id is not None
+            )
+            if want_fleet:
+                try:
+                    fleet_result = self.odoo.link_fleet_vehicle_to_lead(
+                        lead_id,
+                        vin=vin or None,
+                        plate=plate or None,
+                        vehicle_id=(
+                            int(fleet_vehicle_id)
+                            if fleet_vehicle_id is not None
+                            else None
+                        ),
+                        dry_run=bool(lead_data.get("odoo_dry_run", False)),
+                    )
+                    log.append(
+                        {
+                            "step": "odoo_fleet_vin",
+                            "status": (
+                                "ok"
+                                if getattr(fleet_result, "ok", False)
+                                else "error"
+                            ),
+                            "lead_id": lead_id,
+                            "vehicle_id": getattr(fleet_result, "vehicle_id", None),
+                            "vin": getattr(fleet_result, "vin", vin),
+                            "linked_via": getattr(fleet_result, "linked_via", ""),
+                            "dry_run": getattr(fleet_result, "dry_run", False),
+                            "error": getattr(fleet_result, "error", None),
+                        }
+                    )
+                except Exception as exc:
+                    log.append(
+                        {
+                            "step": "odoo_fleet_vin",
+                            "status": "error",
+                            "error": str(exc),
+                        }
+                    )
+            else:
+                log.append({"step": "odoo_fleet_vin", "status": "skipped"})
+
             # 4) PDF spec sheet → disk + ir.attachment on crm.lead
             want_pdf = self.attach_pdf and bool(lead_data.get("generate_pdf", True))
             if want_pdf:

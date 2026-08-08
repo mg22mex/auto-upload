@@ -7,7 +7,12 @@ import os
 from pathlib import Path
 from typing import Any, Callable
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover
+    def load_dotenv(*_a: Any, **_k: Any) -> bool:
+        return False
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 

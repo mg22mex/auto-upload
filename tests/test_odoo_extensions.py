@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -14,7 +14,13 @@ if str(ROOT) not in sys.path:
 
 from src.odoo_sync.client import OdooCRMClient
 from src.odoo_sync.fleet import FleetVehicle
-from src.odoo_sync.whatsapp import STANDARD_WHATSAPP_TEMPLATES, WhatsAppSendResult
+from src.odoo_sync.whatsapp import (
+    PRIMARY_BRANCH,
+    STANDARD_WHATSAPP_TEMPLATES,
+    WhatsAppSendResult,
+    parse_wa_account_id,
+    resolve_whatsapp_account,
+)
 
 
 def _client(models: MagicMock | None = None, *, dry_run: bool = False) -> OdooCRMClient:
@@ -36,6 +42,31 @@ class TestWhatsAppTemplates(unittest.TestCase):
     def test_standard_template_aliases(self):
         self.assertIn("sale_order", STANDARD_WHATSAPP_TEMPLATES)
         self.assertIn("Sale Order", STANDARD_WHATSAPP_TEMPLATES["sale_order"])
+
+    def test_parse_wa_account_placeholder(self):
+        self.assertIsNone(parse_wa_account_id(None))
+        self.assertIsNone(parse_wa_account_id(""))
+        self.assertIsNone(parse_wa_account_id("None"))
+        self.assertIsNone(parse_wa_account_id("null"))
+        self.assertEqual(parse_wa_account_id("42"), 42)
+
+    def test_san_felipe_falls_back_to_periferico(self):
+        accounts = {PRIMARY_BRANCH: 101, "san_felipe": None}
+        branch, account_id, fell_back = resolve_whatsapp_account(
+            "san_felipe", accounts=accounts
+        )
+        self.assertEqual(branch, PRIMARY_BRANCH)
+        self.assertEqual(account_id, 101)
+        self.assertTrue(fell_back)
+
+    def test_san_felipe_uses_own_account_when_configured(self):
+        accounts = {PRIMARY_BRANCH: 101, "san_felipe": 202}
+        branch, account_id, fell_back = resolve_whatsapp_account(
+            "san_felipe", accounts=accounts
+        )
+        self.assertEqual(branch, "san_felipe")
+        self.assertEqual(account_id, 202)
+        self.assertFalse(fell_back)
 
     def test_send_whatsapp_template_payload(self):
         models = MagicMock()
@@ -62,15 +93,25 @@ class TestWhatsAppTemplates(unittest.TestCase):
 
         models.execute_kw.side_effect = execute_kw
         client = _client(models)
-        result = client.send_whatsapp_template(
-            501,
-            "Sale Order",
-            variables={"order": "S00120", "amount": "399000"},
-        )
+        with patch.dict(
+            "os.environ",
+            {"ODOO_WA_ACCOUNT_PERIFERICO": "101", "ODOO_WA_ACCOUNT_SAN_FELIPE": ""},
+            clear=False,
+        ):
+            result = client.send_whatsapp_template(
+                501,
+                "Sale Order",
+                variables={"order": "S00120", "amount": "399000"},
+                branch="periferico",
+            )
         self.assertIsInstance(result, WhatsAppSendResult)
         self.assertTrue(result.ok)
         self.assertEqual(result.composer_id, 200)
+        self.assertEqual(result.branch, PRIMARY_BRANCH)
+        self.assertEqual(result.wa_account_id, 101)
+        self.assertFalse(result.fell_back)
         self.assertEqual(created["composer"]["wa_template_id"], 11)
+        self.assertEqual(created["composer"]["wa_account_id"], 101)
         self.assertEqual(created["composer"]["res_model"], "crm.lead")
         self.assertEqual(created["composer"]["partner_ids"], [(6, 0, [55])])
         self.assertIn("order: S00120", created["composer"]["body"])
@@ -96,6 +137,34 @@ class TestWhatsAppTemplates(unittest.TestCase):
         result = client.send_whatsapp_template(1, "Invoice")
         self.assertTrue(result.ok)
         self.assertTrue(result.dry_run)
+        self.assertEqual(result.branch, PRIMARY_BRANCH)
+        models.execute_kw.assert_not_called()
+
+    def test_san_felipe_branch_dry_run_falls_back_to_periferico(self):
+        """san_felipe unconfigured → soft fall back to Periférico; dry-run still OK."""
+        models = MagicMock()
+        client = _client(models, dry_run=True)
+        with patch.dict(
+            "os.environ",
+            {
+                "ODOO_WA_ACCOUNT_PERIFERICO": "101",
+                "ODOO_WA_ACCOUNT_SAN_FELIPE": "None",
+            },
+            clear=False,
+        ):
+            result = client.send_whatsapp_template(
+                1,
+                "payment_link",
+                variables={"url": "https://pay.example/x"},
+                branch="san_felipe",
+            )
+        self.assertTrue(result.ok)
+        self.assertTrue(result.dry_run)
+        self.assertEqual(result.branch, PRIMARY_BRANCH)
+        self.assertEqual(result.wa_account_id, 101)
+        self.assertTrue(result.fell_back)
+        self.assertEqual(result.template_name, "payment_link")
+        self.assertEqual(result.message_id, -1)
         models.execute_kw.assert_not_called()
 
 

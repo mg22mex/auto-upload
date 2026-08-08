@@ -13,9 +13,18 @@ if str(ROOT) not in sys.path:
 
 from src.pipeline import PipelineResult
 from src.voice_gateway.intent import VOICE_CHANNEL
-from src.voice_gateway.webhook import create_app, parse_voice_lead_payload
+
+try:
+    from src.voice_gateway.webhook import create_app, parse_voice_lead_payload
+
+    _HAS_WEBHOOK_DEPS = True
+except ImportError:  # pragma: no cover — minimal env without fastapi/dotenv
+    create_app = None  # type: ignore[assignment]
+    parse_voice_lead_payload = None  # type: ignore[assignment]
+    _HAS_WEBHOOK_DEPS = False
 
 
+@unittest.skipUnless(_HAS_WEBHOOK_DEPS, "fastapi/dotenv not installed")
 class TestParseVoiceLeadPayload(unittest.TestCase):
     def test_full_payload(self):
         lead = parse_voice_lead_payload(
@@ -98,6 +107,7 @@ class TestParseVoiceLeadPayload(unittest.TestCase):
             )
 
 
+@unittest.skipUnless(_HAS_WEBHOOK_DEPS, "fastapi/dotenv not installed")
 class TestVoiceWebhookHTTP(unittest.TestCase):
     def test_post_returns_200_json(self):
         try:

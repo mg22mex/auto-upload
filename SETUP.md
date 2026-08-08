@@ -43,12 +43,12 @@ The workflow symlinks `data/` and `sessions/` to `~/auto-upload-data/` so `sync.
 
 **Not suitable:** Hugging Face Spaces, Streamlit Cloud, Render/Railway free tiers — they sleep and cannot keep Facebook browser sessions.
 
-**Scheduling:** GitHub Actions cron triggers sync (2× daily) and weekly listing bump (Sunday — even ISO week renew / odd week full repost). You do not need cron on the worker itself.
+**Scheduling:** GitHub Actions cron triggers sync (2× daily) and listing bump (Wed + Sun — default **repost/relist** for listings ≥3 days old). You do not need cron on the worker itself.
 
 | Workflow | Schedule (Chihuahua) | Purpose |
 |----------|----------------------|---------|
 | `sync.yml` | 08:00 & 12:00 daily | New cars, price updates, removals |
-| `repost.yml` (Weekly renew) | **Sunday 09:00** | Native **Renovar** (same URL; respects holds) |
+| `repost.yml` (listing bump) | **Wed + Sun 09:00** | Full **relist/repost** (≥3d; default). Optional `--mode renew` |
 
 ---
 
@@ -344,20 +344,20 @@ python run_sync.py --accounts account_1
 python run_sync.py --dry-run
 ```
 
-### E5. Renew vs repost
+### E5. Relist (repost) vs renew
 
-**Weekly default = Renovar** (same item URL — ads-safe, fast):
+**Default bump = full repost/relist** (new URL after ~3 days — keeps feed momentum):
 
 ```bash
-# Alternating Sunday bump (even week=renew, odd=repost)
+# Default (repost both week types; min age 3d from config/env)
 python scripts/run_weekly_bump.py --all-eligible --dry-run
-python scripts/run_weekly_bump.py --mode renew --account account_2 --ids obj1137
 python scripts/run_weekly_bump.py --mode repost --account account_2 --ids obj1126
+# Optional native Renovar (same URL)
+python scripts/run_weekly_bump.py --mode renew --account account_2 --ids obj1137
 
 # Direct scripts
+python scripts/run_repost.py --account account_1 --all-eligible --older-than 3 --dry-run
 python scripts/run_renew.py --account account_2 --ids obj1137 --dry-run
-python scripts/run_renew.py --account account_1 --all-eligible --max 25
-python scripts/run_repost.py --account account_2 --ids obj1126
 ```
 
 **Protect listings during FB ads:**
@@ -366,10 +366,10 @@ python scripts/run_repost.py --account account_2 --ids obj1126
 python scripts/fb_repost_hold.py add obj1126 --account account_2 --until 2026-07-25 --reason fb_ads
 ```
 
-| Flow | URL | Speed | Weekly job |
-|------|-----|-------|------------|
-| Renovar | Same | Seconds | Even ISO weeks (`run_weekly_bump.py`) |
-| Full repost | New | Minutes | Odd ISO weeks (`run_weekly_bump.py`) |
+| Flow | URL | Speed | Bump job |
+|------|-----|-------|----------|
+| Full repost (relist) | New | Minutes | **Default** Wed+Sun (`run_weekly_bump.py`) |
+| Renovar | Same | Seconds | Optional `--mode renew` |
 | Extension + URL update | New | Manual | After Chrome extension |
 | FB “eliminar y volver a publicar” | New (when eligible) | — | Not offered for our stock (count 0) |
 
@@ -396,8 +396,11 @@ pip install -r requirements.txt   # fastapi, uvicorn, python-dotenv, …
 # .env must include:
 #   ODOO_URL ODOO_DB ODOO_USERNAME|ODOO_USER ODOO_API_KEY|ODOO_PASSWORD
 #   FB_VERIFY_TOKEN FB_PAGE_ACCESS_TOKEN
-# Optional: ODOO_DRY_RUN=true (calendar / WA templates / fleet / attachments plan-only)
-# Modular Odoo helpers: src/odoo_sync/{client,whatsapp,fleet,documents}.py
+# Optional: ODOO_DRY_RUN=true (CRM / calendar / quotes / WA / fleet plan-only)
+# Teams: ODOO_TEAM_PERIFERICO, ODOO_TEAM_SAN_FELIPE
+# Native WA paused — leave ODOO_WA_ACCOUNT_* unset until Meta Manager credentials
+# Modular: src/odoo_sync/{client,crm,quotes,triggers,whatsapp,fleet,documents}.py
+# Tests: python -m unittest tests.test_crm_leads tests.test_quotes tests.test_triggers -q
 test -x .venv/bin/uvicorn && .venv/bin/python -c "import dotenv, fastapi, uvicorn; print('deps OK')"
 ```
 

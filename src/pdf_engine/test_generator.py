@@ -11,7 +11,14 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.pdf_engine.generator import (
+try:
+    import reportlab  # noqa: F401
+
+    _HAS_REPORTLAB = True
+except ImportError:
+    _HAS_REPORTLAB = False
+
+from src.pdf_engine.generator import (  # noqa: E402
     PdfEngineError,
     build_quote_pdf_bytes,
     generate_vehicle_quote_pdf,
@@ -43,6 +50,7 @@ VEHICLE = {
 }
 
 
+@unittest.skipUnless(_HAS_REPORTLAB, "reportlab not installed")
 class TestBuildQuotePdf(unittest.TestCase):
     def test_returns_non_empty_pdf_bytes(self):
         pdf = build_quote_pdf_bytes(QUOTE, VEHICLE)
@@ -68,6 +76,7 @@ class TestBuildQuotePdf(unittest.TestCase):
             build_quote_pdf_bytes("bad", VEHICLE)  # type: ignore[arg-type]
 
 
+@unittest.skipUnless(_HAS_REPORTLAB, "reportlab not installed")
 class TestGenerateVehicleQuotePdf(unittest.TestCase):
     def test_writes_file_and_returns_path(self):
         with tempfile.TemporaryDirectory() as tmp:

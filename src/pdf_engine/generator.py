@@ -7,22 +7,40 @@ from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 
-from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
-from reportlab.lib.pagesizes import letter
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.units import inch
-from reportlab.platypus import (
-    Paragraph,
-    SimpleDocTemplate,
-    Spacer,
-    Table,
-    TableStyle,
-)
+try:
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import inch
+    from reportlab.platypus import (
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
+        Table,
+        TableStyle,
+    )
+
+    _HAS_REPORTLAB = True
+except ImportError:  # pragma: no cover - optional in minimal test envs
+    colors = None  # type: ignore[assignment]
+    TA_CENTER = TA_LEFT = TA_RIGHT = None  # type: ignore[assignment]
+    letter = None  # type: ignore[assignment]
+    ParagraphStyle = getSampleStyleSheet = None  # type: ignore[assignment]
+    inch = None  # type: ignore[assignment]
+    Paragraph = SimpleDocTemplate = Spacer = Table = TableStyle = None  # type: ignore[assignment]
+    _HAS_REPORTLAB = False
 
 
 class PdfEngineError(RuntimeError):
     """Raised when PDF generation fails."""
+
+
+def _require_reportlab() -> None:
+    if not _HAS_REPORTLAB:
+        raise PdfEngineError(
+            "reportlab is not installed; run: pip install reportlab"
+        )
 
 
 def _money(value: Any) -> str:
@@ -94,14 +112,22 @@ def _styles() -> dict[str, ParagraphStyle]:
 
 
 def _header_table(styles: dict[str, ParagraphStyle], contact: dict[str, Any]) -> Table:
-    brand = Paragraph("<b>Autosell MX</b>", styles["brand"])
-    tagline = Paragraph("Cotización / ficha técnica de vehículo", styles["sub"])
+    brand_name = _text(contact.get("brand") or contact.get("company"), "Autosell MX")
+    branch_name = _text(contact.get("branch_label") or contact.get("branch"), "")
+    brand = Paragraph(f"<b>{brand_name}</b>", styles["brand"])
+    if branch_name and branch_name != "—":
+        tagline = Paragraph(
+            f"Cotización · Sucursal <b>{branch_name}</b>",
+            styles["sub"],
+        )
+    else:
+        tagline = Paragraph("Cotización / ficha técnica de vehículo", styles["sub"])
     left = [brand, tagline]
     right_lines = [
         _text(contact.get("phone"), "Tel. (614) —"),
         _text(contact.get("email"), "contacto@autosell.mx"),
         _text(contact.get("web"), "https://www.autosell.mx"),
-        _text(contact.get("city"), "Chihuahua, MX"),
+        _text(contact.get("city") or contact.get("address"), "Chihuahua, MX"),
     ]
     right = Paragraph("<br/>".join(right_lines), styles["right"])
     table = Table([[left, right]], colWidths=[4.2 * inch, 2.8 * inch])
@@ -187,6 +213,7 @@ def build_quote_pdf_bytes(
     valid_days: int = 7,
 ) -> bytes:
     """Render a one-page Autosell quote / spec sheet PDF."""
+    _require_reportlab()
     if not isinstance(quote_data, dict) or not isinstance(vehicle_data, dict):
         raise PdfEngineError("quote_data and vehicle_data must be dicts")
 
@@ -276,7 +303,8 @@ def build_quote_pdf_bytes(
                 styles["footer"],
             ),
             Paragraph(
-                "Autosell MX · Chihuahua · autosell.mx",
+                f"Autosell MX · {_text(contact.get('branch_label') or contact.get('city'), 'Chihuahua')} "
+                f"· autosell.mx",
                 styles["footer"],
             ),
         ]

@@ -60,7 +60,7 @@ def main() -> int:
     parser.add_argument(
         "--older-than",
         default=None,
-        help="Min days since last post for --all-eligible (default: 7 or config)",
+        help="Min days since last post for --all-eligible (default: 3 or config)",
     )
     parser.add_argument(
         "--max",
@@ -86,7 +86,7 @@ def main() -> int:
     older_than = parse_older_than_days(
         args.older_than
         or os.getenv("REPOST_MIN_AGE_DAYS")
-        or str(repost_cfg.get("min_age_days", 7))
+        or str(repost_cfg.get("min_age_days", 3))
     )
     max_per = args.max
     if max_per is None:

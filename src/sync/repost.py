@@ -3,6 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from src.models import SyncAction, Vehicle
+from src.sync.weekly_bump import DEFAULT_MIN_AGE_DAYS
+
+# Live listings at least this old are eligible for relist/repost (and renew).
+DEFAULT_REPOST_MIN_AGE_DAYS = DEFAULT_MIN_AGE_DAYS
 
 
 def parse_older_than_days(raw: str) -> int:
@@ -31,13 +35,21 @@ def plan_repost_actions(
     *,
     explicit_ids: set[str] | None = None,
     all_eligible: bool = False,
-    older_than_days: int = 7,
+    older_than_days: int = DEFAULT_REPOST_MIN_AGE_DAYS,
     max_per_account: int = 10,
     is_on_hold,
     force: bool = False,
     action_name: str = "repost",
 ) -> tuple[list[SyncAction], list[str]]:
-    """Plan repost/renew actions. is_on_hold(autosell_id, account_id) -> bool."""
+    """Plan repost/renew actions for live listings.
+
+    With ``all_eligible=True``, only rows with
+    ``now - posted_at >= older_than_days`` (default 3) are planned.
+    ``action_name='repost'`` means full delete+recreate (relist);
+    ``'renew'`` is FB native Renovar (same URL). Prefer repost for momentum.
+
+    ``is_on_hold(autosell_id, account_id) -> bool``.
+    """
     if not explicit_ids and not all_eligible:
         raise ValueError("Specify explicit_ids or all_eligible=True")
     if action_name not in ("repost", "renew"):

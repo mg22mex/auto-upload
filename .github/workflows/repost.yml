@@ -1,13 +1,14 @@
-name: Weekly Facebook renew / repost
+name: Facebook relist / repost bump
 
 on:
   schedule:
-    # Sunday 09:00 America/Chihuahua (UTC-6) ≈ 15:00 UTC
-    - cron: "0 15 * * 0"
+    # Wed + Sun 09:00 America/Chihuahua (UTC-6) ≈ 15:00 UTC
+    # Aligns with ~3-day min age so listings are relisted promptly
+    - cron: "0 15 * * 0,3"
   workflow_dispatch:
     inputs:
       mode:
-        description: "auto = alternate weeks (even=renew, odd=repost); or force"
+        description: "auto = config (default repost both weeks); or force renew/repost"
         required: false
         default: auto
         type: choice
@@ -34,10 +35,10 @@ on:
         type: string
 
 jobs:
-  weekly-bump:
-    name: Alternating renew / full repost (account_1 + account_2)
+  listing-bump:
+    name: Relist (repost) live listings ≥3d (account_1 + account_2)
     runs-on: [self-hosted, fb-worker]
-    # Repost weeks are slow (full create); renew weeks finish much faster
+    # Full recreate is slow; twice-weekly batches still need headroom
     timeout-minutes: 180
 
     steps:
@@ -82,7 +83,7 @@ jobs:
           AUTOSELL_BASE_URL: ${{ secrets.AUTOSELL_BASE_URL }}
         run: python run_sync.py --scrape-only --output data/catalog_latest.json
 
-      - name: Resolve bump mode (even ISO week=renew, odd=repost)
+      - name: Resolve bump mode (default: repost)
         id: mode
         run: |
           set -eux
@@ -105,13 +106,13 @@ jobs:
           PY
           )
           echo "resolved=${RESOLVED}" >> "$GITHUB_OUTPUT"
-          echo "Weekly bump mode: ${RESOLVED} (input=${MODE_INPUT})"
+          echo "Listing bump mode: ${RESOLVED} (input=${MODE_INPUT})"
 
-      - name: Weekly renew or full repost
+      - name: Relist (repost) or optional renew
         env:
           AUTOSELL_BASE_URL: ${{ secrets.AUTOSELL_BASE_URL }}
-          RENEW_MIN_AGE_DAYS: ${{ secrets.RENEW_MIN_AGE_DAYS || secrets.REPOST_MIN_AGE_DAYS || '7' }}
-          REPOST_MIN_AGE_DAYS: ${{ secrets.REPOST_MIN_AGE_DAYS || secrets.RENEW_MIN_AGE_DAYS || '7' }}
+          RENEW_MIN_AGE_DAYS: ${{ secrets.RENEW_MIN_AGE_DAYS || secrets.REPOST_MIN_AGE_DAYS || '3' }}
+          REPOST_MIN_AGE_DAYS: ${{ secrets.REPOST_MIN_AGE_DAYS || secrets.RENEW_MIN_AGE_DAYS || '3' }}
           RENEW_MAX_PER_ACCOUNT_PER_RUN: ${{ inputs.max_per_account || secrets.RENEW_MAX_PER_ACCOUNT_PER_RUN || '25' }}
           REPOST_MAX_PER_ACCOUNT_PER_RUN: ${{ inputs.max_per_account || secrets.REPOST_MAX_PER_ACCOUNT_PER_RUN || '5' }}
           FB_REPOST_BROWSER_EVERY: ${{ secrets.FB_REPOST_BROWSER_EVERY || '3' }}

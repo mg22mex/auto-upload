@@ -1,9 +1,9 @@
-"""Unit tests — alternating weekly renew/repost mode."""
+"""Unit tests — relist-first listing bump + 3-day age eligibility."""
 from __future__ import annotations
 
 import sys
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -11,19 +11,60 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.models import Vehicle
+from src.sync.repost import plan_repost_actions
 from src.sync.weekly_bump import (
+    DEFAULT_EVEN_WEEK,
+    DEFAULT_MIN_AGE_DAYS,
+    DEFAULT_ODD_WEEK,
     resolve_weekly_bump_mode,
     weekly_bump_config,
 )
 
 
+def _vehicle(autosell_id: str) -> Vehicle:
+    return Vehicle(
+        autosell_id=autosell_id,
+        slug=autosell_id,
+        title=f"Model {autosell_id}",
+        brand="Audi",
+        year="2020",
+        price="100000",
+        mileage="10000 km",
+        version="",
+        url=f"https://www.autosell.mx/{autosell_id}",
+        image_urls=["https://example.com/a.jpg"],
+    )
+
+
+def _listing(
+    autosell_id: str,
+    account_id: str,
+    *,
+    posted_at: str,
+    status: str = "live",
+) -> dict:
+    return {
+        "autosell_id": autosell_id,
+        "account_id": account_id,
+        "fb_listing_url": f"https://www.facebook.com/marketplace/item/{autosell_id}/",
+        "status": status,
+        "content_hash": "abc",
+        "posted_at": posted_at,
+    }
+
+
 class TestResolveWeeklyBumpMode(unittest.TestCase):
-    def test_even_iso_week_is_renew(self):
-        # 2026-08-02 is ISO week 31 (odd) — use a known even week Sunday
+    def test_defaults_are_repost_both_weeks(self):
+        self.assertEqual(DEFAULT_EVEN_WEEK, "repost")
+        self.assertEqual(DEFAULT_ODD_WEEK, "repost")
+        self.assertEqual(DEFAULT_MIN_AGE_DAYS, 3)
+
+    def test_even_iso_week_is_repost(self):
         # 2026-08-09 is Sunday of ISO week 32 (even)
         when = datetime(2026, 8, 9, 9, 0, tzinfo=ZoneInfo("America/Chihuahua"))
         self.assertEqual(when.isocalendar().week % 2, 0)
-        self.assertEqual(resolve_weekly_bump_mode(when), "renew")
+        self.assertEqual(resolve_weekly_bump_mode(when), "repost")
 
     def test_odd_iso_week_is_repost(self):
         # 2026-08-02 Sunday → ISO week 31 (odd)
@@ -42,17 +83,22 @@ class TestResolveWeeklyBumpMode(unittest.TestCase):
             "repost",
         )
 
-    def test_force_auto_uses_calendar(self):
+    def test_force_auto_uses_calendar_defaults(self):
         when = datetime(2026, 8, 2, 9, 0, tzinfo=ZoneInfo("America/Chihuahua"))
         self.assertEqual(
             resolve_weekly_bump_mode(when, force_mode="auto"),
             "repost",
         )
 
-    def test_swapped_config(self):
+    def test_legacy_alternate_config_still_works(self):
         when = datetime(2026, 8, 9, 9, 0, tzinfo=ZoneInfo("America/Chihuahua"))
         self.assertEqual(
-            resolve_weekly_bump_mode(when, even_week="repost", odd_week="renew"),
+            resolve_weekly_bump_mode(when, even_week="renew", odd_week="repost"),
+            "renew",
+        )
+        when_odd = datetime(2026, 8, 2, 9, 0, tzinfo=ZoneInfo("America/Chihuahua"))
+        self.assertEqual(
+            resolve_weekly_bump_mode(when_odd, even_week="renew", odd_week="repost"),
             "repost",
         )
 
@@ -62,10 +108,11 @@ class TestResolveWeeklyBumpMode(unittest.TestCase):
 
 
 class TestWeeklyBumpConfig(unittest.TestCase):
-    def test_defaults(self):
+    def test_defaults_relist_first(self):
         cfg = weekly_bump_config({})
-        self.assertEqual(cfg["even_week"], "renew")
+        self.assertEqual(cfg["even_week"], "repost")
         self.assertEqual(cfg["odd_week"], "repost")
+        self.assertEqual(cfg["min_age_days"], 3)
         self.assertEqual(cfg["timezone"], "America/Chihuahua")
 
     def test_reads_nested(self):
@@ -73,15 +120,120 @@ class TestWeeklyBumpConfig(unittest.TestCase):
             {
                 "sync": {
                     "weekly_bump": {
-                        "even_week": "repost",
-                        "odd_week": "renew",
+                        "even_week": "renew",
+                        "odd_week": "repost",
+                        "min_age_days": 4,
                         "timezone": "UTC",
                     }
                 }
             }
         )
-        self.assertEqual(cfg["even_week"], "repost")
+        self.assertEqual(cfg["even_week"], "renew")
+        self.assertEqual(cfg["min_age_days"], 4)
         self.assertEqual(cfg["timezone"], "UTC")
+
+    def test_min_age_falls_back_to_repost_section(self):
+        cfg = weekly_bump_config({"sync": {"repost": {"min_age_days": 3}}})
+        self.assertEqual(cfg["min_age_days"], 3)
+
+
+class TestPlanRepostAgeFilter(unittest.TestCase):
+    """Listings older than 3 days → repost action; fresher skipped."""
+
+    def test_eligible_at_3_days_gets_repost(self):
+        now = datetime.now(timezone.utc)
+        live = [
+            _listing(
+                "obj_old",
+                "account_1",
+                posted_at=(now - timedelta(days=3, hours=1)).isoformat(),
+            ),
+            _listing(
+                "obj_new",
+                "account_1",
+                posted_at=(now - timedelta(days=1)).isoformat(),
+            ),
+        ]
+        vehicles = [_vehicle("obj_old"), _vehicle("obj_new")]
+        actions, skipped = plan_repost_actions(
+            vehicles,
+            ["account_1"],
+            live,
+            all_eligible=True,
+            older_than_days=3,
+            max_per_account=10,
+            is_on_hold=lambda *_: False,
+            action_name="repost",
+        )
+        ids = {a.autosell_id for a in actions}
+        self.assertEqual(ids, {"obj_old"})
+        self.assertTrue(all(a.action == "repost" for a in actions))
+        self.assertTrue(any("obj_new" in line and "min 3d" in line for line in skipped))
+
+    def test_exactly_3_days_is_eligible(self):
+        now = datetime.now(timezone.utc)
+        live = [
+            _listing(
+                "obj_edge",
+                "account_1",
+                posted_at=(now - timedelta(days=3)).isoformat(),
+            ),
+        ]
+        actions, skipped = plan_repost_actions(
+            [_vehicle("obj_edge")],
+            ["account_1"],
+            live,
+            all_eligible=True,
+            older_than_days=DEFAULT_MIN_AGE_DAYS,
+            max_per_account=5,
+            is_on_hold=lambda *_: False,
+            action_name="repost",
+        )
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0].action, "repost")
+        self.assertEqual(skipped, [])
+
+    def test_default_older_than_is_3_days(self):
+        now = datetime.now(timezone.utc)
+        live = [
+            _listing(
+                "obj_a",
+                "account_1",
+                posted_at=(now - timedelta(days=3, minutes=5)).isoformat(),
+            ),
+        ]
+        actions, _ = plan_repost_actions(
+            [_vehicle("obj_a")],
+            ["account_1"],
+            live,
+            all_eligible=True,
+            max_per_account=5,
+            is_on_hold=lambda *_: False,
+        )
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0].action, "repost")
+
+    def test_hold_skips_repost(self):
+        now = datetime.now(timezone.utc)
+        live = [
+            _listing(
+                "obj_hold",
+                "account_1",
+                posted_at=(now - timedelta(days=10)).isoformat(),
+            ),
+        ]
+        actions, skipped = plan_repost_actions(
+            [_vehicle("obj_hold")],
+            ["account_1"],
+            live,
+            all_eligible=True,
+            older_than_days=3,
+            max_per_account=5,
+            is_on_hold=lambda aid, acct: aid == "obj_hold",
+            action_name="repost",
+        )
+        self.assertEqual(actions, [])
+        self.assertTrue(any("hold" in line for line in skipped))
 
 
 if __name__ == "__main__":

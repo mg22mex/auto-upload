@@ -16,7 +16,14 @@ from src.meta_gateway.gateway import (
     parse_messenger_events,
 )
 from src.odoo_sync.client import QuoteLeadResult
-from src.voice_gateway.webhook import create_app
+
+try:
+    from src.voice_gateway.webhook import create_app
+
+    _HAS_WEBHOOK = True
+except ImportError:  # pragma: no cover
+    create_app = None  # type: ignore[assignment]
+    _HAS_WEBHOOK = False
 
 
 MESSENGER_PAYLOAD = {
@@ -129,6 +136,7 @@ class TestMetaGateway(unittest.TestCase):
         self.assertFalse(gateway.verify("unsubscribe", "correct"))
 
 
+@unittest.skipUnless(_HAS_WEBHOOK, "fastapi/dotenv not installed")
 class TestMetaWebhookHTTP(unittest.TestCase):
     def test_get_verification_and_post_ack(self):
         try:

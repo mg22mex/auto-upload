@@ -7,9 +7,9 @@ Sync [autosell.mx](https://www.autosell.mx) public catalog to **Facebook Marketp
 - **AI Voice & lead webhook:** Live. FastAPI `POST /webhook/voice-lead` (also `/voice/webhook`, `/voice/stream`) → intent/STT → quote → Odoo lead + 24h follow-up → optional test-drive calendar → PDF attachment → TTS text.
 - **Meta Messenger webhook:** `[WIP - Paused awaiting Fanpage Administrator permissions]`. FastAPI `GET`/`POST /webhook/facebook` + quote engine + Odoo lead/chatter + Graph reply are **100% complete in code**; only Meta Developers Page token / webhook subscription remains once Fanpage admin rights are granted.
 - **Scrape, diff & FB posting:** Live (`DRY_RUN=false`) for **account_1** and **account_2**. **account_3** excluded until old listings cleared.
-- **Weekly listing bump:** Alternating Sundays — even ISO week **Renovar**, odd week **full repost** (`scripts/run_weekly_bump.py`).
+- **Listing bump:** Wed + Sun — **full relist/repost** for listings ≥ **3 days** old (`scripts/run_weekly_bump.py`). Native Renovar optional via `--mode renew`.
 - **Odoo inventory sync:** Live. Catalog → upsert `product.template` (`default_code = autosell_id`); website-missing SKUs marked **sold** then soft-archived (`active=False`).
-- **Modular Odoo sync:** CRM + calendar, native WhatsApp templates, Fleet VIN mapping, and document attachments via `src/odoo_sync/`.
+- **Modular Odoo sync:** CRM lead manager (dedupe, branch teams, fleet location routing), quote PDF attach, stage/webhook triggers, Fleet VIN, documents. **Native Odoo WhatsApp templates:** code ready; **Meta Cloud API paused** (`ODOO_WA_ACCOUNT_*` unset until Manager credentials).
 
 📖 **[Full project guide](./docs/PROJECT_GUIDE.md)** · **[Setup](./SETUP.md)**
 
@@ -23,8 +23,8 @@ Sync [autosell.mx](https://www.autosell.mx) public catalog to **Facebook Marketp
 | **Vehicles** | ~130–134 public catalog from `autosell.mx` |
 | **FB accounts** | 3 sessions; **2 live** (`account_1`, `account_2`) |
 | **Target FB listings** | ~268 (134 × 2 active accounts) |
-| **Odoo** | Modular XML-RPC: CRM, calendar, WhatsApp templates, Fleet VIN, documents, inventory |
-| **Schedule** | 2× daily scrape + Odoo sync + FB sync; Sunday bump alternates renew/repost |
+| **Odoo** | Modular XML-RPC: CRM, calendar, fleet, PDF quotes, stage triggers, WA (paused), inventory |
+| **Schedule** | 2× daily scrape + Odoo sync + FB sync; Wed+Sun relist (≥3d age) |
 
 ## System overview
 
@@ -37,14 +37,15 @@ flowchart LR
     CALLER["AI Voice / caller"]
     VG["voice_gateway"]
     QE["quote_engine"]
-    ODOO["odoo_sync<br/>CRM · Calendar · WA · Fleet · Docs"]
+    ODOO["odoo_sync<br/>CRM · Fleet · Quotes · Triggers"]
     LEAD["crm.lead"]
     CAL["calendar.event"]
-    WA["WhatsApp templates<br/>Sale Order / Payment Link"]
+    WA["WhatsApp templates<br/>(queued pending Meta)"]
     FLEET["fleet.vehicle VIN"]
     PDF["PDF / ir.attachment"]
     MSG["Page Messenger"]
     META["meta_gateway"]
+    TRG["triggers<br/>stage / webhook"]
 
     SC --> SNAP
     SNAP --> FB
@@ -53,6 +54,7 @@ flowchart LR
     CALLER --> VG
     VG --> QE
     QE --> ODOO
+    TRG --> ODOO
     ODOO --> LEAD
     ODOO --> CAL
     ODOO --> WA
@@ -62,7 +64,7 @@ flowchart LR
     META --> QE
 ```
 
-**Automated path:** FB reposter (catalog sync + weekly bump) ➔ Voice Gateway ➔ quote ➔ Odoo CRM / calendar ➔ WhatsApp templates & payment links ➔ Fleet VIN on lead ➔ PDF/documents on `ir.attachment`.
+**Automated path:** FB reposter (catalog + weekly bump) ➔ Voice / form / stage webhooks ➔ local quote math ➔ `CRMLeadManager` (dedupe + branch/location team) ➔ fleet VIN ➔ `QuotePDFManager` on stage `quoted`/`cotizado` ➔ WhatsApp template **queued** until Meta is live.
 
 Voice / Meta inbound and catalog / FB Marketplace paths share Odoo inventory but keep separate browser sessions. Quote math runs locally before any Odoo / WhatsApp / Messenger payload.
 
@@ -72,12 +74,13 @@ The FB planner only manages listings in **`sync.db`**. It does not scan Facebook
 
 | Job | Host | Action |
 |-----|------|--------|
-| **Voice webhook** | API host | Payload → quote → `crm.lead` + activity + optional test-drive calendar + PDF |
+| **Voice / form webhook** | API host | Quote → `CRMLeadManager` / pipeline → fleet VIN → PDF; stage triggers may queue WA |
+| **Odoo stage trigger** | API / worker | Stage `quoted`/`cotizado` → attach quote PDF → **queue** WA (Meta paused) |
 | **Meta webhook** | API host | Messenger event → quote → Odoo lead/chatter → Graph API reply |
 | **Catalog scrape** | GitHub Actions / `fb-worker` | `autosell.mx` → `catalog_latest.json` |
 | **Odoo inventory** | CI step / `fb-worker` | `sync_odoo_inventory.py` → upsert `product.template` |
 | **FB sync** | Self-hosted `fb-worker` | Diff → create / update / remove on active accounts |
-| **Repost / renew** | Weekly cron / `fb-worker` | Alternating Sundays: **even ISO week = Renovar**, **odd = full repost** |
+| **Repost / relist** | Wed+Sun cron / `fb-worker` | Listings ≥3d: mark sold → create new URL (default). Optional `--mode renew` |
 
 ## Key scripts
 
@@ -101,11 +104,30 @@ The FB planner only manages listings in **`sync.db`**. It does not scan Facebook
 | File | Role |
 |------|------|
 | `base.py` | Shared `OdooClient` session (`authenticate`, `execute_kw`, `ODOO_DRY_RUN`) |
-| `client.py` | `OdooCRMClient` — CRM leads, inventory, calendar test-drive, activities (+ all mixins) |
-| `whatsapp.py` | Native Odoo WhatsApp templates: Sale Order, Payment Link, Invoice, Payment Receipt |
-| `fleet.py` | `fleet.vehicle` by VIN/plate → link to `crm.lead` (`x_vin` or chatter) |
+| `client.py` | `OdooCRMClient` — CRM leads, inventory, calendar test-drive, activities (+ mixins) |
+| `crm.py` | **`CRMLeadManager`** — dict upsert, phone dedupe + chatter, `ODOO_TEAM_*` branch map, fleet location → team override |
+| `quotes.py` | **`QuotePDFManager`** — branch-branded PDF (ReportLab or fallback) + attach to lead chatter |
+| `triggers.py` | **`OdooTriggerManager`** / **`process_incoming_webhook`** — stage `quoted`/`cotizado` → PDF + WA queue; inbound forms/voice → CRM |
+| `whatsapp.py` | Native Odoo WhatsApp templates. **PAUSED:** Meta Manager pending — leave `ODOO_WA_ACCOUNT_*` unset |
+| `fleet.py` | `fleet.vehicle` by VIN/plate → lead; location fields for physical-site routing |
 | `documents.py` | `attach_document_to_lead` / `attach_file` via `ir.attachment` |
-| `crm.py` | Package slice marker (CRM APIs live on `OdooCRMClient`) |
+
+**Tests:** `tests/test_crm_leads.py`, `tests/test_quotes.py`, `tests/test_triggers.py`, `tests/test_odoo_extensions.py` (all dry-run / mocked XML-RPC friendly).
+
+```bash
+# Odoo automation dry-run (no live XML-RPC)
+python - <<'PY'
+from src.odoo_sync import process_incoming_webhook, OdooTriggerManager
+print(process_incoming_webhook({
+    "event": "lead_form",
+    "client_name": "Ana",
+    "phone": "6141234567",
+    "vehicle_info": "CX-5",
+    "trigger_quote": True,
+}, dry_run=True))
+PY
+python -m unittest tests.test_crm_leads tests.test_quotes tests.test_triggers -q
+```
 
 ### Facebook Marketplace
 
@@ -114,7 +136,7 @@ The FB planner only manages listings in **`sync.db`**. It does not scan Facebook
 | `run_sync.py` | Full sync (scrape + diff + FB; `sync.active_accounts`) |
 | `scripts/run_renew.py` | **Renovar** (same URL) |
 | `scripts/run_repost.py` | Full repost (sold → create → new URL) |
-| `scripts/run_weekly_bump.py` | Alternating Sunday job (even=renew, odd=repost) |
+| `scripts/run_weekly_bump.py` | Listing bump (default **repost/relist**; optional renew) |
 | `scripts/fb_repost_hold.py` | Skip renew/repost during FB ads |
 | `scripts/fb_login.py` | Headed login per account |
 | `scripts/fb_test_session.py` | Verify session |
@@ -188,5 +210,9 @@ gantt
         Meta Messenger webhook gateway    :done, p2e, 2026-07, 2026-07
     section Active
         Clear account_3 FB inventory      :active, p3a, 2026-07, 2026-08
+        Meta WA Cloud API account IDs     :active, p3wa, 2026-08, 2026-09
         Full automated production         :p3b, 2026-07, 2026-12
+    section Done (CRM automation)
+        CRM lead mgr + location teams     :done, p2f, 2026-08, 2026-08
+        Quote PDF manager + triggers      :done, p2g, 2026-08, 2026-08
 ```
