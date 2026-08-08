@@ -245,6 +245,35 @@ class SyncStore:
             return False
         return True
 
+    def mark_fb_listing_removed(
+        self,
+        autosell_id: str,
+        account_id: str,
+        *,
+        clear_url: bool = False,
+    ) -> None:
+        """Mark listing removed. Optionally null ``fb_listing_url`` (repost phase)."""
+        now = utc_now()
+        if clear_url:
+            self._conn.execute(
+                """
+                UPDATE fb_listings
+                SET status = 'removed', fb_listing_url = NULL, updated_at = ?
+                WHERE autosell_id = ? AND account_id = ?
+                """,
+                (now, autosell_id, account_id),
+            )
+        else:
+            self._conn.execute(
+                """
+                UPDATE fb_listings
+                SET status = 'removed', updated_at = ?
+                WHERE autosell_id = ? AND account_id = ?
+                """,
+                (now, autosell_id, account_id),
+            )
+        self._conn.commit()
+
     def record_repost(
         self,
         autosell_id: str,
@@ -253,15 +282,22 @@ class SyncStore:
         fb_listing_url: str,
         content_hash: str,
     ) -> None:
+        """Write new live URL after a successful repost (insert-or-update)."""
         now = utc_now()
         self._conn.execute(
             """
-            UPDATE fb_listings
-            SET fb_listing_url = ?, status = 'live', content_hash = ?,
-                posted_at = ?, updated_at = ?
-            WHERE autosell_id = ? AND account_id = ?
+            INSERT INTO fb_listings (
+                autosell_id, account_id, fb_listing_url, status, content_hash,
+                posted_at, updated_at
+            ) VALUES (?, ?, ?, 'live', ?, ?, ?)
+            ON CONFLICT(autosell_id, account_id) DO UPDATE SET
+                fb_listing_url = excluded.fb_listing_url,
+                status = 'live',
+                content_hash = excluded.content_hash,
+                posted_at = excluded.posted_at,
+                updated_at = excluded.updated_at
             """,
-            (fb_listing_url, content_hash, now, now, autosell_id, account_id),
+            (autosell_id, account_id, fb_listing_url, content_hash, now, now),
         )
         self._conn.commit()
 
@@ -332,17 +368,6 @@ class SyncStore:
                 updated_at = excluded.updated_at
             """,
             (autosell_id, account_id, fb_listing_url, status, content_hash, now, now),
-        )
-        self._conn.commit()
-
-    def mark_fb_listing_removed(self, autosell_id: str, account_id: str) -> None:
-        self._conn.execute(
-            """
-            UPDATE fb_listings
-            SET status = 'removed', updated_at = ?
-            WHERE autosell_id = ? AND account_id = ?
-            """,
-            (utc_now(), autosell_id, account_id),
         )
         self._conn.commit()
 

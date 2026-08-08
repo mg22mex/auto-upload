@@ -45,9 +45,11 @@ def execute_reposts(
     )
     delay_min = env_float("FB_ACTION_DELAY_MIN_SEC", 60.0)
     delay_max = env_float("FB_ACTION_DELAY_MAX_SEC", 120.0)
+    # Relist: hard delete by default (avoids "publicación duplicada").
+    # REPOST_REMOVAL_ACTION > sync.repost.removal_action > delete
     removal_action = env_str(
-        "REMOVAL_ACTION",
-        str(config.get("sync", {}).get("removal_action", "mark_sold")),
+        "REPOST_REMOVAL_ACTION",
+        str(repost_cfg.get("removal_action") or "delete"),
     )
     restart_every = env_int(
         "FB_REPOST_BROWSER_EVERY",
@@ -188,25 +190,60 @@ def _repost_one(
     log_dir: Path,
     result: RepostResult,
 ) -> None:
+    """Strict delete-before-create. Never create if remove is not verified."""
     if not action.vehicle:
         raise FacebookAutomationError("Repost action missing vehicle payload")
+    account_id = action.account_id or ""
     old_url = action.fb_listing_url
     if not old_url:
-        row = store.get_fb_listing(action.autosell_id, action.account_id or "")
+        row = store.get_fb_listing(action.autosell_id, account_id)
         old_url = row["fb_listing_url"] if row else None
     if not old_url:
         raise FacebookAutomationError("No fb_listing_url for repost")
 
+    print(
+        f"Repost {action.autosell_id}: remove-then-create "
+        f"(action={removal_action}, old={old_url})"
+    )
+
+    # --- Phase 1: remove (must succeed); do NOT create on failure ---
     removed = False
     try:
-        remove_vehicle_listing(
+        ok = remove_vehicle_listing(
             page,
             old_url,
             autosell_id=action.autosell_id,
             removal_action=removal_action,
             log_dir=log_dir,
+            require_verified=True,
         )
+        if not ok:
+            raise FacebookPostingError(
+                f"Remove returned not-ok for {action.autosell_id}; "
+                "refusing create (duplicate risk)"
+            )
         removed = True
+        # Clear old URL so a mid-create crash is not treated as still live.
+        store.mark_fb_listing_removed(
+            action.autosell_id,
+            account_id,
+            clear_url=True,
+        )
+        print(
+            f"  {action.autosell_id}: old listing cleared in sync.db "
+            f"(status=removed, url=null)"
+        )
+    except Exception as exc:
+        if is_browser_dead(exc):
+            raise
+        # Explicit: never fall through to create
+        raise FacebookPostingError(
+            f"SKIP_CREATE: could not remove old listing for "
+            f"{action.autosell_id} before repost: {exc}"
+        ) from exc
+
+    # --- Phase 2: create only after verified remove ---
+    try:
         new_url = create_vehicle_listing(
             page,
             action.vehicle,
@@ -224,7 +261,7 @@ def _repost_one(
 
     store.record_repost(
         action.autosell_id,
-        action.account_id or "",
+        account_id,
         fb_listing_url=new_url,
         content_hash=action.vehicle.content_hash(),
     )

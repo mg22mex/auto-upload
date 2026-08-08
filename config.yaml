@@ -30,6 +30,8 @@ sync:
   # Full delete+recreate (primary bump path; listings ≥ min_age_days old)
   repost:
     min_age_days: 3
+    # Hard delete before create — mark_sold alone often triggers FB "publicación duplicada"
+    removal_action: delete
     max_per_account_per_run: 5  # smaller batches; browser restarts every N below
     restart_browser_every: 3
     max_browser_reopens: 5
