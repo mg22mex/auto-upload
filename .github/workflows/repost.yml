@@ -1,5 +1,7 @@
 name: Facebook relist / repost bump
 
+# Intentionally NO push/pull_request — full Playwright/FB work is schedule or
+# manual only. Code-push lint lives in .github/workflows/test.yml.
 on:
   schedule:
     # Wed + Sun 09:00 America/Chihuahua (UTC-6) ≈ 15:00 UTC
@@ -36,7 +38,11 @@ on:
 
 jobs:
   listing-bump:
-    name: Relist (repost) live listings ≥3d (account_1 + account_2)
+    name: Relist (repost) live listings 3d+ (account_1 + account_2)
+    # Refuse any accidental non-schedule/manual dispatch (e.g. misadded push)
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, fb-worker]
     # Full recreate is slow; twice-weekly batches still need headroom
     timeout-minutes: 180
@@ -83,7 +89,7 @@ jobs:
           AUTOSELL_BASE_URL: ${{ secrets.AUTOSELL_BASE_URL }}
         run: python run_sync.py --scrape-only --output data/catalog_latest.json
 
-      - name: Resolve bump mode (default: repost)
+      - name: "Resolve bump mode (default: repost)"
         id: mode
         run: |
           set -eux

@@ -1,0 +1,52 @@
+name: Unit tests
+
+# Fast CI only — no Playwright browser, no Facebook, no self-hosted fb-worker.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "ppt*.html"
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "ppt*.html"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: python -m unittest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          set -eux
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          # Do NOT install Chromium / run FB scripts here.
+
+      - name: Run unit tests
+        env:
+          # Plan-only if any test constructs Odoo clients with dry-run defaults
+          ODOO_DRY_RUN: "true"
+        run: |
+          set -eux
+          python -m unittest discover -s src -p 'test_*.py' -v
+          python -m unittest discover -s tests -p 'test_*.py' -v
