@@ -28,7 +28,7 @@ class OdooClient:
         api_key: str | None = None,
         common: Any | None = None,
         models: Any | None = None,
-        dry_run: bool = False,
+        dry_run: bool | None = None,
     ) -> None:
         self.url = (os.getenv(self.ENV_URL, "") if url is None else url).rstrip("/")
         self.db = os.getenv(self.ENV_DB, "") if db is None else db
@@ -51,10 +51,16 @@ class OdooClient:
         self.uid: int | None = None
         self._common = common
         self._models = models
-        self.dry_run = bool(dry_run) or (
-            (os.getenv("ODOO_DRY_RUN") or "").strip().lower()
-            in {"1", "true", "yes", "on"}
-        )
+        # Explicit dry_run=True/False always wins; env only when unset (None).
+        if dry_run is None:
+            self.dry_run = (os.getenv("ODOO_DRY_RUN") or "").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+        else:
+            self.dry_run = bool(dry_run)
         self._rr_cursor: dict[int, int] = {}
 
     def authenticate(self) -> int:

@@ -13,9 +13,30 @@ if str(ROOT) not in sys.path:
 from src.odoo_sync.client import OdooCRMClient, OdooCRMError, QuoteLeadResult
 
 
+def _mock_client(
+    models: MagicMock | None = None,
+    *,
+    dry_run: bool = False,
+    common: MagicMock | None = None,
+    uid: int = 7,
+) -> OdooCRMClient:
+    """Build a client that never inherits ODOO_DRY_RUN from the environment."""
+    client = OdooCRMClient(
+        url="https://odoo.example",
+        db="autosell",
+        username="api",
+        api_key="secret",
+        common=common or MagicMock(authenticate=MagicMock(return_value=uid)),
+        models=models or MagicMock(),
+        dry_run=dry_run,
+    )
+    client.uid = uid
+    return client
+
+
 class TestAuthenticate(unittest.TestCase):
     def test_missing_env(self):
-        client = OdooCRMClient(url="", db="", username="", api_key="")
+        client = OdooCRMClient(url="", db="", username="", api_key="", dry_run=False)
         with self.assertRaises(OdooCRMError):
             client.authenticate()
 
@@ -30,6 +51,7 @@ class TestAuthenticate(unittest.TestCase):
             api_key="secret",
             common=common,
             models=models,
+            dry_run=False,
         )
         uid = client.authenticate()
         self.assertEqual(uid, 42)
@@ -47,9 +69,36 @@ class TestAuthenticate(unittest.TestCase):
             api_key="bad",
             common=common,
             models=MagicMock(),
+            dry_run=False,
         )
         with self.assertRaises(OdooCRMError):
             client.authenticate()
+
+    def test_explicit_dry_run_false_ignores_env(self):
+        import os
+        prev = os.environ.get("ODOO_DRY_RUN")
+        os.environ["ODOO_DRY_RUN"] = "true"
+        try:
+            client = OdooCRMClient(
+                url="https://odoo.example",
+                db="d",
+                username="u",
+                api_key="k",
+                dry_run=False,
+            )
+            self.assertFalse(client.dry_run)
+            env_default = OdooCRMClient(
+                url="https://odoo.example",
+                db="d",
+                username="u",
+                api_key="k",
+            )
+            self.assertTrue(env_default.dry_run)
+        finally:
+            if prev is None:
+                os.environ.pop("ODOO_DRY_RUN", None)
+            else:
+                os.environ["ODOO_DRY_RUN"] = prev
 
 
 def _lead_rpc_side_effect(
@@ -99,15 +148,7 @@ def _lead_rpc_side_effect(
 class TestCreateOrUpdateLead(unittest.TestCase):
     def _client(self) -> tuple[OdooCRMClient, MagicMock]:
         models = MagicMock()
-        client = OdooCRMClient(
-            url="https://odoo.example",
-            db="autosell",
-            username="api",
-            api_key="secret",
-            common=MagicMock(authenticate=MagicMock(return_value=7)),
-            models=models,
-        )
-        client.uid = 7
+        client = _mock_client(models)
         return client, models
 
     def test_create_lead(self):
@@ -262,15 +303,7 @@ class TestArchiveOrphans(unittest.TestCase):
             ],
             True,  # write sold + active=False via x_studio_state
         ]
-        client = OdooCRMClient(
-            url="https://odoo.example",
-            db="autosell",
-            username="api",
-            api_key="secret",
-            common=MagicMock(),
-            models=models,
-        )
-        client.uid = 7
+        client = _mock_client(models)
         archived = client.archive_orphan_vehicles({"obj100"}, categ_id=8)
         self.assertEqual(len(archived), 1)
         self.assertEqual(archived[0]["default_code"], "obj999")
@@ -308,15 +341,7 @@ class TestArchiveOrphans(unittest.TestCase):
             raise AssertionError(f"unexpected {model}.{method} {args}")
 
         models.execute_kw.side_effect = execute_kw
-        client = OdooCRMClient(
-            url="https://odoo.example",
-            db="autosell",
-            username="api",
-            api_key="secret",
-            common=MagicMock(),
-            models=models,
-        )
-        client.uid = 7
+        client = _mock_client(models)
         result = client.upsert_vehicle_product(
             name="Back On Site",
             list_price=150000,
@@ -354,14 +379,7 @@ class TestVehicleInventory(unittest.TestCase):
                 "categ_id": [8, "vehiculos"],
             }
         ]
-        client = OdooCRMClient(
-            url="https://odoo.example",
-            db="autosell",
-            username="api",
-            api_key="secret",
-            common=MagicMock(),
-            models=models,
-        )
+        client = _mock_client(models)
         client.uid = 7
 
         vehicles = client.search_vehicle_inventory("Mazda")
@@ -397,15 +415,7 @@ class TestVehicleInventory(unittest.TestCase):
                 }
             ],
         ]
-        client = OdooCRMClient(
-            url="https://odoo.example",
-            db="autosell",
-            username="api",
-            api_key="secret",
-            common=MagicMock(),
-            models=models,
-        )
-        client.uid = 7
+        client = _mock_client(models)
 
         vehicles = client.search_vehicle_inventory("Mazda")
 
@@ -417,15 +427,7 @@ class TestVehicleInventory(unittest.TestCase):
 class TestRoundRobin(unittest.TestCase):
     def _client(self, members: list[int]) -> tuple[OdooCRMClient, MagicMock]:
         models = MagicMock()
-        client = OdooCRMClient(
-            url="https://odoo.example",
-            db="autosell",
-            username="api",
-            api_key="secret",
-            common=MagicMock(authenticate=MagicMock(return_value=7)),
-            models=models,
-        )
-        client.uid = 7
+        client = _mock_client(models)
         state = {"rr": -1}
 
         def execute_kw(db, uid, key, model, method, args, kwargs=None):
@@ -462,15 +464,7 @@ class TestRoundRobin(unittest.TestCase):
 class TestChatter(unittest.TestCase):
     def test_post_quote_to_chatter(self):
         models = MagicMock()
-        client = OdooCRMClient(
-            url="https://odoo.example",
-            db="autosell",
-            username="api",
-            api_key="secret",
-            common=MagicMock(authenticate=MagicMock(return_value=7)),
-            models=models,
-        )
-        client.uid = 7
+        client = _mock_client(models)
 
         def execute_kw(db, uid, key, model, method, args, kwargs=None):
             if model == "ir.model.data" and method == "check_object_reference":
@@ -491,15 +485,7 @@ class TestChatter(unittest.TestCase):
         self.assertEqual(msg_id, 9001)
 
     def test_empty_quote_rejected(self):
-        client = OdooCRMClient(
-            url="https://odoo.example",
-            db="autosell",
-            username="api",
-            api_key="secret",
-            common=MagicMock(authenticate=MagicMock(return_value=7)),
-            models=MagicMock(),
-        )
-        client.uid = 7
+        client = _mock_client()
         with self.assertRaises(OdooCRMError):
             client.post_quote_to_chatter(1, "  ")
 
@@ -520,15 +506,7 @@ class TestAttachFile(unittest.TestCase):
             raise AssertionError(f"unexpected {model}.{method}")
 
         models.execute_kw.side_effect = execute_kw
-        client = OdooCRMClient(
-            url="https://odoo.example",
-            db="autosell",
-            username="api",
-            api_key="secret",
-            common=MagicMock(),
-            models=models,
-        )
-        client.uid = 7
+        client = _mock_client(models)
         att_id = client.attach_file(
             model="crm.lead",
             res_id=501,
