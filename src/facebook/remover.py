@@ -55,18 +55,37 @@ _MARK_SOLD = re.compile(
     r"mark as sold|marcar como vendido|marcar vendido|mark sold",
     re.I,
 )
+_MARK_PENDING = re.compile(
+    r"mark as pending|marcar como pendiente|mark pending",
+    re.I,
+)
+_EDIT_LISTING = re.compile(
+    r"^\s*edit\s*$|^\s*editar\s*$|edit listing|editar publicación",
+    re.I,
+)
+_MANAGE_LISTING = re.compile(
+    r"manage listing|administrar publicación|administrar anuncio|"
+    r"^\s*manage\s*$|^\s*administrar\s*$",
+    re.I,
+)
+_MESSAGE_SELLER = re.compile(
+    r"send message|enviar mensaje|message seller|enviar un mensaje",
+    re.I,
+)
 _DELETE_PATTERNS = (
     re.compile(
         r"delete listing|eliminar publicación|delete this listing|"
         r"eliminar esta publicación|eliminar anuncio|delete item|"
-        r"eliminar artículo|remove listing",
+        r"eliminar artículo|remove listing|delete forever|"
+        r"eliminar para siempre|borrar publicación|borrar anuncio",
         re.I,
     ),
-    re.compile(r"^\s*delete\s*$|^\s*eliminar\s*$", re.I),
+    re.compile(r"^\s*delete\s*$|^\s*eliminar\s*$|^\s*borrar\s*$", re.I),
 )
 _MORE_MENU = re.compile(
     r"more options|more|más opciones|opciones|manage|administrar|"
-    r"see more|ver más|actions|acciones",
+    r"see more|ver más|actions|acciones|listing options|"
+    r"opciones de la publicación|opciones del anuncio",
     re.I,
 )
 _MORE_ARIA_SELECTORS = (
@@ -78,6 +97,19 @@ _MORE_ARIA_SELECTORS = (
     '[aria-label*="More options" i]',
     '[aria-label*="Opciones" i]',
     '[aria-label*="Options" i]',
+    '[aria-label*="Administrar" i]',
+    '[aria-label*="Manage" i]',
+    '[aria-label*="acciones" i]',
+    '[aria-label*="Actions" i]',
+)
+
+# Owner selling dashboards (some accounts only list on one of these).
+_SELLING_SHELVES = (
+    SELLING_URL,
+    f"{SELLING_URL}?status=ACTIVE",
+    f"{SELLING_URL}?state=LIVE",
+    DASHBOARD_URL,
+    "https://www.facebook.com/marketplace/you/selling/?status=IN_STOCK",
 )
 
 
@@ -138,13 +170,35 @@ def remove_vehicle_listing(
             _assert_removed_or_raise(page, listing_url, autosell_id, log_dir)
         return True
 
-    last_error: Exception | None = None
-    try:
-        _perform_removal_on_current_page(page, action=action)
-        page.wait_for_timeout(2_000)
-    except Exception as exc:
-        last_error = exc
-        print(f"  {autosell_id}: detail-page remove failed: {exc}")
+    visitor_detail = _is_visitor_listing_view(page)
+    owner_detail = _is_owner_listing_view(page)
+    if visitor_detail and not owner_detail:
+        print(
+            f"  {autosell_id}: detail looks like buyer/visitor view "
+            f"(Enviar mensaje present; no Editar / Marcar como vendido) — "
+            f"skipping detail menus, going to selling shelf"
+        )
+        last_error = FacebookPostingError(
+            "Listing detail is visitor chrome (not owner). "
+            "Usually wrong Facebook account owns this listing, or posting Page ≠ session."
+        )
+    else:
+        last_error = None
+        try:
+            _perform_removal_on_current_page(page, action=action)
+            page.wait_for_timeout(2_000)
+        except Exception as exc:
+            last_error = exc
+            print(f"  {autosell_id}: detail-page remove failed: {exc}")
+            # Owner page often has direct Marcar como vendido but no Eliminar in menu
+            if action == "delete":
+                try:
+                    print(f"  {autosell_id}: detail fallback mark_sold (owner chrome)")
+                    _perform_removal_on_current_page(page, action="mark_sold")
+                    page.wait_for_timeout(2_000)
+                    last_error = None
+                except Exception as alt_exc:
+                    last_error = alt_exc
 
     if _listing_already_gone(page, listing_url=listing_url, item_id=item_id):
         print(f"  {autosell_id}: listing gone after detail remove")
@@ -152,12 +206,16 @@ def remove_vehicle_listing(
             _assert_removed_or_raise(page, listing_url, autosell_id, log_dir)
         return True
 
-    # --- Fallback: selling shelf ---
+    # --- Fallback: selling shelf (scroll-loaded inventory) ---
     if item_id:
         try:
             print(f"  {autosell_id}: trying selling-shelf removal for item {item_id}")
             if _remove_from_selling_shelf(page, item_id, action=action):
                 page.wait_for_timeout(2_000)
+            elif action == "delete":
+                print(f"  {autosell_id}: selling-shelf retry with mark_sold")
+                if _remove_from_selling_shelf(page, item_id, action="mark_sold"):
+                    page.wait_for_timeout(2_000)
         except Exception as exc:
             last_error = exc
             print(f"  {autosell_id}: selling-shelf remove failed: {exc}")
@@ -176,7 +234,6 @@ def remove_vehicle_listing(
             if require_verified:
                 _assert_removed_or_raise(page, listing_url, autosell_id, log_dir)
             return True
-        # Last ditch: opposite action (delete ↔ sell) if still live
         alt = "mark_sold" if action == "delete" else "delete"
         try:
             print(f"  {autosell_id}: fallback action={alt}")
@@ -192,11 +249,22 @@ def remove_vehicle_listing(
             print(f"  {autosell_id}: removal verified (listing gone/sold)")
             return True
         _save_debug(page, log_dir, autosell_id, "remove_failed")
+        ownership_hint = ""
+        try:
+            if _is_visitor_listing_view(page) and not _is_owner_listing_view(page):
+                ownership_hint = (
+                    " Detail page is still visitor/buyer chrome — this Facebook "
+                    "session likely does not own the listing (wrong account or Page). "
+                    "Refresh the correct seller profile or remap sync.db account."
+                )
+        except Exception:
+            pass
         detail = f": {last_error}" if last_error else ""
         raise FacebookPostingError(
-            f"Remove failed for {autosell_id}: Delete control not found "
-            f"(expected 'Eliminar publicación' / 'Delete listing') "
-            f"and listing still active{detail}"
+            f"Remove failed for {autosell_id}: Delete/mark-sold controls not found "
+            f"(owner chrome: 'Marcar como vendido' / 'Editar'; menu: "
+            f"'Eliminar publicación' / 'Delete listing') "
+            f"and listing still active{detail}.{ownership_hint}"
         )
 
     if _listing_already_gone(page, listing_url=listing_url, item_id=item_id):
@@ -216,12 +284,82 @@ def _perform_removal_on_current_page(page: Page, *, action: str) -> None:
         _mark_sold(page)
 
 
+def _is_owner_listing_view(page: Page) -> bool:
+    """Seller chrome: Editar / Marcar como vendido / Marcar como pendiente."""
+    for pattern in (_MARK_SOLD, _MARK_PENDING, _EDIT_LISTING, _MANAGE_LISTING):
+        try:
+            for role in ("button", "link", "menuitem"):
+                loc = page.get_by_role(role, name=pattern)
+                if loc.count() and loc.first.is_visible():
+                    return True
+        except Exception:
+            continue
+    return False
+
+
+def _is_visitor_listing_view(page: Page) -> bool:
+    """Buyer chrome: Enviar mensaje / message-seller composer, no owner actions."""
+    if _is_owner_listing_view(page):
+        return False
+    try:
+        msg = page.get_by_role("button", name=_MESSAGE_SELLER)
+        if msg.count() and msg.first.is_visible():
+            return True
+    except Exception:
+        pass
+    try:
+        body = page.locator("body").inner_text(timeout=3_000).lower()
+    except Exception:
+        body = ""
+    if "envía un mensaje al vendedor" in body or "send the seller a message" in body:
+        return True
+    return False
+
+
+def _click_role_name(page: Page, pattern: re.Pattern[str], *, roles: tuple[str, ...] = ("button", "menuitem", "link")) -> bool:
+    for role in roles:
+        try:
+            loc = page.get_by_role(role, name=pattern)
+            for i in range(min(loc.count() or 0, 6)):
+                item = loc.nth(i)
+                try:
+                    if not item.is_visible():
+                        continue
+                    item.scroll_into_view_if_needed(timeout=2_000)
+                    item.click(timeout=8_000)
+                    page.wait_for_timeout(1_500)
+                    return True
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    # Text-filtered buttons (roles sometimes missing on FB)
+    try:
+        alt = page.locator('[role="button"], button, [role="menuitem"]').filter(has_text=pattern)
+        for i in range(min(alt.count() or 0, 6)):
+            item = alt.nth(i)
+            try:
+                if item.is_visible():
+                    item.click(timeout=8_000)
+                    page.wait_for_timeout(1_500)
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
+
+
 def _remove_from_selling_shelf(page: Page, item_id: str, *, action: str) -> bool:
     """Locate listing on selling dashboard and delete/mark-sold from the card menu."""
-    for shelf in (SELLING_URL, DASHBOARD_URL):
-        page.goto(shelf, wait_until="domcontentloaded", timeout=90_000)
-        page.wait_for_timeout(3_000)
-        link = _find_item_link(page, item_id)
+    for shelf in _SELLING_SHELVES:
+        try:
+            page.goto(shelf, wait_until="domcontentloaded", timeout=90_000)
+            page.wait_for_timeout(3_000)
+        except Exception:
+            continue
+
+        link = _find_item_link_scrolled(page, item_id)
         if link is None:
             continue
 
@@ -236,16 +374,59 @@ def _remove_from_selling_shelf(page: Page, item_id: str, *, action: str) -> bool
             if _click_menu_action(page, action=action):
                 _confirm_if_needed(page, prefer_delete=(action == "delete"))
                 return True
+            # Opposite action if menu opened but action missing
+            alt = "mark_sold" if action == "delete" else "delete"
+            if _click_menu_action(page, action=alt):
+                _confirm_if_needed(page, prefer_delete=(alt == "delete"))
+                return True
 
-        # Open listing from shelf and run detail removal
+        # Open listing from shelf — often switches to owner chrome
         try:
-            link.click(timeout=8_000)
+            href = None
+            try:
+                href = link.get_attribute("href")
+            except Exception:
+                href = None
+            if href and href.startswith("/"):
+                page.goto(
+                    f"https://www.facebook.com{href}",
+                    wait_until="domcontentloaded",
+                    timeout=60_000,
+                )
+            else:
+                link.click(timeout=8_000)
             page.wait_for_timeout(2_500)
-            _perform_removal_on_current_page(page, action=action)
-            return True
+            try:
+                _perform_removal_on_current_page(page, action=action)
+                return True
+            except Exception:
+                alt = "mark_sold" if action == "delete" else "delete"
+                try:
+                    _perform_removal_on_current_page(page, action=alt)
+                    return True
+                except Exception:
+                    continue
         except Exception:
             continue
     return False
+
+
+def _find_item_link_scrolled(page: Page, item_id: str) -> Locator | None:
+    """Find item link; scroll selling inventory if needed (lazy lists)."""
+    for _ in range(12):
+        link = _find_item_link(page, item_id)
+        if link is not None:
+            return link
+        try:
+            page.mouse.wheel(0, 2800)
+            page.wait_for_timeout(900)
+        except Exception:
+            try:
+                page.evaluate("window.scrollBy(0, 2800)")
+                page.wait_for_timeout(900)
+            except Exception:
+                break
+    return _find_item_link(page, item_id)
 
 
 def _find_item_link(page: Page, item_id: str) -> Locator | None:
@@ -253,8 +434,12 @@ def _find_item_link(page: Page, item_id: str) -> Locator | None:
         links = page.locator(f'a[href*="/marketplace/item/{item_id}"]')
         count = links.count()
         if count == 0:
-            return None
-        for i in range(min(count, 12)):
+            # Some cards use commerce redirect URLs containing the id as query
+            links = page.locator(f'a[href*="{item_id}"]')
+            count = links.count()
+            if count == 0:
+                return None
+        for i in range(min(count, 16)):
             loc = links.nth(i)
             try:
                 if loc.is_visible():
@@ -447,6 +632,8 @@ def _has_live_controls(page: Page) -> bool:
             return True
         if page.get_by_role("menuitem", name=_MARK_SOLD).count():
             return True
+        if page.get_by_role("button", name=_EDIT_LISTING).count():
+            return True
         for pattern in _DELETE_PATTERNS:
             if page.get_by_role("menuitem", name=pattern).count():
                 return True
@@ -458,6 +645,10 @@ def _has_live_controls(page: Page) -> bool:
 
 
 def _mark_sold(page: Page) -> None:
+    # Owner detail (account_2 style): blue "Marcar como vendido" on the page
+    if _click_role_name(page, _MARK_SOLD):
+        _confirm_if_needed(page)
+        return
     _open_listing_menu(page)
     if _click_menu_action(page, action="mark_sold"):
         _confirm_if_needed(page)
@@ -466,15 +657,34 @@ def _mark_sold(page: Page) -> None:
         return
     raise FacebookPostingError(
         "Mark-as-sold control not found "
-        "(expected 'Marcar como vendido' / 'Mark as sold')"
+        "(expected 'Marcar como vendido' / 'Mark as sold' as button or menu item)"
     )
 
 
 def _delete_listing(page: Page) -> None:
+    # Rare: delete visible without ⋮
+    for pattern in _DELETE_PATTERNS:
+        if _click_role_name(page, pattern):
+            _confirm_if_needed(page, prefer_delete=True)
+            return
+
     _open_listing_menu(page)
     if _click_menu_action(page, action="delete"):
         _confirm_if_needed(page, prefer_delete=True)
         return
+
+    # Manage / Edit → nested delete
+    if _click_role_name(page, _MANAGE_LISTING) or _click_role_name(page, _EDIT_LISTING):
+        page.wait_for_timeout(1_500)
+        _open_listing_menu(page)
+        if _click_menu_action(page, action="delete"):
+            _confirm_if_needed(page, prefer_delete=True)
+            return
+        for pattern in _DELETE_PATTERNS:
+            if _click_role_name(page, pattern):
+                _confirm_if_needed(page, prefer_delete=True)
+                return
+
     if _listing_already_gone(page):
         return
     raise FacebookPostingError(

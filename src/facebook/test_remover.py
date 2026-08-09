@@ -1,6 +1,7 @@
 """Unit tests — resilient Marketplace listing removal."""
 from __future__ import annotations
 
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -180,8 +181,52 @@ class TestRemoveVehicleListingFallbacks(unittest.TestCase):
                     log_dir=log_dir,
                     require_verified=True,
                 )
-        self.assertIn("Delete control not found", str(ctx.exception))
+        self.assertIn("Delete/mark-sold", str(ctx.exception))
         self.assertIn("obj1102", str(ctx.exception))
+
+
+class TestOwnerVsVisitorChrome(unittest.TestCase):
+    def test_owner_chrome_mark_sold(self):
+        from src.facebook.remover import _is_owner_listing_view, _is_visitor_listing_view
+
+        page = MagicMock()
+
+        def get_by_role(role, name=None, **_k):
+            loc = MagicMock()
+            pat = getattr(name, "pattern", str(name or ""))
+            if "marcar como vendido|mark as sold" in pat or (
+                isinstance(name, re.Pattern) and name.search("Marcar como vendido")
+            ):
+                loc.count.return_value = 1
+                loc.first.is_visible.return_value = True
+            else:
+                loc.count.return_value = 0
+                loc.first.is_visible.return_value = False
+            return loc
+
+        page.get_by_role.side_effect = get_by_role
+        self.assertTrue(_is_owner_listing_view(page))
+        self.assertFalse(_is_visitor_listing_view(page))
+
+    def test_visitor_chrome_message(self):
+        from src.facebook.remover import _is_owner_listing_view, _is_visitor_listing_view
+
+        page = MagicMock()
+
+        def get_by_role(role, name=None, **_k):
+            loc = MagicMock()
+            if isinstance(name, re.Pattern) and name.search("Enviar mensaje"):
+                loc.count.return_value = 1
+                loc.first.is_visible.return_value = True
+            else:
+                loc.count.return_value = 0
+                loc.first.is_visible.return_value = False
+            return loc
+
+        page.get_by_role.side_effect = get_by_role
+        page.locator.return_value.inner_text.return_value = "x"
+        self.assertFalse(_is_owner_listing_view(page))
+        self.assertTrue(_is_visitor_listing_view(page))
 
 
 class TestSessionHealth(unittest.TestCase):
