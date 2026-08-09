@@ -8,7 +8,15 @@ from src.facebook.browser_health import is_browser_dead
 from src.facebook.errors import FacebookAutomationError, FacebookPostingError, FacebookSessionError
 from src.facebook.poster import create_vehicle_listing
 from src.facebook.remover import remove_vehicle_listing
-from src.facebook.session import get_page, is_logged_in, open_account_context, page_shows_login_form
+from src.facebook.session import (
+    format_session_login_error,
+    get_page,
+    is_logged_in,
+    open_account_context,
+    page_shows_login_form,
+    resolve_session_dir,
+    session_health_report,
+)
 from src.facebook.util import ensure_log_dir, env_bool, env_float, env_int, env_str, random_delay
 from src.models import SyncAction
 from src.store.db import SyncStore
@@ -75,6 +83,23 @@ def execute_reposts(
         if not remaining:
             continue
         print(f"Repost: processing {len(remaining)} listing(s) for {account_id}")
+        try:
+            session_dir = resolve_session_dir(config, account_id, root)
+        except FacebookSessionError:
+            session_dir = (root / "sessions" / account_id).resolve()
+        health = session_health_report(session_dir)
+        print(
+            f"Repost: session health {account_id}: "
+            f"exists={health['exists']} files={health['file_count']} "
+            f"cookies_file={health['has_cookies_file']} "
+            f"looks_empty={health['looks_empty']} path={health['path']}"
+        )
+        if health["looks_empty"]:
+            msg = format_session_login_error(account_id, session_dir)
+            print(f"WARN: {msg}")
+            # Still try browser open — report definitive login error from Marketplace UI.
+            # (Do not skip here; empty check is advisory only.)
+
         reopens = 0
 
         while remaining:
@@ -89,8 +114,7 @@ def execute_reposts(
                     page = get_page(context)
                     if not is_logged_in(page):
                         raise FacebookSessionError(
-                            f"Not logged in for {account_id}. "
-                            f"Run: python scripts/fb_login.py --account {account_id}"
+                            format_session_login_error(account_id, session_dir)
                         )
 
                     done_in_session = 0
@@ -98,8 +122,8 @@ def execute_reposts(
                         action = remaining[0]
                         if page_shows_login_form(page):
                             raise FacebookSessionError(
-                                f"Session expired for {account_id}. "
-                                f"Run: python scripts/fb_login.py --account {account_id}"
+                                format_session_login_error(account_id, session_dir)
+                                + " (session expired mid-run)"
                             )
                         try:
                             _repost_one(

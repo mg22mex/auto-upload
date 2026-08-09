@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.facebook.reposter import execute_reposts
+from src.facebook.session import format_session_login_error, resolve_session_dir, session_health_report
 from src.facebook.util import env_int
 from src.inventory.snapshot import load_catalog_snapshot
 from src.store.db import SyncStore
@@ -127,6 +128,28 @@ def main() -> int:
     print(f"Skipped:      {len(skipped)}")
     print("")
 
+    # Surface session problems early (before long Playwright loop)
+    print("Session health (Chromium profiles under sessions/):")
+    session_warns: list[str] = []
+    for account_id in account_ids:
+        sdir = resolve_session_dir(config, account_id, ROOT)
+        health = session_health_report(sdir)
+        flag = "OK" if not health["looks_empty"] else "PROBLEM"
+        print(
+            f"  [{flag}] {account_id}: exists={health['exists']} "
+            f"files={health['file_count']} cookies_file={health['has_cookies_file']} "
+            f"path={health['path']}"
+        )
+        if health["looks_empty"]:
+            session_warns.append(format_session_login_error(account_id, sdir))
+    if session_warns:
+        print("")
+        print("WARNING: one or more accounts need a headed login before repost:", file=sys.stderr)
+        for msg in session_warns:
+            print(f"  {msg}", file=sys.stderr)
+        print("", file=sys.stderr)
+    print("")
+
     if actions:
         print("Reposts:")
         for action in actions:
@@ -143,6 +166,8 @@ def main() -> int:
         print("")
 
     if args.dry_run or not actions:
+        if session_warns and not args.dry_run and not actions:
+            return 0
         return 0
 
     result = execute_reposts(actions, store, config, root=ROOT, account_order=account_ids)
@@ -150,6 +175,13 @@ def main() -> int:
     if result.errors:
         for err in result.errors:
             print(f"  FB error: {err}", file=sys.stderr)
+            if "Not logged in" in err or "session expired" in err.lower():
+                print(
+                    "  → Fix: on fb-worker run "
+                    "`python scripts/fb_login.py --account <id>` (headed) "
+                    "and confirm sessions/ lives under the persistent data bind.",
+                    file=sys.stderr,
+                )
         return 1
     return 0
 
