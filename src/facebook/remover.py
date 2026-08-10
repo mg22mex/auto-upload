@@ -598,13 +598,22 @@ def _listing_already_gone(
     except Exception:
         url = ""
 
-    # Redirected off the item detail (deleted / 404 shell) without login wall
+    # Redirected off the item detail (deleted / 404 shell) without login wall.
+    # Do NOT treat Selling / dashboard as "gone" — shelf navigation lands there often
+    # while the public item URL is still live (visitor chrome cases).
     if url and "login" not in url and "checkpoint" not in url:
         on_item = bool(re.search(r"/marketplace/item/\d+", url))
-        if listing_url and item_id:
-            # Landed somewhere else (dashboard, home, error)
-            if not on_item and ("marketplace" in url or "facebook.com" in url):
-                # Only if body also lacks live listing affordances
+        inventory_ui = any(
+            marker in url
+            for marker in (
+                "/marketplace/you/",
+                "/you/selling",
+                "/you/dashboard",
+                "/marketplace/create",
+            )
+        )
+        if listing_url and item_id and not on_item and not inventory_ui:
+            if "marketplace" in url or "facebook.com" in url:
                 if not _has_live_controls(page):
                     return True
         if "unavailable" in url or "error" in url:
