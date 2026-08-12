@@ -11,7 +11,9 @@ from src.facebook.errors import FacebookPostingError
 from src.facebook.remover import (
     extract_item_id,
     remove_vehicle_listing,
+    _is_sold_or_deactivated,
     _listing_already_gone,
+    _verify_listing_removed,
 )
 from src.facebook.session import format_session_login_error, session_health_report
 
@@ -77,6 +79,82 @@ class TestListingAlreadyGone(unittest.TestCase):
         )
         # Body length > 400 or no 404 tokens → still False is ideal
         self.assertFalse(gone)
+
+
+    def test_sold_badge_es_is_gone(self):
+        page = MagicMock()
+        page.url = "https://www.facebook.com/marketplace/item/1/"
+        role_loc = MagicMock()
+        role_loc.count.return_value = 0
+        role_loc.first.is_visible.return_value = False
+        page.get_by_role.return_value = role_loc
+        page.locator.return_value.inner_text.return_value = (
+            "2021 Chevrolet Tahoe\nVendido\nMarcar como disponible"
+        )
+        self.assertTrue(_is_sold_or_deactivated(page))
+        self.assertTrue(
+            _listing_already_gone(page, listing_url=page.url, item_id="1")
+        )
+
+    def test_mark_as_available_button_means_sold(self):
+        page = MagicMock()
+        page.url = "https://www.facebook.com/marketplace/item/1/"
+
+        def get_by_role(role, name=None, **_k):
+            loc = MagicMock()
+            if isinstance(name, re.Pattern) and name.search("Marcar como disponible"):
+                loc.count.return_value = 1
+                loc.first.is_visible.return_value = True
+            else:
+                loc.count.return_value = 0
+                loc.first.is_visible.return_value = False
+            return loc
+
+        page.get_by_role.side_effect = get_by_role
+        page.locator.return_value.inner_text.return_value = "listing body"
+        self.assertTrue(_is_sold_or_deactivated(page))
+
+    def test_verify_accepts_sold_detail_without_404(self):
+        page = MagicMock()
+        page.url = "https://www.facebook.com/marketplace/item/99/"
+        log_calls = {"n": 0}
+
+        def goto(url, **_k):
+            page.url = url
+            log_calls["n"] += 1
+
+        page.goto.side_effect = goto
+        page.wait_for_timeout = MagicMock()
+        role_loc = MagicMock()
+        role_loc.count.return_value = 0
+        role_loc.first.is_visible.return_value = False
+        page.get_by_role.return_value = role_loc
+        page.locator.return_value.inner_text.return_value = (
+            "Infiniti QX80\nVendido\n$450,000 MXN"
+        )
+        page.locator.return_value.count.return_value = 0
+        self.assertTrue(
+            _verify_listing_removed(
+                page, "https://www.facebook.com/marketplace/item/99/"
+            )
+        )
+
+    def test_selling_shelf_url_not_already_gone(self):
+        page = MagicMock()
+        page.url = "https://www.facebook.com/marketplace/you/selling"
+        role_loc = MagicMock()
+        role_loc.count.return_value = 0
+        page.get_by_role.return_value = role_loc
+        page.locator.return_value.inner_text.return_value = "En venta Activas"
+        page.locator.return_value.count.return_value = 0
+        # Being on selling shelf must not count as the item being removed.
+        self.assertFalse(
+            _listing_already_gone(
+                page,
+                listing_url="https://www.facebook.com/marketplace/item/99/",
+                item_id="99",
+            )
+        )
 
 
 class TestRemoveVehicleListingFallbacks(unittest.TestCase):

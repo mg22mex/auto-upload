@@ -128,6 +128,20 @@ def main() -> int:
     print(f"Skipped:      {len(skipped)}")
     print("")
 
+    accounts_by_id = {
+        a["id"]: a for a in config.get("accounts", []) if isinstance(a, dict) and a.get("id")
+    }
+    for account_id in account_ids:
+        acc = accounts_by_id.get(account_id, {})
+        label = (
+            acc.get("facebook_profile")
+            or acc.get("facebook_c_user")
+            or acc.get("label")
+            or "unknown"
+        )
+        print(f"Processing reposts for {account_id} (Facebook Profile: {label})")
+    print("")
+
     # Surface session problems early (before long Playwright loop)
     print("Session health (Chromium profiles under sessions/):")
     session_warns: list[str] = []

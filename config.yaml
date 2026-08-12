@@ -47,9 +47,16 @@ facebook:
   selling_url: https://www.facebook.com/marketplace/you/selling
 
 accounts:
+  # facebook_profile = short label printed at repost start; facebook_c_user = FB cookie id
   - id: account_1
     session_dir: sessions/account_1
+    # Live Marketplace URLs for both account_1 and account_2 rows are owned by this identity
+    # (owner-chrome matrix 2026-08-10). marco.gastelum.3954 is visitor on those items.
+    facebook_c_user: "61568552875980"
+    facebook_profile: "61568552875980"
   - id: account_2
     session_dir: sessions/account_2
+    facebook_c_user: "61568552875980"
+    facebook_profile: "61568552875980"
   - id: account_3
     session_dir: sessions/account_3

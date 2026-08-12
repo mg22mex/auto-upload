@@ -47,6 +47,55 @@ _ALREADY_GONE_PHRASES = (
     "lo sentimos, este contenido no está disponible",
 )
 
+# Sold / pending / out-of-stock counts as deactivated for repost (FB allows re-list).
+_SOLD_OR_INACTIVE_PHRASES = (
+    "marcado como vendido",
+    "marked as sold",
+    "you marked this as sold",
+    "marcaste esto como vendido",
+    "this item has been sold",
+    "this listing has been sold",
+    "this item is sold",
+    "listing is sold",
+    "item is sold",
+    "está vendido",
+    "esta vendido",
+    "artículo vendido",
+    "articulo vendido",
+    "publicación vendida",
+    "publicacion vendida",
+    "sold out",
+    "out of stock",
+    "agotado",
+    "sin existencias",
+    "no disponible",
+    "not available for sale",
+    "marcar como disponible",  # mark-as-available control label in body scrape
+    "mark as available",
+    "marcado como pendiente",
+    "marked as pending",
+    "en pendiente",
+    "pending sale",
+)
+
+# Standalone status chips on detail / shelf cards (ES/EN).
+_SOLD_STATUS_TOKEN = re.compile(
+    r"(?:^|[\s|•·/\-–—\[\('\"])"
+    r"(?:vendido|sold|pending|pendiente|agotado)"
+    r"(?:$|[\s|•·/\-–—\]\),'\"])",
+    re.I | re.M,
+)
+
+# Active inventory only — sold items often remain linked under “Vendidos”.
+_ACTIVE_SELLING_SHELVES = (
+    SELLING_URL,
+    f"{SELLING_URL}?status=ACTIVE",
+    f"{SELLING_URL}?state=LIVE",
+    f"{SELLING_URL}/?status=ACTIVE",
+    "https://www.facebook.com/marketplace/you/selling/?status=IN_STOCK",
+    "https://www.facebook.com/marketplace/you/selling?status=IN_STOCK",
+)
+
 _MARK_AVAILABLE = re.compile(
     r"mark as available|marcar como disponible",
     re.I,
@@ -372,13 +421,21 @@ def _remove_from_selling_shelf(page: Page, item_id: str, *, action: str) -> bool
         # Prefer card-local ⋮ then listing open + detail remove
         if _click_more_near_locator(page, link):
             if _click_menu_action(page, action=action):
-                _confirm_if_needed(page, prefer_delete=(action == "delete"))
-                return True
+                if action == "mark_sold":
+                    return _finish_mark_sold_flow(page)
+                _confirm_if_needed(page, prefer_delete=True)
+                return not _still_has_mark_sold_control(page) or _listing_already_gone(
+                    page, item_id=item_id
+                )
             # Opposite action if menu opened but action missing
             alt = "mark_sold" if action == "delete" else "delete"
             if _click_menu_action(page, action=alt):
-                _confirm_if_needed(page, prefer_delete=(alt == "delete"))
-                return True
+                if alt == "mark_sold":
+                    return _finish_mark_sold_flow(page)
+                _confirm_if_needed(page, prefer_delete=True)
+                return not _still_has_mark_sold_control(page) or _listing_already_gone(
+                    page, item_id=item_id
+                )
 
         # Open listing from shelf — often switches to owner chrome
         try:
@@ -514,6 +571,9 @@ def _assert_removed_or_raise(
     autosell_id: str,
     log_dir: Path,
 ) -> None:
+    # Settlement buffer: FB CDN/detail cache often lags behind mark_sold UI.
+    print(f"  {autosell_id}: waiting for Marketplace cache to settle…")
+    page.wait_for_timeout(4_000)
     if _verify_listing_removed(page, listing_url):
         print(f"  {autosell_id}: removal verified (listing gone/sold)")
         return
@@ -525,36 +585,83 @@ def _assert_removed_or_raise(
 
 
 def _verify_listing_removed(page: Page, listing_url: str) -> bool:
-    """Reload listing URL and selling shelf; True only when fully gone/sold."""
-    page.wait_for_timeout(1_500)
+    """Reload listing URL / active shelf; True when deleted, sold, or inactive.
+
+    Marked-sold / Vendido / pending / out-of-stock count as removed for repost
+    (Marketplace allows a fresh create after deactivation; no hard 404 required).
+    Retries with a multi-second settlement buffer because FB can show a stale
+    active detail page briefly after mark-sold.
+    """
     item_id = extract_item_id(listing_url)
-    try:
-        page.goto(listing_url, wait_until="domcontentloaded", timeout=60_000)
-        page.wait_for_timeout(2_500)
-    except Exception:
-        return True
 
-    if _listing_already_gone(page, listing_url=listing_url, item_id=item_id):
-        return True
-
-    if item_id and not _item_visible_on_selling(page, item_id):
-        # Re-check detail — if not live controls, treat as gone
+    for attempt in range(4):
+        # attempt 0: 3s, then 4s / 5s / 5s — give CDN time between reloads
+        settle_ms = 3_000 if attempt == 0 else (4_000 if attempt == 1 else 5_000)
+        page.wait_for_timeout(settle_ms)
         try:
-            page.goto(listing_url, wait_until="domcontentloaded", timeout=45_000)
-            page.wait_for_timeout(2_000)
+            page.goto(listing_url, wait_until="domcontentloaded", timeout=60_000)
+            page.wait_for_timeout(2_500)
         except Exception:
             return True
-        if not _looks_like_live_listing(page):
+
+        if _dialog_open(page):
+            _finish_mark_sold_flow(page)
+            page.wait_for_timeout(2_000)
+            try:
+                page.goto(listing_url, wait_until="domcontentloaded", timeout=45_000)
+                page.wait_for_timeout(2_000)
+            except Exception:
+                return True
+
+        if _listing_already_gone(page, listing_url=listing_url, item_id=item_id):
             return True
-        return _listing_already_gone(page, listing_url=listing_url, item_id=item_id)
+        if _is_sold_or_deactivated(page):
+            print(f"  verify attempt {attempt + 1}: sold/deactivated UI — ok")
+            return True
+        if not _looks_like_live_listing(page) and not _still_has_mark_sold_control(page):
+            return True
+
+        # Off active selling shelf is enough even if public URL still caches.
+        if item_id and not _item_visible_on_active_selling(page, item_id):
+            print(
+                f"  verify attempt {attempt + 1}: not on active selling shelf — "
+                "treating as deactivated"
+            )
+            try:
+                page.goto(listing_url, wait_until="domcontentloaded", timeout=45_000)
+                page.wait_for_timeout(2_000)
+            except Exception:
+                return True
+            if _listing_already_gone(page, listing_url=listing_url, item_id=item_id):
+                return True
+            if _is_sold_or_deactivated(page):
+                return True
+            if not _looks_like_live_listing(page) and not _still_has_mark_sold_control(page):
+                return True
+            if not _has_live_controls(page) and not _still_has_mark_sold_control(page):
+                return True
+            # Shelf gone + owner no longer has Mark as sold → accept despite URL cache
+            if not _still_has_mark_sold_control(page):
+                return True
+
+        print(
+            f"  verify attempt {attempt + 1}/4: still looks active "
+            f"(cache lag?) — retrying"
+        )
 
     return False
 
 
 def _looks_like_live_listing(page: Page) -> bool:
-    """Heuristics: sold listings show 'Mark as available'; live ones show sold/delete."""
+    """True if listing still looks actively for sale (not sold/pending/deleted)."""
+    if _is_sold_or_deactivated(page):
+        return False
+    if _listing_already_gone(page):
+        return False
     try:
         if page.get_by_role("button", name=_MARK_AVAILABLE).count():
+            return False
+        if page.get_by_role("menuitem", name=_MARK_AVAILABLE).count():
             return False
     except Exception:
         pass
@@ -565,18 +672,105 @@ def _looks_like_live_listing(page: Page) -> bool:
             return True
     except Exception:
         pass
-    return not _listing_already_gone(page)
+    # Owner edit without mark-sold still implies live inventory.
+    try:
+        if page.get_by_role("button", name=_EDIT_LISTING).count():
+            return True
+    except Exception:
+        pass
+    return _has_live_controls(page)
 
 
 def _item_visible_on_selling(page: Page, item_id: str) -> bool:
-    """True if item id still links from your selling dashboard."""
-    try:
-        page.goto(SELLING_URL, wait_until="domcontentloaded", timeout=90_000)
-        page.wait_for_timeout(3_000)
-    except Exception:
-        return True  # fail closed
+    """Back-compat: True if item appears under active selling shelves only."""
+    return _item_visible_on_active_selling(page, item_id)
 
-    return _find_item_link(page, item_id) is not None
+
+def _item_visible_on_active_selling(page: Page, item_id: str) -> bool:
+    """True if item id still links from *active* selling inventory (not sold tab)."""
+    for shelf_url in _ACTIVE_SELLING_SHELVES:
+        try:
+            page.goto(shelf_url, wait_until="domcontentloaded", timeout=90_000)
+            page.wait_for_timeout(2_500)
+        except Exception:
+            continue
+        # Light scroll — FB lazy-loads the shelf.
+        for _ in range(4):
+            if _find_item_link(page, item_id) is not None:
+                # Card may still show with a Vendido badge under a mixed feed.
+                if _item_card_looks_sold(page, item_id):
+                    return False
+                return True
+            try:
+                page.mouse.wheel(0, 1400)
+                page.wait_for_timeout(800)
+            except Exception:
+                break
+    return False
+
+
+def _item_card_looks_sold(page: Page, item_id: str) -> bool:
+    """True when the shelf card for item_id carries sold/pending UI."""
+    try:
+        link = page.locator(f'a[href*="/marketplace/item/{item_id}"]').first
+        if not link.count():
+            return False
+        # Walk up a couple of ancestors for nearby status text.
+        for depth in range(1, 5):
+            try:
+                node = link
+                for _ in range(depth):
+                    node = node.locator("xpath=..")
+                text = (node.inner_text(timeout=1_500) or "").lower()
+            except Exception:
+                continue
+            if any(p in text for p in _SOLD_OR_INACTIVE_PHRASES):
+                return True
+            if _SOLD_STATUS_TOKEN.search(text or ""):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _is_sold_or_deactivated(page: Page) -> bool:
+    """Detail or post-action page shows Vendido / sold / pending / out of stock."""
+    try:
+        available = page.get_by_role("button", name=_MARK_AVAILABLE)
+        if available.count() and available.first.is_visible():
+            return True
+        if page.get_by_role("menuitem", name=_MARK_AVAILABLE).count():
+            return True
+    except Exception:
+        pass
+
+    try:
+        body = page.locator("body").inner_text(timeout=5_000) or ""
+    except Exception:
+        body = ""
+    body_l = body.lower()
+    if body_l and any(p in body_l for p in _SOLD_OR_INACTIVE_PHRASES):
+        return True
+
+    # Status chips only — strip action labels that contain "sold"/"vendido" as verbs.
+    cleaned = re.sub(
+        r"mark(?:ing)? as sold|marcar como vendido|marcar vendido|mark sold|"
+        r"mark as pending|marcar como pendiente|mark pending",
+        " ",
+        body,
+        flags=re.I,
+    )
+    if cleaned and _SOLD_STATUS_TOKEN.search(cleaned):
+        try:
+            still_can_sell = bool(page.get_by_role("button", name=_MARK_SOLD).count())
+            still_can_sell = still_can_sell or bool(
+                page.get_by_role("menuitem", name=_MARK_SOLD).count()
+            )
+        except Exception:
+            still_can_sell = False
+        if not still_can_sell:
+            return True
+    return False
 
 
 def _listing_already_gone(
@@ -586,6 +780,15 @@ def _listing_already_gone(
     item_id: str | None = None,
 ) -> bool:
     """True when the FB listing is already sold, deleted, or unavailable."""
+    # Hard veto: open confirm dialog or still-visible Mark as sold → not removed.
+    if _dialog_open(page):
+        return False
+    if _still_has_mark_sold_control(page):
+        return False
+
+    if _is_sold_or_deactivated(page):
+        return True
+
     try:
         available = page.get_by_role("button", name=_MARK_AVAILABLE)
         if available.count() and available.first.is_visible():
@@ -598,21 +801,24 @@ def _listing_already_gone(
     except Exception:
         url = ""
 
+    # On selling/dashboard shelves: never treat inventory chrome alone as "item gone".
+    # (Shelf pages often contain words like "Vendido" in filters/tabs.)
+    inventory_ui = any(
+        marker in url
+        for marker in (
+            "/marketplace/you/",
+            "/you/selling",
+            "/you/dashboard",
+            "/marketplace/create",
+        )
+    )
+    if inventory_ui:
+        return False
+
     # Redirected off the item detail (deleted / 404 shell) without login wall.
-    # Do NOT treat Selling / dashboard as "gone" — shelf navigation lands there often
-    # while the public item URL is still live (visitor chrome cases).
     if url and "login" not in url and "checkpoint" not in url:
         on_item = bool(re.search(r"/marketplace/item/\d+", url))
-        inventory_ui = any(
-            marker in url
-            for marker in (
-                "/marketplace/you/",
-                "/you/selling",
-                "/you/dashboard",
-                "/marketplace/create",
-            )
-        )
-        if listing_url and item_id and not on_item and not inventory_ui:
+        if listing_url and item_id and not on_item:
             if "marketplace" in url or "facebook.com" in url:
                 if not _has_live_controls(page):
                     return True
@@ -635,14 +841,84 @@ def _listing_already_gone(
     return False
 
 
-def _has_live_controls(page: Page) -> bool:
+def _still_has_mark_sold_control(page: Page) -> bool:
+    """True if the seller can still 'Mark as sold' (listing still active for sale)."""
     try:
-        if page.get_by_role("button", name=_MARK_SOLD).count():
-            return True
-        if page.get_by_role("menuitem", name=_MARK_SOLD).count():
-            return True
+        for role in ("button", "menuitem"):
+            loc = page.get_by_role(role, name=_MARK_SOLD)
+            for i in range(min(loc.count() or 0, 4)):
+                try:
+                    if loc.nth(i).is_visible():
+                        return True
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return False
+
+
+def _still_has_mark_pending_control(page: Page) -> bool:
+    try:
+        for role in ("button", "menuitem"):
+            loc = page.get_by_role(role, name=_MARK_PENDING)
+            for i in range(min(loc.count() or 0, 4)):
+                try:
+                    if loc.nth(i).is_visible():
+                        return True
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return False
+
+
+def _dialog_open(page: Page) -> bool:
+    try:
+        dialogs = page.locator('[role="dialog"], [aria-modal="true"]')
+        for i in range(min(dialogs.count() or 0, 5)):
+            try:
+                if dialogs.nth(i).is_visible():
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
+
+
+def _removal_postcondition_ok(page: Page) -> bool:
+    """True only when listing is deactivated.
+
+    Hiding Marcar como vendido behind an open confirm dialog does NOT count.
+    """
+    if _dialog_open(page):
+        return False
+    if _is_sold_or_deactivated(page):
+        return True
+    if _still_has_mark_sold_control(page):
+        return False
+    if _still_has_mark_pending_control(page):
+        return False
+    # No for-sale buttons and no dialog → accept as deactivated for repost.
+    return True
+
+
+def _has_live_controls(page: Page) -> bool:
+    """For-sale owner actions only (not Mark as available after sold)."""
+    try:
+        if page.get_by_role("button", name=_MARK_AVAILABLE).count():
+            return False
+        if page.get_by_role("menuitem", name=_MARK_AVAILABLE).count():
+            return False
+    except Exception:
+        pass
+    if _still_has_mark_sold_control(page):
+        return True
+    try:
         if page.get_by_role("button", name=_EDIT_LISTING).count():
-            return True
+            # Edit alone is weak — only count with other for-sale cues or pending.
+            if page.get_by_role("button", name=_MARK_PENDING).count():
+                return True
         for pattern in _DELETE_PATTERNS:
             if page.get_by_role("menuitem", name=pattern).count():
                 return True
@@ -654,20 +930,179 @@ def _has_live_controls(page: Page) -> bool:
 
 
 def _mark_sold(page: Page) -> None:
-    # Owner detail (account_2 style): blue "Marcar como vendido" on the page
-    if _click_role_name(page, _MARK_SOLD):
-        _confirm_if_needed(page)
-        return
-    _open_listing_menu(page)
-    if _click_menu_action(page, action="mark_sold"):
-        _confirm_if_needed(page)
-        return
-    if _listing_already_gone(page):
-        return
-    raise FacebookPostingError(
-        "Mark-as-sold control not found "
-        "(expected 'Marcar como vendido' / 'Mark as sold' as button or menu item)"
+    """Mark listing sold; require post-condition (sold UI / no Mark as sold button)."""
+    # Owner detail: blue "Marcar como vendido" on the page
+    clicked = _click_role_name(page, _MARK_SOLD)
+    if not clicked:
+        _open_listing_menu(page)
+        clicked = _click_menu_action(page, action="mark_sold")
+    if not clicked:
+        if _is_sold_or_deactivated(page) or not _still_has_mark_sold_control(page):
+            if _is_sold_or_deactivated(page) or _listing_still_inactive_hint(page):
+                return
+        raise FacebookPostingError(
+            "Mark-as-sold control not found "
+            "(expected 'Marcar como vendido' / 'Mark as sold' as button or menu item)"
+        )
+
+    if not _finish_mark_sold_flow(page):
+        raise FacebookPostingError(
+            "Mark as sold clicked but listing still shows 'Marcar como vendido' "
+            "(dialog not confirmed or Facebook rejected the status change)"
+        )
+
+
+def _listing_still_inactive_hint(page: Page) -> bool:
+    """Weak inactive signal when Mark as sold is already gone."""
+    return _is_sold_or_deactivated(page) or not _still_has_mark_sold_control(page)
+
+
+def _finish_mark_sold_flow(page: Page) -> bool:
+    """Confirm multi-step mark-sold dialogs until sold or for-sale control disappears."""
+    # FB often opens a layered dialog: Confirm → sometimes Next/Done / buyer picker.
+    confirm_patterns = (
+        re.compile(
+            r"mark as sold|marcar como vendido|marcar vendido",
+            re.I,
+        ),
+        re.compile(r"confirm|confirmar|sí, marcar|si, marcar|yes, mark", re.I),
+        re.compile(
+            r"next|siguiente|continue|continuar|done|listo|guardar|save|"
+            r"publish|publicar|finish|finalizar|aplicar|apply",
+            re.I,
+        ),
+        re.compile(r"^\s*yes\s*$|^\s*sí\s*$|^\s*si\s*$|^\s*ok\s*$|^\s*aceptar\s*$", re.I),
     )
+    dialog_sel = (
+        '[role="dialog"], [aria-modal="true"], div[data-pagelet*="Dialog"], '
+        'div[aria-label*="vendido" i], div[aria-label*="sold" i]'
+    )
+
+    def _click_in_scope(scope, pattern: re.Pattern[str]) -> bool:
+        try:
+            # Prefer primary filled buttons inside dialogs first.
+            primaries = scope.locator(
+                '[aria-label*="vendido" i], [aria-label*="sold" i], '
+                '[aria-label*="confirmar" i], [aria-label*="confirm" i], '
+                '[aria-label*="siguiente" i], [aria-label*="next" i], '
+                '[aria-label*="listo" i], [aria-label*="done" i]'
+            )
+            for i in range(min(primaries.count() or 0, 6)):
+                item = primaries.nth(i)
+                try:
+                    if item.is_visible():
+                        item.click(timeout=5_000)
+                        page.wait_for_timeout(1_500)
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        try:
+            btn = scope.get_by_role("button", name=pattern)
+            for i in range(min(btn.count() or 0, 4)):
+                item = btn.nth(i)
+                try:
+                    if not item.is_visible():
+                        continue
+                    item.click(timeout=5_000)
+                    page.wait_for_timeout(1_500)
+                    return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        try:
+            alt = scope.locator(
+                '[role="button"], [role="menuitem"], button'
+            ).filter(has_text=pattern)
+            for i in range(min(alt.count() or 0, 4)):
+                item = alt.nth(i)
+                try:
+                    if not item.is_visible():
+                        continue
+                    item.click(timeout=5_000)
+                    page.wait_for_timeout(1_500)
+                    return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return False
+
+    for _round in range(8):
+        page.wait_for_timeout(1_000)
+        if _removal_postcondition_ok(page):
+            return True
+
+        progressed = False
+        # Dialog-scoped clicks first (avoids re-hitting page-level Mark as sold).
+        try:
+            dialogs = page.locator(dialog_sel)
+            dcount = dialogs.count() or 0
+        except Exception:
+            dcount = 0
+        if dcount:
+            scope = dialogs.last
+            for pattern in confirm_patterns:
+                if _click_in_scope(scope, pattern):
+                    progressed = True
+                    break
+            # Radio / list options inside sold dialog (e.g. sold outside Marketplace)
+            if not progressed:
+                try:
+                    opts = scope.locator(
+                        '[role="radio"], [role="option"], label, '
+                        '[role="listitem"], div[role="button"]'
+                    )
+                    for i in range(min(opts.count() or 0, 8)):
+                        item = opts.nth(i)
+                        try:
+                            txt = (item.inner_text(timeout=600) or "").lower()
+                            if not item.is_visible():
+                                continue
+                            if any(
+                                t in txt
+                                for t in (
+                                    "fuera",
+                                    "otro",
+                                    "other",
+                                    "marketplace",
+                                    "facebook",
+                                    "no se",
+                                    "prefer not",
+                                    "prefiero no",
+                                )
+                            ):
+                                item.click(timeout=4_000)
+                                page.wait_for_timeout(1_000)
+                                progressed = True
+                                break
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+        else:
+            for pattern in confirm_patterns:
+                # Avoid the still-visible page-level Mark as sold (would loop).
+                if pattern.search("mark as sold") or pattern.search("marcar como vendido"):
+                    continue
+                if _click_in_scope(page, pattern):
+                    progressed = True
+                    break
+
+        if not progressed:
+            _confirm_if_needed(page)
+            page.wait_for_timeout(1_200)
+            if _removal_postcondition_ok(page):
+                return True
+            # Force-reclick mark sold once if no dialog appeared (flaky first click).
+            if _round == 2 and _still_has_mark_sold_control(page):
+                _click_role_name(page, _MARK_SOLD)
+            if _round >= 4:
+                break
+
+    return _removal_postcondition_ok(page)
 
 
 def _delete_listing(page: Page) -> None:
@@ -675,6 +1110,8 @@ def _delete_listing(page: Page) -> None:
     for pattern in _DELETE_PATTERNS:
         if _click_role_name(page, pattern):
             _confirm_if_needed(page, prefer_delete=True)
+            if not _still_has_mark_sold_control(page) or _listing_already_gone(page):
+                return
             return
 
     _open_listing_menu(page)
