@@ -232,13 +232,14 @@ class TestRemoveVehicleListingFallbacks(unittest.TestCase):
         self.assertEqual(shelf.call_args.args[1], "1773123456")
         self.assertEqual(shelf.call_args.kwargs.get("action"), "delete")
 
-    def test_raises_when_all_strategies_fail(self):
+    def test_soft_false_when_all_strategies_fail(self):
         page = MagicMock()
         page.url = "https://www.facebook.com/marketplace/item/1/"
         log_dir = Path(tempfile.mkdtemp())
 
         with (
             patch("src.facebook.remover._listing_already_gone", return_value=False),
+            patch("src.facebook.remover._is_content_unavailable", return_value=False),
             patch(
                 "src.facebook.remover._perform_removal_on_current_page",
                 side_effect=FacebookPostingError("Delete control not found"),
@@ -250,17 +251,37 @@ class TestRemoveVehicleListingFallbacks(unittest.TestCase):
             patch("src.facebook.remover._verify_listing_removed", return_value=False),
             patch("src.facebook.remover._save_debug"),
         ):
-            with self.assertRaises(FacebookPostingError) as ctx:
-                remove_vehicle_listing(
-                    page,
-                    "https://www.facebook.com/marketplace/item/123/",
-                    autosell_id="obj1102",
-                    removal_action="delete",
-                    log_dir=log_dir,
-                    require_verified=True,
-                )
-        self.assertIn("Delete/mark-sold", str(ctx.exception))
-        self.assertIn("obj1102", str(ctx.exception))
+            ok = remove_vehicle_listing(
+                page,
+                "https://www.facebook.com/marketplace/item/123/",
+                autosell_id="obj1102",
+                removal_action="delete",
+                log_dir=log_dir,
+                require_verified=True,
+            )
+        self.assertFalse(ok)
+
+    def test_content_unavailable_returns_true_without_assert(self):
+        page = MagicMock()
+        page.url = "https://www.facebook.com/marketplace/item/1/"
+        log_dir = Path(tempfile.mkdtemp())
+
+        with (
+            patch("src.facebook.remover._is_content_unavailable", return_value=True),
+            patch("src.facebook.remover._assert_removed_or_raise") as assert_rm,
+            patch("src.facebook.remover._delete_listing") as delete,
+        ):
+            ok = remove_vehicle_listing(
+                page,
+                "https://www.facebook.com/marketplace/item/123/",
+                autosell_id="obj_gone",
+                removal_action="delete",
+                log_dir=log_dir,
+                require_verified=True,
+            )
+        self.assertTrue(ok)
+        assert_rm.assert_not_called()
+        delete.assert_not_called()
 
 
 class TestOwnerVsVisitorChrome(unittest.TestCase):

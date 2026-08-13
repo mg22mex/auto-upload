@@ -242,10 +242,12 @@ def _repost_one(
             require_verified=True,
         )
         if not ok:
-            raise FacebookPostingError(
-                f"Remove returned not-ok for {action.autosell_id}; "
-                "refusing create (duplicate risk)"
+            # Soft skip: controls not found / unverified — continue queue, no create.
+            print(
+                f"WARNING: {action.autosell_id}: remove not confirmed — "
+                f"SKIP_CREATE (soft); continuing remaining queue"
             )
+            return
         removed = True
         # Clear old URL so a mid-create crash is not treated as still live.
         store.mark_fb_listing_removed(

@@ -58,7 +58,7 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
 
         def fail_remove(*_a, **_k):
             order.append("remove")
-            raise FacebookPostingError("Delete control not found")
+            return False
 
         def boom_create(*_a, **_k):
             order.append("create")
@@ -68,22 +68,55 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
             patch("src.facebook.reposter.remove_vehicle_listing", side_effect=fail_remove),
             patch("src.facebook.reposter.create_vehicle_listing", side_effect=boom_create),
         ):
-            with self.assertRaises(FacebookPostingError) as ctx:
-                _repost_one(
-                    page,
-                    _action(),
-                    store,
-                    fb_config={},
-                    max_photos=5,
-                    removal_action="delete",
-                    log_dir=Path("/tmp"),
-                    result=result,
-                )
+            _repost_one(
+                page,
+                _action(),
+                store,
+                fb_config={},
+                max_photos=5,
+                removal_action="delete",
+                log_dir=Path("/tmp"),
+                result=result,
+            )
 
-        self.assertIn("SKIP_CREATE", str(ctx.exception))
         self.assertEqual(order, ["remove"])
         store.mark_fb_listing_removed.assert_not_called()
         store.record_repost.assert_not_called()
+
+    def test_unavailable_remove_clears_db_and_creates(self):
+        """Content-isn't-available → treat removed, purge URL, then create."""
+        page = MagicMock()
+        store = MagicMock()
+        result = MagicMock(reposts=0)
+        order: list[str] = []
+
+        def gone_remove(*_a, **_k):
+            order.append("remove")
+            return True
+
+        def ok_create(*_a, **_k):
+            order.append("create")
+            return "https://www.facebook.com/marketplace/item/999/"
+
+        with (
+            patch("src.facebook.reposter.remove_vehicle_listing", side_effect=gone_remove),
+            patch("src.facebook.reposter.create_vehicle_listing", side_effect=ok_create),
+        ):
+            _repost_one(
+                page,
+                _action(),
+                store,
+                fb_config={},
+                max_photos=5,
+                removal_action="delete",
+                log_dir=Path("/tmp"),
+                result=result,
+            )
+
+        self.assertEqual(order, ["remove", "create"])
+        store.mark_fb_listing_removed.assert_called()
+        store.record_repost.assert_called()
+        self.assertEqual(result.reposts, 1)
 
     def test_remove_before_create_order_and_db_cleared(self):
         page = MagicMock()
@@ -141,19 +174,20 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
             ),
             patch("src.facebook.reposter.create_vehicle_listing") as create,
         ):
-            with self.assertRaises(FacebookPostingError) as ctx:
-                _repost_one(
-                    page,
-                    _action(),
-                    store,
-                    fb_config={},
-                    max_photos=5,
-                    removal_action="delete",
-                    log_dir=Path("/tmp"),
-                    result=result,
-                )
-        self.assertIn("SKIP_CREATE", str(ctx.exception))
+            _repost_one(
+                page,
+                _action(),
+                store,
+                fb_config={},
+                max_photos=5,
+                removal_action="delete",
+                log_dir=Path("/tmp"),
+                result=result,
+            )
         create.assert_not_called()
+        store.mark_fb_listing_removed.assert_not_called()
+        store.record_repost.assert_not_called()
+        self.assertEqual(result.reposts, 0)
 
     def test_mark_fb_listing_removed_clears_url(self):
         with tempfile.TemporaryDirectory() as tmp:

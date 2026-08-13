@@ -101,15 +101,18 @@ _MARK_AVAILABLE = re.compile(
     re.I,
 )
 _MARK_SOLD = re.compile(
-    r"mark as sold|marcar como vendido|marcar vendido|mark sold",
+    r"mark as sold|marcar como vendido|marcar vendido|mark sold|"
+    r"^\s*sold\s*$",
     re.I,
 )
 _MARK_PENDING = re.compile(
-    r"mark as pending|marcar como pendiente|mark pending",
+    r"mark as pending|marcar como pendiente|mark pending|"
+    r"^\s*pending\s*$",
     re.I,
 )
 _EDIT_LISTING = re.compile(
-    r"^\s*edit\s*$|^\s*editar\s*$|edit listing|editar publicación",
+    r"^\s*edit\s*$|^\s*editar\s*$|edit listing|editar publicación|"
+    r"edit item|editar anuncio",
     re.I,
 )
 _MANAGE_LISTING = re.compile(
@@ -118,7 +121,8 @@ _MANAGE_LISTING = re.compile(
     re.I,
 )
 _MESSAGE_SELLER = re.compile(
-    r"send message|enviar mensaje|message seller|enviar un mensaje",
+    r"send message|enviar mensaje|message seller|enviar un mensaje|"
+    r"message the seller|mensajear al vendedor",
     re.I,
 )
 _DELETE_PATTERNS = (
@@ -126,7 +130,8 @@ _DELETE_PATTERNS = (
         r"delete listing|eliminar publicación|delete this listing|"
         r"eliminar esta publicación|eliminar anuncio|delete item|"
         r"eliminar artículo|remove listing|delete forever|"
-        r"eliminar para siempre|borrar publicación|borrar anuncio",
+        r"eliminar para siempre|borrar publicación|borrar anuncio|"
+        r"delete post|delete this post",
         re.I,
     ),
     re.compile(r"^\s*delete\s*$|^\s*eliminar\s*$|^\s*borrar\s*$", re.I),
@@ -136,6 +141,27 @@ _MORE_MENU = re.compile(
     r"see more|ver más|actions|acciones|listing options|"
     r"opciones de la publicación|opciones del anuncio",
     re.I,
+)
+# Direct aria-labels (EN + ES) for owner listing controls.
+_OWNER_ACTION_ARIA = (
+    '[aria-label="Mark as sold"]',
+    '[aria-label="Mark as pending"]',
+    '[aria-label="Delete listing"]',
+    '[aria-label="Delete"]',
+    '[aria-label="Edit"]',
+    '[aria-label="Edit listing"]',
+    '[aria-label="Marcar como vendido"]',
+    '[aria-label="Marcar como pendiente"]',
+    '[aria-label="Eliminar publicación"]',
+    '[aria-label="Eliminar"]',
+    '[aria-label="Editar"]',
+    '[aria-label="Editar publicación"]',
+    '[aria-label*="Mark as sold" i]',
+    '[aria-label*="Mark as pending" i]',
+    '[aria-label*="Delete listing" i]',
+    '[aria-label*="Marcar como vendido" i]',
+    '[aria-label*="Marcar como pendiente" i]',
+    '[aria-label*="Eliminar publicación" i]',
 )
 _MORE_ARIA_SELECTORS = (
     '[aria-label="Más opciones"]',
@@ -185,10 +211,11 @@ def remove_vehicle_listing(
 ) -> bool:
     """Remove a Marketplace listing (delete or mark sold).
 
-    Returns True when the listing is confirmed gone/sold.
+    Returns True when the listing is confirmed gone/sold/unavailable.
 
-    When ``require_verified`` is True (repost path), failure to remove or to
-    verify removal raises ``FacebookPostingError`` and must block create.
+    When ``require_verified`` is True (repost path), a verified removal is
+    required before create. Soft failures (controls not found) return False
+    with a WARNING instead of raising, so the caller can continue the queue.
 
     Strategies (in order):
     1. Open ``listing_url`` — treat 404 / unavailable as already removed
@@ -213,10 +240,22 @@ def remove_vehicle_listing(
     except Exception as exc:
         print(f"  {autosell_id}: listing URL navigation failed ({exc}) — checking if gone")
 
+    if _is_content_unavailable(page):
+        print(
+            f"WARNING: {autosell_id}: listing content isn't available "
+            f"(already deleted/unavailable) — treating as removed; "
+            f"caller should purge sync.db mapping"
+        )
+        return True
+
     if _listing_already_gone(page, listing_url=listing_url, item_id=item_id):
         print(f"  {autosell_id}: listing already sold/unavailable — treating as removed")
-        if require_verified:
-            _assert_removed_or_raise(page, listing_url, autosell_id, log_dir)
+        if require_verified and not _is_content_unavailable(page):
+            if not _verify_listing_removed(page, listing_url):
+                # Unavailable/sold banners can flap; prefer soft-success if banner seen.
+                if _is_content_unavailable(page) or _is_sold_or_deactivated(page):
+                    return True
+                _assert_removed_or_raise(page, listing_url, autosell_id, log_dir)
         return True
 
     visitor_detail = _is_visitor_listing_view(page)
@@ -224,7 +263,7 @@ def remove_vehicle_listing(
     if visitor_detail and not owner_detail:
         print(
             f"  {autosell_id}: detail looks like buyer/visitor view "
-            f"(Enviar mensaje present; no Editar / Marcar como vendido) — "
+            f"(Enviar mensaje / Message seller present; no Edit / Mark as sold) — "
             f"skipping detail menus, going to selling shelf"
         )
         last_error = FacebookPostingError(
@@ -249,9 +288,11 @@ def remove_vehicle_listing(
                 except Exception as alt_exc:
                     last_error = alt_exc
 
-    if _listing_already_gone(page, listing_url=listing_url, item_id=item_id):
+    if _is_content_unavailable(page) or _listing_already_gone(
+        page, listing_url=listing_url, item_id=item_id
+    ):
         print(f"  {autosell_id}: listing gone after detail remove")
-        if require_verified:
+        if require_verified and not _is_content_unavailable(page):
             _assert_removed_or_raise(page, listing_url, autosell_id, log_dir)
         return True
 
@@ -269,9 +310,11 @@ def remove_vehicle_listing(
             last_error = exc
             print(f"  {autosell_id}: selling-shelf remove failed: {exc}")
 
-    if _listing_already_gone(page, listing_url=listing_url, item_id=item_id):
+    if _is_content_unavailable(page) or _listing_already_gone(
+        page, listing_url=listing_url, item_id=item_id
+    ):
         print(f"  {autosell_id}: listing gone after selling-shelf remove")
-        if require_verified:
+        if require_verified and not _is_content_unavailable(page):
             _assert_removed_or_raise(page, listing_url, autosell_id, log_dir)
         return True
 
@@ -279,8 +322,14 @@ def remove_vehicle_listing(
     try:
         page.goto(listing_url, wait_until="domcontentloaded", timeout=60_000)
         page.wait_for_timeout(2_000)
+        if _is_content_unavailable(page):
+            print(
+                f"WARNING: {autosell_id}: content isn't available after shelf attempt "
+                f"— treating as removed"
+            )
+            return True
         if _listing_already_gone(page, listing_url=listing_url, item_id=item_id):
-            if require_verified:
+            if require_verified and not _is_content_unavailable(page):
                 _assert_removed_or_raise(page, listing_url, autosell_id, log_dir)
             return True
         alt = "mark_sold" if action == "delete" else "delete"
@@ -297,6 +346,12 @@ def remove_vehicle_listing(
         if _verify_listing_removed(page, listing_url):
             print(f"  {autosell_id}: removal verified (listing gone/sold)")
             return True
+        if _is_content_unavailable(page):
+            print(
+                f"WARNING: {autosell_id}: content isn't available on final check "
+                f"— treating as removed"
+            )
+            return True
         _save_debug(page, log_dir, autosell_id, "remove_failed")
         ownership_hint = ""
         try:
@@ -309,21 +364,82 @@ def remove_vehicle_listing(
         except Exception:
             pass
         detail = f": {last_error}" if last_error else ""
-        raise FacebookPostingError(
-            f"Remove failed for {autosell_id}: Delete/mark-sold controls not found "
-            f"(owner chrome: 'Marcar como vendido' / 'Editar'; menu: "
-            f"'Eliminar publicación' / 'Delete listing') "
-            f"and listing still active{detail}.{ownership_hint}"
+        print(
+            f"WARNING: {autosell_id}: Delete/mark-sold controls not found "
+            f"(EN: 'Mark as sold' / 'Delete listing'; "
+            f"ES: 'Marcar como vendido' / 'Eliminar publicación') "
+            f"and listing still active{detail}.{ownership_hint} "
+            f"— skipping this item; continuing queue"
         )
+        return False
 
     if _listing_already_gone(page, listing_url=listing_url, item_id=item_id):
         return True
+    if _is_content_unavailable(page):
+        print(
+            f"WARNING: {autosell_id}: content isn't available — treating as removed"
+        )
+        return True
     if last_error is not None:
         _save_debug(page, log_dir, autosell_id, "remove_failed")
-        raise FacebookPostingError(
-            f"Remove failed for {autosell_id}: {last_error}"
-        ) from last_error
-    return _listing_already_gone(page, listing_url=listing_url, item_id=item_id)
+        print(
+            f"WARNING: {autosell_id}: remove failed ({last_error}) "
+            f"— skipping this item; continuing queue"
+        )
+        return False
+    if _listing_already_gone(page, listing_url=listing_url, item_id=item_id):
+        return True
+    print(
+        f"WARNING: {autosell_id}: could not confirm removal "
+        f"— skipping this item; continuing queue"
+    )
+    return False
+
+
+def _is_content_unavailable(page: Page) -> bool:
+    """True when FB shows the deleted/unavailable content banner (EN/ES)."""
+    phrases = (
+        "this content isn't available right now",
+        "this content isn't available",
+        "this content is no longer available",
+        "sorry, this content isn't available",
+        "content isn't available",
+        "este contenido no está disponible",
+        "este contenido no esta disponible",
+        "lo sentimos, este contenido no está disponible",
+        "contenido no está disponible",
+        "contenido no esta disponible",
+        "page isn't available",
+        "la página no está disponible",
+    )
+    try:
+        for phrase in phrases:
+            loc = page.get_by_text(re.compile(re.escape(phrase), re.I))
+            try:
+                count = loc.count()
+            except Exception:
+                count = 0
+            if not isinstance(count, int) or count <= 0:
+                continue
+            try:
+                if loc.first.is_visible():
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    try:
+        raw = page.locator("body").inner_text(timeout=4_000)
+    except Exception:
+        raw = ""
+    if not isinstance(raw, str):
+        return False
+    body = raw.lower()
+    if body and any(p in body for p in phrases):
+        # Avoid matching generic marketplace chrome; require "content/contenido" cue.
+        if "content" in body or "contenido" in body or "página" in body or "page isn't" in body:
+            return True
+    return False
 
 
 def _perform_removal_on_current_page(page: Page, *, action: str) -> None:
@@ -334,13 +450,38 @@ def _perform_removal_on_current_page(page: Page, *, action: str) -> None:
 
 
 def _is_owner_listing_view(page: Page) -> bool:
-    """Seller chrome: Editar / Marcar como vendido / Marcar como pendiente."""
+    """Seller chrome: Edit / Mark as sold / Mark as pending (EN + ES)."""
     for pattern in (_MARK_SOLD, _MARK_PENDING, _EDIT_LISTING, _MANAGE_LISTING):
         try:
             for role in ("button", "link", "menuitem"):
                 loc = page.get_by_role(role, name=pattern)
-                if loc.count() and loc.first.is_visible():
+                try:
+                    count = loc.count()
+                except Exception:
+                    count = 0
+                if not isinstance(count, int) or count <= 0:
+                    continue
+                try:
+                    if loc.first.is_visible():
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    for selector in _OWNER_ACTION_ARIA:
+        try:
+            loc = page.locator(selector)
+            try:
+                count = loc.count()
+            except Exception:
+                count = 0
+            if not isinstance(count, int) or count <= 0:
+                continue
+            try:
+                if loc.first.is_visible():
                     return True
+            except Exception:
+                continue
         except Exception:
             continue
     return False
@@ -571,11 +712,22 @@ def _assert_removed_or_raise(
     autosell_id: str,
     log_dir: Path,
 ) -> None:
+    if _is_content_unavailable(page):
+        print(
+            f"WARNING: {autosell_id}: content isn't available — removal verified"
+        )
+        return
     # Settlement buffer: FB CDN/detail cache often lags behind mark_sold UI.
     print(f"  {autosell_id}: waiting for Marketplace cache to settle…")
     page.wait_for_timeout(4_000)
     if _verify_listing_removed(page, listing_url):
         print(f"  {autosell_id}: removal verified (listing gone/sold)")
+        return
+    if _is_content_unavailable(page):
+        print(
+            f"WARNING: {autosell_id}: content isn't available after settle — "
+            f"removal verified"
+        )
         return
     _save_debug(page, log_dir, autosell_id, "remove_unverified")
     raise FacebookPostingError(
@@ -604,6 +756,12 @@ def _verify_listing_removed(page: Page, listing_url: str) -> bool:
         except Exception:
             return True
 
+        if _is_content_unavailable(page):
+            print(
+                f"  verify attempt {attempt + 1}: content isn't available — ok"
+            )
+            return True
+
         if _dialog_open(page):
             _finish_mark_sold_flow(page)
             page.wait_for_timeout(2_000)
@@ -611,6 +769,8 @@ def _verify_listing_removed(page: Page, listing_url: str) -> bool:
                 page.goto(listing_url, wait_until="domcontentloaded", timeout=45_000)
                 page.wait_for_timeout(2_000)
             except Exception:
+                return True
+            if _is_content_unavailable(page):
                 return True
 
         if _listing_already_gone(page, listing_url=listing_url, item_id=item_id):
@@ -631,6 +791,8 @@ def _verify_listing_removed(page: Page, listing_url: str) -> bool:
                 page.goto(listing_url, wait_until="domcontentloaded", timeout=45_000)
                 page.wait_for_timeout(2_000)
             except Exception:
+                return True
+            if _is_content_unavailable(page):
                 return True
             if _listing_already_gone(page, listing_url=listing_url, item_id=item_id):
                 return True
@@ -929,10 +1091,47 @@ def _has_live_controls(page: Page) -> bool:
     return False
 
 
+def _click_aria_action(page: Page, *, action: str) -> bool:
+    """Click EN/ES aria-labelled owner controls (Mark as sold / Delete / …)."""
+    if action == "mark_sold":
+        selectors = [
+            s
+            for s in _OWNER_ACTION_ARIA
+            if "sold" in s.lower() or "vendido" in s.lower()
+        ]
+    elif action == "delete":
+        selectors = [
+            s
+            for s in _OWNER_ACTION_ARIA
+            if "delete" in s.lower() or "eliminar" in s.lower()
+        ]
+    else:
+        selectors = list(_OWNER_ACTION_ARIA)
+    for selector in selectors:
+        try:
+            loc = page.locator(selector)
+            for i in range(min(loc.count() or 0, 4)):
+                item = loc.nth(i)
+                try:
+                    if not item.is_visible():
+                        continue
+                    item.scroll_into_view_if_needed(timeout=2_000)
+                    item.click(timeout=8_000)
+                    page.wait_for_timeout(1_500)
+                    return True
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    return False
+
+
 def _mark_sold(page: Page) -> None:
     """Mark listing sold; require post-condition (sold UI / no Mark as sold button)."""
-    # Owner detail: blue "Marcar como vendido" on the page
-    clicked = _click_role_name(page, _MARK_SOLD)
+    # Owner detail: blue "Mark as sold" / "Marcar como vendido" (role or aria-label)
+    clicked = _click_role_name(page, _MARK_SOLD) or _click_aria_action(
+        page, action="mark_sold"
+    )
     if not clicked:
         _open_listing_menu(page)
         clicked = _click_menu_action(page, action="mark_sold")
@@ -942,12 +1141,12 @@ def _mark_sold(page: Page) -> None:
                 return
         raise FacebookPostingError(
             "Mark-as-sold control not found "
-            "(expected 'Marcar como vendido' / 'Mark as sold' as button or menu item)"
+            "(expected 'Mark as sold' / 'Marcar como vendido' as button or menu item)"
         )
 
     if not _finish_mark_sold_flow(page):
         raise FacebookPostingError(
-            "Mark as sold clicked but listing still shows 'Marcar como vendido' "
+            "Mark as sold clicked but listing still shows for-sale control "
             "(dialog not confirmed or Facebook rejected the status change)"
         )
 
@@ -1106,13 +1305,16 @@ def _finish_mark_sold_flow(page: Page) -> bool:
 
 
 def _delete_listing(page: Page) -> None:
-    # Rare: delete visible without ⋮
+    # Rare: delete visible without ⋮ (EN + ES role / aria)
     for pattern in _DELETE_PATTERNS:
         if _click_role_name(page, pattern):
             _confirm_if_needed(page, prefer_delete=True)
             if not _still_has_mark_sold_control(page) or _listing_already_gone(page):
                 return
             return
+    if _click_aria_action(page, action="delete"):
+        _confirm_if_needed(page, prefer_delete=True)
+        return
 
     _open_listing_menu(page)
     if _click_menu_action(page, action="delete"):
@@ -1131,11 +1333,11 @@ def _delete_listing(page: Page) -> None:
                 _confirm_if_needed(page, prefer_delete=True)
                 return
 
-    if _listing_already_gone(page):
+    if _listing_already_gone(page) or _is_content_unavailable(page):
         return
     raise FacebookPostingError(
         "Delete control not found "
-        "(expected 'Eliminar publicación' / 'Delete listing')"
+        "(expected 'Delete listing' / 'Eliminar publicación')"
     )
 
 

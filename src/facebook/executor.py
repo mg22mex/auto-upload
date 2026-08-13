@@ -171,16 +171,23 @@ def _execute_one(
             result.removals += 1
             print(f"Removed {action.autosell_id} on {action.account_id} (no URL; marked in DB)")
             return
-        remove_vehicle_listing(
+        ok = remove_vehicle_listing(
             page,
             row["fb_listing_url"],
             autosell_id=action.autosell_id,
             removal_action=removal_action,
             log_dir=log_dir,
         )
-        store.mark_fb_listing_removed(action.autosell_id, action.account_id or "")
-        result.removals += 1
-        print(f"Removed {action.autosell_id} on {action.account_id}")
+        if ok:
+            store.mark_fb_listing_removed(action.autosell_id, action.account_id or "")
+            result.removals += 1
+            print(f"Removed {action.autosell_id} on {action.account_id}")
+        else:
+            print(
+                f"WARNING: remove {action.autosell_id} on {action.account_id}: "
+                f"controls not found / unverified — left live in sync.db; "
+                f"continuing queue"
+            )
         return
 
     raise FacebookAutomationError(f"Unknown action: {action.action}")
