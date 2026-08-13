@@ -240,6 +240,8 @@ def _repost_one(
             removal_action=removal_action,
             log_dir=log_dir,
             require_verified=True,
+            store=store,
+            account_id=account_id,
         )
         if not ok:
             # Soft skip: controls not found / unverified — continue queue, no create.

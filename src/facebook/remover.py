@@ -208,6 +208,8 @@ def remove_vehicle_listing(
     removal_action: str,
     log_dir: Path,
     require_verified: bool = False,
+    store: object | None = None,
+    account_id: str | None = None,
 ) -> bool:
     """Remove a Marketplace listing (delete or mark sold).
 
@@ -216,6 +218,9 @@ def remove_vehicle_listing(
     When ``require_verified`` is True (repost path), a verified removal is
     required before create. Soft failures (controls not found) return False
     with a WARNING instead of raising, so the caller can continue the queue.
+
+    Optional ``store`` + ``account_id``: call ``mark_fb_listing_removed`` when
+    treating visitor-chrome orphans (not on selling shelf) as already deleted.
 
     Strategies (in order):
     1. Open ``listing_url`` — treat 404 / unavailable as already removed
@@ -233,6 +238,26 @@ def remove_vehicle_listing(
         f"item_id={item_id or '?'} url={listing_url}"
     )
 
+    def _purge_orphan_mapping(reason: str) -> bool:
+        print(
+            f"WARNING: {autosell_id}: {reason} — treating as already "
+            f"deleted/unavailable; purging sync.db mapping"
+        )
+        if store is not None and account_id:
+            try:
+                store.mark_fb_listing_removed(  # type: ignore[attr-defined]
+                    autosell_id,
+                    account_id,
+                    clear_url=True,
+                )
+                print(
+                    f"  {autosell_id}: sync.db cleared "
+                    f"(status=removed, url=null) account={account_id}"
+                )
+            except Exception as exc:
+                print(f"WARNING: {autosell_id}: sync.db purge failed: {exc}")
+        return True
+
     # --- Primary: listing detail URL ---
     try:
         page.goto(listing_url, wait_until="domcontentloaded", timeout=90_000)
@@ -241,12 +266,9 @@ def remove_vehicle_listing(
         print(f"  {autosell_id}: listing URL navigation failed ({exc}) — checking if gone")
 
     if _is_content_unavailable(page):
-        print(
-            f"WARNING: {autosell_id}: listing content isn't available "
-            f"(already deleted/unavailable) — treating as removed; "
-            f"caller should purge sync.db mapping"
+        return _purge_orphan_mapping(
+            "listing content isn't available (already deleted/unavailable)"
         )
-        return True
 
     if _listing_already_gone(page, listing_url=listing_url, item_id=item_id):
         print(f"  {autosell_id}: listing already sold/unavailable — treating as removed")
@@ -260,7 +282,8 @@ def remove_vehicle_listing(
 
     visitor_detail = _is_visitor_listing_view(page)
     owner_detail = _is_owner_listing_view(page)
-    if visitor_detail and not owner_detail:
+    saw_visitor_only = bool(visitor_detail and not owner_detail)
+    if saw_visitor_only:
         print(
             f"  {autosell_id}: detail looks like buyer/visitor view "
             f"(Enviar mensaje / Message seller present; no Edit / Mark as sold) — "
@@ -297,14 +320,17 @@ def remove_vehicle_listing(
         return True
 
     # --- Fallback: selling shelf (scroll-loaded inventory) ---
+    shelf_removed = False
     if item_id:
         try:
             print(f"  {autosell_id}: trying selling-shelf removal for item {item_id}")
             if _remove_from_selling_shelf(page, item_id, action=action):
+                shelf_removed = True
                 page.wait_for_timeout(2_000)
             elif action == "delete":
                 print(f"  {autosell_id}: selling-shelf retry with mark_sold")
                 if _remove_from_selling_shelf(page, item_id, action="mark_sold"):
+                    shelf_removed = True
                     page.wait_for_timeout(2_000)
         except Exception as exc:
             last_error = exc
@@ -318,16 +344,21 @@ def remove_vehicle_listing(
             _assert_removed_or_raise(page, listing_url, autosell_id, log_dir)
         return True
 
+    # Visitor chrome + not on selling shelf → orphan / already-deleted URL.
+    if saw_visitor_only and item_id and not shelf_removed:
+        if not _item_on_any_selling_shelf(page, item_id):
+            return _purge_orphan_mapping(
+                "visitor/buyer detail chrome and item not found on selling shelf"
+            )
+
     # Detail again after opening from selling
     try:
         page.goto(listing_url, wait_until="domcontentloaded", timeout=60_000)
         page.wait_for_timeout(2_000)
         if _is_content_unavailable(page):
-            print(
-                f"WARNING: {autosell_id}: content isn't available after shelf attempt "
-                f"— treating as removed"
+            return _purge_orphan_mapping(
+                "content isn't available after shelf attempt"
             )
-            return True
         if _listing_already_gone(page, listing_url=listing_url, item_id=item_id):
             if require_verified and not _is_content_unavailable(page):
                 _assert_removed_or_raise(page, listing_url, autosell_id, log_dir)
@@ -342,16 +373,19 @@ def remove_vehicle_listing(
     except Exception as exc:
         last_error = exc
 
+    if saw_visitor_only and item_id and not _item_on_any_selling_shelf(page, item_id):
+        return _purge_orphan_mapping(
+            "visitor/buyer detail chrome and item not found on selling shelf"
+        )
+
     if require_verified:
         if _verify_listing_removed(page, listing_url):
             print(f"  {autosell_id}: removal verified (listing gone/sold)")
             return True
         if _is_content_unavailable(page):
-            print(
-                f"WARNING: {autosell_id}: content isn't available on final check "
-                f"— treating as removed"
+            return _purge_orphan_mapping(
+                "content isn't available on final check"
             )
-            return True
         _save_debug(page, log_dir, autosell_id, "remove_failed")
         ownership_hint = ""
         try:
@@ -376,10 +410,7 @@ def remove_vehicle_listing(
     if _listing_already_gone(page, listing_url=listing_url, item_id=item_id):
         return True
     if _is_content_unavailable(page):
-        print(
-            f"WARNING: {autosell_id}: content isn't available — treating as removed"
-        )
-        return True
+        return _purge_orphan_mapping("content isn't available")
     if last_error is not None:
         _save_debug(page, log_dir, autosell_id, "remove_failed")
         print(
@@ -393,6 +424,20 @@ def remove_vehicle_listing(
         f"WARNING: {autosell_id}: could not confirm removal "
         f"— skipping this item; continuing queue"
     )
+    return False
+
+
+
+def _item_on_any_selling_shelf(page: Page, item_id: str) -> bool:
+    """True if item appears on any owner selling/dashboard shelf (scrolled)."""
+    for shelf in _SELLING_SHELVES:
+        try:
+            page.goto(shelf, wait_until="domcontentloaded", timeout=90_000)
+            page.wait_for_timeout(2_000)
+        except Exception:
+            continue
+        if _find_item_link_scrolled(page, item_id) is not None:
+            return True
     return False
 
 
@@ -541,7 +586,12 @@ def _click_role_name(page: Page, pattern: re.Pattern[str], *, roles: tuple[str, 
 
 
 def _remove_from_selling_shelf(page: Page, item_id: str, *, action: str) -> bool:
-    """Locate listing on selling dashboard and delete/mark-sold from the card menu."""
+    """Locate the item card on selling dashboard and act via its ⋮ menu.
+
+    Delete path: card "…" → "Delete listing" / "Eliminar publicación".
+    Already-sold cards (Mark as available) count as handled for mark_sold;
+    for delete we still try ⋮ → Delete to purge, else accept sold as done.
+    """
     for shelf in _SELLING_SHELVES:
         try:
             page.goto(shelf, wait_until="domcontentloaded", timeout=90_000)
@@ -559,26 +609,50 @@ def _remove_from_selling_shelf(page: Page, item_id: str, *, action: str) -> bool
             pass
         page.wait_for_timeout(500)
 
-        # Prefer card-local ⋮ then listing open + detail remove
-        if _click_more_near_locator(page, link):
-            if _click_menu_action(page, action=action):
-                if action == "mark_sold":
-                    return _finish_mark_sold_flow(page)
-                _confirm_if_needed(page, prefer_delete=True)
-                return not _still_has_mark_sold_control(page) or _listing_already_gone(
-                    page, item_id=item_id
-                )
-            # Opposite action if menu opened but action missing
-            alt = "mark_sold" if action == "delete" else "delete"
-            if _click_menu_action(page, action=alt):
-                if alt == "mark_sold":
-                    return _finish_mark_sold_flow(page)
-                _confirm_if_needed(page, prefer_delete=True)
-                return not _still_has_mark_sold_control(page) or _listing_already_gone(
-                    page, item_id=item_id
-                )
+        card = _shelf_card_root(link)
+        already_sold = _shelf_card_is_sold(card)
 
-        # Open listing from shelf — often switches to owner chrome
+        if already_sold and action == "mark_sold":
+            print(
+                f"  shelf item {item_id}: already sold "
+                f"(Mark as available) — treating as removed"
+            )
+            return True
+
+        # Required path: open this card's "…" then Delete / Mark as sold.
+        if _click_more_on_shelf_card(page, card, link):
+            if action == "delete":
+                if _click_menu_action(page, action="delete"):
+                    _confirm_if_needed(page, prefer_delete=True)
+                    page.wait_for_timeout(1_500)
+                    return True
+                # Menu open but no delete — try mark_sold then accept sold state
+                if _click_menu_action(page, action="mark_sold"):
+                    return _finish_mark_sold_flow(page) or already_sold
+                if already_sold:
+                    print(
+                        f"  shelf item {item_id}: sold (Mark as available) and "
+                        f"no Delete in menu — treating as handled"
+                    )
+                    return True
+            else:
+                if _click_menu_action(page, action="mark_sold"):
+                    return _finish_mark_sold_flow(page)
+                if _click_menu_action(page, action="delete"):
+                    _confirm_if_needed(page, prefer_delete=True)
+                    return True
+                if already_sold:
+                    return True
+
+        # Direct Mark as available on card = already sold (no need to open detail).
+        if already_sold:
+            print(
+                f"  shelf item {item_id}: Mark as available on card — "
+                f"treating as already sold/handled"
+            )
+            return True
+
+        # Last resort: open listing detail from the card (owner chrome).
         try:
             href = None
             try:
@@ -594,6 +668,8 @@ def _remove_from_selling_shelf(page: Page, item_id: str, *, action: str) -> bool
             else:
                 link.click(timeout=8_000)
             page.wait_for_timeout(2_500)
+            if _is_sold_or_deactivated(page) or _is_content_unavailable(page):
+                return True
             try:
                 _perform_removal_on_current_page(page, action=action)
                 return True
@@ -607,6 +683,108 @@ def _remove_from_selling_shelf(page: Page, item_id: str, *, action: str) -> bool
         except Exception:
             continue
     return False
+
+
+def _shelf_card_root(anchor: Locator) -> Locator:
+    """Best-effort card/row container around a marketplace item link."""
+    for xpath in (
+        "xpath=ancestor::div[@role='article'][1]",
+        "xpath=ancestor::div[.//a[contains(@href,'/marketplace/item/')]]"
+        "[.//*[@aria-label='More options' or @aria-label='Más opciones' or "
+        "@aria-label='More' or @aria-label='Más' or "
+        "contains(@aria-label,'Mark as available') or "
+        "contains(@aria-label,'Marcar como disponible')]][1]",
+        "xpath=ancestor::div[8]",
+        "xpath=ancestor::div[6]",
+        "xpath=ancestor::div[4]",
+    ):
+        try:
+            card = anchor.locator(xpath)
+            if card.count() > 0:
+                return card.first
+        except Exception:
+            continue
+    return anchor
+
+
+def _shelf_card_is_sold(card: Locator) -> bool:
+    """True when this shelf card shows sold / Mark as available (EN+ES)."""
+    try:
+        for role in ("button", "menuitem", "link"):
+            loc = card.get_by_role(role, name=_MARK_AVAILABLE)
+            count = loc.count() if hasattr(loc, "count") else 0
+            if isinstance(count, int) and count > 0:
+                try:
+                    if loc.first.is_visible():
+                        return True
+                except Exception:
+                    return True
+    except Exception:
+        pass
+    try:
+        text = (card.inner_text(timeout=2_000) or "").lower()
+    except Exception:
+        text = ""
+    if not text:
+        return False
+    if "mark as available" in text or "marcar como disponible" in text:
+        return True
+    # Status badge "Vendido"/"Sold" without the active "Mark as sold" CTA.
+    if "vendido" in text and "marcar como vendido" not in text:
+        return True
+    if re.search(r"\bsold\b", text) and "mark as sold" not in text:
+        return True
+    return False
+
+
+def _click_more_on_shelf_card(page: Page, card: Locator, anchor: Locator) -> bool:
+    """Click the card-local ⋮ / More options control (required before Delete)."""
+    selectors = list(_MORE_ARIA_SELECTORS) + [
+        '[aria-label*="More" i]',
+        '[aria-label*="Más" i]',
+        'div[aria-haspopup="menu"]',
+        '[role="button"][aria-haspopup="menu"]',
+    ]
+    for selector in selectors:
+        try:
+            btns = card.locator(selector)
+            count = btns.count()
+            if not isinstance(count, int) or count <= 0:
+                continue
+            for i in range(min(count, 6)):
+                btn = btns.nth(i)
+                try:
+                    if not btn.is_visible():
+                        continue
+                    label = (btn.get_attribute("aria-label") or "").lower()
+                    # Skip promote / boost / share lookalikes when possible.
+                    if any(x in label for x in ("boost", "promote", "share", "compartir")):
+                        continue
+                    btn.scroll_into_view_if_needed(timeout=2_000)
+                    btn.click(timeout=5_000)
+                    page.wait_for_timeout(1_200)
+                    if _menu_open(page):
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    # Role/name fallback inside card
+    try:
+        named = card.get_by_role("button", name=_MORE_MENU)
+        for i in range(min(named.count() or 0, 4)):
+            try:
+                b = named.nth(i)
+                if b.is_visible():
+                    b.click(timeout=5_000)
+                    page.wait_for_timeout(1_200)
+                    if _menu_open(page):
+                        return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return _click_more_near_locator(page, anchor)
 
 
 def _find_item_link_scrolled(page: Page, item_id: str) -> Locator | None:

@@ -177,6 +177,8 @@ def _execute_one(
             autosell_id=action.autosell_id,
             removal_action=removal_action,
             log_dir=log_dir,
+            store=store,
+            account_id=action.account_id or "",
         )
         if ok:
             store.mark_fb_listing_removed(action.autosell_id, action.account_id or "")

@@ -240,6 +240,9 @@ class TestRemoveVehicleListingFallbacks(unittest.TestCase):
         with (
             patch("src.facebook.remover._listing_already_gone", return_value=False),
             patch("src.facebook.remover._is_content_unavailable", return_value=False),
+            patch("src.facebook.remover._is_visitor_listing_view", return_value=False),
+            patch("src.facebook.remover._is_owner_listing_view", return_value=True),
+            patch("src.facebook.remover._item_on_any_selling_shelf", return_value=True),
             patch(
                 "src.facebook.remover._perform_removal_on_current_page",
                 side_effect=FacebookPostingError("Delete control not found"),
@@ -282,6 +285,38 @@ class TestRemoveVehicleListingFallbacks(unittest.TestCase):
         self.assertTrue(ok)
         assert_rm.assert_not_called()
         delete.assert_not_called()
+
+    def test_visitor_and_missing_shelf_treats_as_removed(self):
+        page = MagicMock()
+        page.url = "https://www.facebook.com/marketplace/item/999/"
+        log_dir = Path(tempfile.mkdtemp())
+        store = MagicMock()
+
+        with (
+            patch("src.facebook.remover._is_content_unavailable", return_value=False),
+            patch("src.facebook.remover._listing_already_gone", return_value=False),
+            patch("src.facebook.remover._is_visitor_listing_view", return_value=True),
+            patch("src.facebook.remover._is_owner_listing_view", return_value=False),
+            patch("src.facebook.remover._remove_from_selling_shelf", return_value=False),
+            patch("src.facebook.remover._item_on_any_selling_shelf", return_value=False),
+            patch("src.facebook.remover._perform_removal_on_current_page") as perform,
+            patch("src.facebook.remover._save_debug"),
+        ):
+            ok = remove_vehicle_listing(
+                page,
+                "https://www.facebook.com/marketplace/item/999/",
+                autosell_id="obj_orphan",
+                removal_action="delete",
+                log_dir=log_dir,
+                require_verified=True,
+                store=store,
+                account_id="account_1",
+            )
+        self.assertTrue(ok)
+        perform.assert_not_called()
+        store.mark_fb_listing_removed.assert_called_once_with(
+            "obj_orphan", "account_1", clear_url=True
+        )
 
 
 class TestOwnerVsVisitorChrome(unittest.TestCase):
@@ -326,6 +361,100 @@ class TestOwnerVsVisitorChrome(unittest.TestCase):
         page.locator.return_value.inner_text.return_value = "x"
         self.assertFalse(_is_owner_listing_view(page))
         self.assertTrue(_is_visitor_listing_view(page))
+
+
+class TestSellingShelfCardRemove(unittest.TestCase):
+    def test_card_mark_as_available_is_sold(self):
+        from src.facebook.remover import _shelf_card_is_sold
+
+        card = MagicMock()
+
+        def get_by_role(role, name=None, **_k):
+            loc = MagicMock()
+            if isinstance(name, re.Pattern) and name.search("Mark as available"):
+                loc.count.return_value = 1
+                loc.first.is_visible.return_value = True
+            else:
+                loc.count.return_value = 0
+            return loc
+
+        card.get_by_role.side_effect = get_by_role
+        card.inner_text.return_value = "Toyota\nMark as available"
+        self.assertTrue(_shelf_card_is_sold(card))
+
+    def test_card_active_listing_not_sold(self):
+        from src.facebook.remover import _shelf_card_is_sold
+
+        card = MagicMock()
+        empty = MagicMock()
+        empty.count.return_value = 0
+        card.get_by_role.return_value = empty
+        card.inner_text.return_value = "Toyota\n$10,000\nMark as sold"
+        self.assertFalse(_shelf_card_is_sold(card))
+
+    def test_delete_clicks_more_then_delete_listing(self):
+        from src.facebook.remover import _remove_from_selling_shelf
+
+        page = MagicMock()
+        link = MagicMock()
+        link.get_attribute.return_value = "/marketplace/item/111/"
+        card = MagicMock()
+
+        with (
+            patch("src.facebook.remover._find_item_link_scrolled", return_value=link),
+            patch("src.facebook.remover._shelf_card_root", return_value=card),
+            patch("src.facebook.remover._shelf_card_is_sold", return_value=False),
+            patch("src.facebook.remover._click_more_on_shelf_card", return_value=True) as more,
+            patch("src.facebook.remover._click_menu_action", return_value=True) as menu,
+            patch("src.facebook.remover._confirm_if_needed") as confirm,
+            patch("src.facebook.remover._perform_removal_on_current_page") as detail,
+        ):
+            ok = _remove_from_selling_shelf(page, "111", action="delete")
+
+        self.assertTrue(ok)
+        more.assert_called_once()
+        menu.assert_called_with(page, action="delete")
+        confirm.assert_called_once()
+        detail.assert_not_called()
+
+    def test_already_sold_mark_sold_action_returns_true(self):
+        from src.facebook.remover import _remove_from_selling_shelf
+
+        page = MagicMock()
+        link = MagicMock()
+
+        with (
+            patch("src.facebook.remover._find_item_link_scrolled", return_value=link),
+            patch("src.facebook.remover._shelf_card_root", return_value=MagicMock()),
+            patch("src.facebook.remover._shelf_card_is_sold", return_value=True),
+            patch("src.facebook.remover._click_more_on_shelf_card") as more,
+            patch("src.facebook.remover._click_menu_action") as menu,
+        ):
+            ok = _remove_from_selling_shelf(page, "222", action="mark_sold")
+
+        self.assertTrue(ok)
+        more.assert_not_called()
+        menu.assert_not_called()
+
+    def test_already_sold_delete_tries_purge_then_accepts(self):
+        from src.facebook.remover import _remove_from_selling_shelf
+
+        page = MagicMock()
+        link = MagicMock()
+
+        with (
+            patch("src.facebook.remover._find_item_link_scrolled", return_value=link),
+            patch("src.facebook.remover._shelf_card_root", return_value=MagicMock()),
+            patch("src.facebook.remover._shelf_card_is_sold", return_value=True),
+            patch("src.facebook.remover._click_more_on_shelf_card", return_value=True),
+            patch("src.facebook.remover._click_menu_action", return_value=False) as menu,
+            patch("src.facebook.remover._perform_removal_on_current_page") as detail,
+        ):
+            ok = _remove_from_selling_shelf(page, "333", action="delete")
+
+        self.assertTrue(ok)
+        menu.assert_any_call(page, action="delete")
+        detail.assert_not_called()
 
 
 class TestSessionHealth(unittest.TestCase):
