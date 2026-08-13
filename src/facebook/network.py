@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
 from dataclasses import dataclass, field
 
-from playwright.sync_api import Page, Response
+from playwright.sync_api import Error, Page, Response
+
+try:
+    from playwright._impl._errors import TargetClosedError
+except ImportError:  # pragma: no cover
+    TargetClosedError = Error  # type: ignore[misc, assignment]
+
+logger = logging.getLogger(__name__)
 
 ITEM_URL_PATTERN = re.compile(r"/marketplace/item/(\d+)")
 LISTING_ID_PATTERNS = (
@@ -14,6 +23,8 @@ LISTING_ID_PATTERNS = (
     re.compile(r'"marketplace_listing_id"\s*:\s*"?(\d+)"?'),
     re.compile(r'"listing"\s*:\s*\{[^}]*"id"\s*:\s*"?(\d+)"?'),
 )
+
+_RESPONSE_TEXT_ERRORS = (Error, TargetClosedError, asyncio.CancelledError)
 
 
 @dataclass
@@ -33,8 +44,24 @@ class MarketplaceItemCapture:
                 return
             if "facebook.com" not in response.url:
                 return
-            body = response.text()
         except Exception:
+            return
+
+        try:
+            body = response.text()
+        except _RESPONSE_TEXT_ERRORS as exc:
+            # Never let body reads crash the Playwright event loop during nav.
+            url = "?"
+            try:
+                url = response.url
+            except Exception:
+                pass
+            logger.debug(
+                "marketplace response.text() failed/timed out url=%s: %s",
+                url,
+                exc,
+                exc_info=True,
+            )
             return
 
         for pattern in (ITEM_URL_PATTERN, *LISTING_ID_PATTERNS):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 import re
 import time
 
@@ -26,6 +27,18 @@ DISMISS_LABELS = (
     "Aceptar",
     "Accept",
 )
+
+
+def human_pause_before_next(
+    page: Page,
+    *,
+    lo_s: float = 3.0,
+    hi_s: float = 7.0,
+) -> None:
+    """Short randomized pause after Next enables — mimics human reaction time."""
+    delay = random.uniform(lo_s, hi_s)
+    print(f"  human pause {delay:.1f}s before Next")
+    page.wait_for_timeout(int(delay * 1000))
 
 
 def dismiss_overlays(page: Page) -> None:
@@ -85,10 +98,33 @@ def click_labeled_action(
     )
 
 
-def advance_past_photo_step(page: Page, *, timeout_ms: int = 90_000) -> None:
-    """Click Next after photo upload. FB often keeps aria-disabled=true while still accepting clicks."""
-    wait_for_photo_previews(page, min_count=1, timeout_ms=120_000)
-    page.wait_for_timeout(3_000)
+def advance_past_photo_step(
+    page: Page,
+    *,
+    timeout_ms: int = 90_000,
+    photos_already_ready: bool = False,
+    next_enable_polled: bool = False,
+) -> None:
+    """Click Next after photo upload.
+
+    Polls until Siguiente/Next is clickable instead of fixed multi-second sleeps.
+    FB often keeps aria-disabled=true while still accepting clicks — after a
+    short enable wait we force-click.
+    """
+    if not photos_already_ready:
+        wait_for_photo_previews(page, min_count=1, timeout_ms=min(timeout_ms, 120_000))
+
+    # Dynamic: return as soon as Next is enabled; do not sleep a fixed 80–100s.
+    next_ready = False
+    try:
+        wait_for_composer_next_enabled(page, timeout_ms=min(45_000, timeout_ms))
+        next_ready = True
+    except FacebookPostingError:
+        pass
+
+    # Reaction-time pause once Next is enabled (skip if caller already paused).
+    if next_ready and not next_enable_polled:
+        human_pause_before_next(page)
 
     deadline = time.monotonic() + (timeout_ms / 1000)
     last_state = "no click attempted"
@@ -110,7 +146,7 @@ def advance_past_photo_step(page: Page, *, timeout_ms: int = 90_000) -> None:
                         button.click(timeout=5_000)
                     except Exception:
                         button.click(timeout=5_000, force=True)
-                    page.wait_for_timeout(2_000)
+                    page.wait_for_timeout(1_200)
                     if _advanced_past_photo_step(page):
                         return
                     last_state = f"clicked {label} but still on step 1"
@@ -118,12 +154,12 @@ def advance_past_photo_step(page: Page, *, timeout_ms: int = 90_000) -> None:
                     last_state = str(exc)
 
         if _js_click_next(page):
-            page.wait_for_timeout(2_000)
+            page.wait_for_timeout(1_200)
             if _advanced_past_photo_step(page):
                 return
             last_state = "js click did not advance"
 
-        page.wait_for_timeout(2_000)
+        page.wait_for_timeout(1_000)
 
     raise FacebookPostingError(f"Could not advance past photo step: {last_state}")
 

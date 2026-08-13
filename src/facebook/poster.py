@@ -21,6 +21,7 @@ from src.facebook.ui import (
     log_page_state,
     wait_for_composer_next_enabled,
     wait_for_photo_previews,
+    human_pause_before_next,
 )
 from src.facebook.categorize import (
     ListingAttributes,
@@ -169,16 +170,23 @@ def _upload_photos(page: Page, photo_paths: list[Path], log_dir: Path, autosell_
 
     n = len(photo_paths)
     print(f"Uploaded {n} photo(s); waiting for previews...")
-    preview_timeout = max(180_000, n * 10_000)
+    preview_timeout = max(120_000, n * 8_000)
     wait_for_photo_previews(page, min_count=n, timeout_ms=preview_timeout)
-    if n >= 10:
-        settle_ms = min(n * 5_000, 120_000)
-        print(f"  waiting {settle_ms}ms for {n} photo previews to finish processing")
-        page.wait_for_timeout(settle_ms)
+    # Poll Siguiente/Next — no fixed 80–100s sleep after large uploads.
+    next_timeout = max(30_000, min(n * 5_000, 120_000))
+    print(f"  waiting for Siguiente after {n} photo preview(s) (up to {next_timeout}ms)")
+    next_ready = _wait_for_next_enabled_polling(page, timeout_ms=next_timeout)
+    if not next_ready:
+        print("  Siguiente still disabled after previews — will force-click")
     _save_debug(page, log_dir, autosell_id, "after_upload")
     log_page_state(page, "photos_uploaded")
 
-    advance_past_photo_step(page, timeout_ms=max(90_000, n * 5_000))
+    advance_past_photo_step(
+        page,
+        timeout_ms=max(60_000, n * 4_000),
+        photos_already_ready=True,
+        next_enable_polled=next_ready,
+    )
     log_page_state(page, "after_photo_next")
 
 
@@ -299,14 +307,12 @@ def _fill_vehicle_form(
         if _fill_location(page, city) and _location_is_filled(page, city):
             print("  re-filled location (final pass)")
 
-    if photo_count >= 10:
-        extra_ms = min(photo_count * 4_000, 90_000)
-        print(f"  waiting {extra_ms}ms post-form for {photo_count} photos to settle")
-        page.wait_for_timeout(extra_ms)
-
     if _form_inputs_complete(page, vehicle, attrs, city):
         print("  form inputs complete — waiting for Siguiente to enable")
-        _wait_for_next_enabled_polling(page, timeout_ms=min(photo_count * 6_000, 180_000))
+        _wait_for_next_enabled_polling(
+            page,
+            timeout_ms=max(30_000, min(photo_count * 5_000, 120_000)),
+        )
         print("  advancing past vehicle form")
         page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
         page.wait_for_timeout(2_000)
@@ -333,6 +339,7 @@ def _fill_vehicle_form(
 
     try:
         wait_for_composer_next_enabled(page, timeout_ms=60_000)
+        human_pause_before_next(page)
     except FacebookPostingError:
         _scroll_composer_sidebar(page)
         _fill_appearance_fields(page, attrs)
@@ -341,6 +348,7 @@ def _fill_vehicle_form(
         page.wait_for_timeout(2_000)
         try:
             wait_for_composer_next_enabled(page, timeout_ms=30_000)
+            human_pause_before_next(page)
         except FacebookPostingError:
             _save_debug(page, log_dir, autosell_id, "next_disabled_pre_review")
             _log_composer_comboboxes(page)
@@ -389,6 +397,7 @@ def _fill_vehicle_form(
 
 
 def _wait_for_next_enabled_polling(page: Page, *, timeout_ms: int = 120_000) -> bool:
+    """Poll until composer Next/Siguiente is enabled; return early when ready."""
     deadline = time.monotonic() + (timeout_ms / 1000)
     while time.monotonic() < deadline:
         try:
@@ -408,10 +417,11 @@ def _wait_for_next_enabled_polling(page: Page, *, timeout_ms: int = 120_000) -> 
             )
             if enabled:
                 print("  Siguiente enabled")
+                human_pause_before_next(page)
                 return True
         except Exception:
             pass
-        page.wait_for_timeout(2_000)
+        page.wait_for_timeout(1_000)
     print("  Siguiente still disabled after wait — will force-click")
     return False
 
