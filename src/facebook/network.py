@@ -24,7 +24,33 @@ LISTING_ID_PATTERNS = (
     re.compile(r'"listing"\s*:\s*\{[^}]*"id"\s*:\s*"?(\d+)"?'),
 )
 
-_RESPONSE_TEXT_ERRORS = (Error, TargetClosedError, asyncio.CancelledError)
+_RESPONSE_TEXT_ERRORS = (
+    Error,
+    TargetClosedError,
+    asyncio.CancelledError,
+    UnicodeDecodeError,
+    UnicodeError,
+    ValueError,
+)
+
+_SKIP_CONTENT_TYPES = (
+    "image/",
+    "video/",
+    "audio/",
+    "font/",
+    "application/octet-stream",
+    "application/pdf",
+    "application/zip",
+    "application/wasm",
+    "application/x-protobuf",
+)
+
+
+def _looks_binary_content_type(header: str) -> bool:
+    ctype = (header or "").split(";")[0].strip().lower()
+    if not ctype:
+        return False
+    return any(ctype.startswith(prefix) for prefix in _SKIP_CONTENT_TYPES)
 
 
 @dataclass
@@ -39,29 +65,33 @@ class MarketplaceItemCapture:
         self._attached = True
 
     def _on_response(self, response: Response) -> None:
+        """Best-effort listing-id sniff. Never raise into Playwright's event loop."""
+        try:
+            self._on_response_unsafe(response)
+        except Exception:
+            logger.debug("marketplace response listener swallowed error", exc_info=True)
+
+    def _on_response_unsafe(self, response: Response) -> None:
         try:
             if response.status < 200 or response.status >= 400:
                 return
             if "facebook.com" not in response.url:
                 return
+            headers = {}
+            try:
+                headers = response.headers or {}
+            except Exception:
+                headers = {}
+            ctype = ""
+            if isinstance(headers, dict):
+                ctype = headers.get("content-type") or headers.get("Content-Type") or ""
+            if _looks_binary_content_type(ctype):
+                return
         except Exception:
             return
 
-        try:
-            body = response.text()
-        except _RESPONSE_TEXT_ERRORS as exc:
-            # Never let body reads crash the Playwright event loop during nav.
-            url = "?"
-            try:
-                url = response.url
-            except Exception:
-                pass
-            logger.debug(
-                "marketplace response.text() failed/timed out url=%s: %s",
-                url,
-                exc,
-                exc_info=True,
-            )
+        body = self._safe_response_text(response)
+        if not body:
             return
 
         for pattern in (ITEM_URL_PATTERN, *LISTING_ID_PATTERNS):
@@ -69,6 +99,29 @@ class MarketplaceItemCapture:
                 item_id = match.group(1)
                 if item_id and len(item_id) >= 8 and item_id not in self.item_ids:
                     self.item_ids.append(item_id)
+
+    def _safe_response_text(self, response: Response) -> str:
+        try:
+            return response.text() or ""
+        except _RESPONSE_TEXT_ERRORS as exc:
+            url = "?"
+            try:
+                url = response.url
+            except Exception:
+                pass
+            logger.debug(
+                "marketplace response.text() skipped url=%s: %s",
+                url,
+                exc,
+            )
+            return ""
+        except Exception as exc:
+            logger.debug(
+                "marketplace response.text() failed url=%s: %s",
+                getattr(response, "url", "?"),
+                exc,
+            )
+            return ""
 
     def all_urls(self) -> list[str]:
         return [f"https://www.facebook.com/marketplace/item/{item_id}/" for item_id in self.item_ids]
