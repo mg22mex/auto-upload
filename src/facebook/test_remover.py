@@ -16,6 +16,22 @@ from src.facebook.remover import (
     _verify_listing_removed,
 )
 from src.facebook.session import format_session_login_error, session_health_report
+from src.models import Vehicle
+
+
+def _veh(autosell_id: str) -> Vehicle:
+    return Vehicle(
+        autosell_id=autosell_id,
+        slug=autosell_id,
+        title=f"Model {autosell_id}",
+        brand="Audi",
+        year="2020",
+        price="100000",
+        mileage="10000 km",
+        version="",
+        url=f"https://www.autosell.mx/{autosell_id}",
+        image_urls=["https://example.com/a.jpg"],
+    )
 
 
 class TestListingAlreadyGone(unittest.TestCase):
@@ -517,6 +533,53 @@ class TestSellingShelfCardRemove(unittest.TestCase):
                 log_dir=log_dir,
                 require_verified=True,
             )
+        self.assertFalse(ok)
+
+
+class TestShelfVehicleMatch(unittest.TestCase):
+    def test_g63_title_matches_card(self):
+        from src.facebook.remover import card_text_matches_vehicle
+
+        v = _veh("obj858")
+        v.brand = "Mercedes-Benz"
+        v.year = "2021"
+        v.title = "G63 AMG"
+        card = "2021 Mercedes-Benz G63 AMG · $3,399,000 · Needs attention"
+        self.assertTrue(card_text_matches_vehicle(card, v))
+        self.assertFalse(
+            card_text_matches_vehicle("2021 Mercedes-Benz C 200 AMG", v)
+        )
+        self.assertTrue(
+            card_text_matches_vehicle(
+                "https://www.facebook.com/marketplace/item/999/",
+                v,
+                item_id="999",
+            )
+        )
+
+    def test_stock_id_in_card_text(self):
+        from src.facebook.remover import card_text_matches_vehicle
+
+        v = _veh("obj858")
+        self.assertTrue(card_text_matches_vehicle("Listing obj858 Chihuahua", v))
+
+    def test_ensure_skips_when_delete_fails(self):
+        from src.facebook.remover import ensure_no_matching_shelf_listings
+
+        page = MagicMock()
+        v = _veh("obj858")
+        v.brand = "Mercedes-Benz"
+        v.year = "2021"
+        v.title = "G63 AMG"
+        link = MagicMock()
+        with (
+            patch(
+                "src.facebook.remover._collect_matching_shelf_links",
+                return_value=[("/marketplace/item/1/", link)],
+            ),
+            patch("src.facebook.remover._delete_shelf_link", return_value=False),
+        ):
+            ok = ensure_no_matching_shelf_listings(page, v, autosell_id="obj858")
         self.assertFalse(ok)
 
 

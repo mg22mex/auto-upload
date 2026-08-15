@@ -67,6 +67,7 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
         with (
             patch("src.facebook.reposter.remove_vehicle_listing", side_effect=fail_remove),
             patch("src.facebook.reposter.create_vehicle_listing", side_effect=boom_create),
+            patch("src.facebook.reposter.ensure_no_matching_shelf_listings", return_value=True),
         ):
             _repost_one(
                 page,
@@ -101,6 +102,7 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
         with (
             patch("src.facebook.reposter.remove_vehicle_listing", side_effect=gone_remove),
             patch("src.facebook.reposter.create_vehicle_listing", side_effect=ok_create),
+            patch("src.facebook.reposter.ensure_no_matching_shelf_listings", return_value=True),
         ):
             _repost_one(
                 page,
@@ -147,6 +149,7 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
         with (
             patch("src.facebook.reposter.remove_vehicle_listing", side_effect=ok_remove),
             patch("src.facebook.reposter.create_vehicle_listing", side_effect=ok_create),
+            patch("src.facebook.reposter.ensure_no_matching_shelf_listings", return_value=True),
         ):
             _repost_one(
                 page,
@@ -186,6 +189,33 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
             )
         create.assert_not_called()
         store.mark_fb_listing_removed.assert_not_called()
+        store.record_repost.assert_not_called()
+        self.assertEqual(result.reposts, 0)
+
+    def test_shelf_title_match_blocks_create(self):
+        page = MagicMock()
+        store = MagicMock()
+        result = MagicMock(reposts=0)
+
+        with (
+            patch("src.facebook.reposter.remove_vehicle_listing", return_value=True),
+            patch(
+                "src.facebook.reposter.ensure_no_matching_shelf_listings",
+                return_value=False,
+            ),
+            patch("src.facebook.reposter.create_vehicle_listing") as create,
+        ):
+            _repost_one(
+                page,
+                _action(),
+                store,
+                fb_config={},
+                max_photos=5,
+                removal_action="delete",
+                log_dir=Path("/tmp"),
+                result=result,
+            )
+        create.assert_not_called()
         store.record_repost.assert_not_called()
         self.assertEqual(result.reposts, 0)
 

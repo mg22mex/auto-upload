@@ -7,7 +7,7 @@ from pathlib import Path
 from src.facebook.browser_health import is_browser_dead
 from src.facebook.errors import FacebookAutomationError, FacebookPostingError, FacebookSessionError
 from src.facebook.poster import create_vehicle_listing
-from src.facebook.remover import remove_vehicle_listing
+from src.facebook.remover import extract_item_id, ensure_no_matching_shelf_listings, remove_vehicle_listing
 from src.facebook.session import (
     format_session_login_error,
     get_page,
@@ -270,6 +270,19 @@ def _repost_one(
             f"SKIP_CREATE: could not remove old listing for "
             f"{action.autosell_id} before repost: {exc}"
         ) from exc
+
+    # Title/model match across all selling tabs — not only the old item id.
+    if not ensure_no_matching_shelf_listings(
+        page,
+        action.vehicle,
+        item_id=extract_item_id(old_url),
+        autosell_id=action.autosell_id,
+    ):
+        print(
+            f"WARNING: {action.autosell_id}: matching listing still on "
+            f"selling shelf — SKIP_CREATE (will not post a duplicate)"
+        )
+        return
 
     # --- Phase 2: create only after verified remove ---
     try:

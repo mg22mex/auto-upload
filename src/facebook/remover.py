@@ -10,6 +10,7 @@ from playwright.sync_api import Locator, Page
 
 from src.facebook.errors import FacebookPostingError
 from src.facebook.poster import _save_debug
+from src.models import Vehicle
 
 RemovalAction = Literal["delete", "mark_sold"]
 
@@ -179,11 +180,23 @@ _MORE_ARIA_SELECTORS = (
     '[aria-label*="Actions" i]',
 )
 
-# Owner selling dashboards (some accounts only list on one of these).
+# Owner selling dashboards — active, pending, attention, draft, sold, dashboard.
 _SELLING_SHELVES = (
     SELLING_URL,
     f"{SELLING_URL}?status=ACTIVE",
+    f"{SELLING_URL}?status=LIVE",
     f"{SELLING_URL}?state=LIVE",
+    f"{SELLING_URL}?status=IN_STOCK",
+    f"{SELLING_URL}?status=PENDING",
+    f"{SELLING_URL}?status=PENDING_SALE",
+    f"{SELLING_URL}?status=NEED_ATTENTION",
+    f"{SELLING_URL}?status=NEEDS_ATTENTION",
+    f"{SELLING_URL}?status=IN_REVIEW",
+    f"{SELLING_URL}?status=DRAFT",
+    f"{SELLING_URL}?status=HIDDEN",
+    f"{SELLING_URL}?status=INACTIVE",
+    f"{SELLING_URL}?status=SOLD",
+    "https://www.facebook.com/marketplace/you/pending",
     DASHBOARD_URL,
     "https://www.facebook.com/marketplace/you/selling/?status=IN_STOCK",
 )
@@ -479,6 +492,167 @@ def _item_on_any_selling_shelf(page: Page, item_id: str) -> bool:
         if _find_item_link_scrolled(page, item_id) is not None:
             return True
     return False
+
+
+_BRAND_STOP = frozenset({"the", "and", "de", "la", "el", "del"})
+
+
+def _norm_words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", (text or "").lower())
+
+
+def vehicle_shelf_match_spec(vehicle: Vehicle) -> tuple[str, list[str], list[str], str]:
+    """year, brand_words, model_tokens, autosell_id — used to match shelf cards."""
+    year = re.sub(r"\D", "", vehicle.year or "")[:4]
+    brand_words = [w for w in _norm_words(vehicle.brand) if w not in _BRAND_STOP]
+    brand_set = set(brand_words)
+    model_tokens = [
+        w
+        for w in _norm_words(vehicle.title)
+        if w not in _BRAND_STOP and w not in brand_set and len(w) >= 2
+    ]
+    return year, brand_words, model_tokens, (vehicle.autosell_id or "").lower()
+
+
+def card_text_matches_vehicle(card_text: str, vehicle: Vehicle, *, item_id: str | None = None) -> bool:
+    """True if shelf-card text/href looks like this catalog vehicle."""
+    blob = (card_text or "").lower()
+    if item_id and item_id in blob:
+        return True
+    year, brand_words, model_tokens, autosell_id = vehicle_shelf_match_spec(vehicle)
+    if autosell_id and autosell_id in blob:
+        return True
+    words = set(_norm_words(card_text))
+    if year and year not in words and year not in blob:
+        return False
+    # Brand: require the first distinctive token (mercedes, bmw, ram, …).
+    if brand_words:
+        primary = brand_words[0]
+        if primary not in words and primary not in blob:
+            return False
+    if not model_tokens:
+        # Year+brand only is too broad unless stock id was already matched.
+        return False
+    return all(tok in words or tok in blob for tok in model_tokens)
+
+
+def ensure_no_matching_shelf_listings(
+    page: Page,
+    vehicle: Vehicle,
+    *,
+    item_id: str | None = None,
+    autosell_id: str = "",
+    max_passes: int = 4,
+) -> bool:
+    """Delete every selling-shelf card that matches this vehicle.
+
+    Searches active / pending / attention / draft / sold tabs. Returns True
+    only when no matching card remains. Used as a hard gate before create.
+    """
+    label = autosell_id or vehicle.autosell_id
+    for attempt in range(max_passes):
+        remaining = _collect_matching_shelf_links(page, vehicle, item_id=item_id)
+        if not remaining:
+            print(f"  {label}: no matching cards on selling shelves — create allowed")
+            return True
+        print(
+            f"  {label}: found {len(remaining)} matching shelf card(s) "
+            f"(pass {attempt + 1}/{max_passes}) — deleting before create"
+        )
+        deleted = 0
+        for href, link in remaining:
+            print(f"  {label}: deleting shelf match {href}")
+            if _delete_shelf_link(page, link):
+                deleted += 1
+                page.wait_for_timeout(1_500)
+        if deleted == 0:
+            print(
+                f"WARNING: {label}: could not click Delete on matching shelf "
+                f"card(s) — SKIP_CREATE"
+            )
+            return False
+    leftover = _collect_matching_shelf_links(page, vehicle, item_id=item_id)
+    if leftover:
+        print(
+            f"WARNING: {label}: {len(leftover)} matching card(s) still on shelf "
+            f"after delete — SKIP_CREATE to avoid 'publicación duplicada'"
+        )
+        return False
+    print(f"  {label}: matching shelf cards purged — create allowed")
+    return True
+
+
+def _collect_matching_shelf_links(
+    page: Page, vehicle: Vehicle, *, item_id: str | None
+) -> list[tuple[str, Locator]]:
+    found: list[tuple[str, Locator]] = []
+    seen: set[str] = set()
+    for shelf in _SELLING_SHELVES:
+        try:
+            page.goto(shelf, wait_until="domcontentloaded", timeout=90_000)
+            page.wait_for_timeout(2_000)
+        except Exception:
+            continue
+        for _ in range(8):
+            links = page.locator('a[href*="/marketplace/item/"]')
+            try:
+                count = links.count()
+            except Exception:
+                count = 0
+            if not isinstance(count, int):
+                count = 0
+            for i in range(min(count, 80)):
+                loc = links.nth(i)
+                try:
+                    href = loc.get_attribute("href") or ""
+                except Exception:
+                    continue
+                if not href or href in seen:
+                    continue
+                card_id = extract_item_id(href)
+                try:
+                    text = loc.inner_text(timeout=1_000) or ""
+                except Exception:
+                    text = ""
+                try:
+                    parent_text = loc.locator("xpath=ancestor::div[4]").inner_text(
+                        timeout=1_000
+                    )
+                    if parent_text:
+                        text = f"{text} {parent_text}"
+                except Exception:
+                    pass
+                haystack = f"{href} {text}"
+                matched = card_text_matches_vehicle(
+                    haystack, vehicle, item_id=item_id
+                )
+                if not matched and item_id and card_id == item_id:
+                    matched = True
+                if not matched:
+                    continue
+                seen.add(href)
+                found.append((href, loc))
+            try:
+                page.mouse.wheel(0, 2200)
+                page.wait_for_timeout(700)
+            except Exception:
+                break
+    return found
+
+
+def _delete_shelf_link(page: Page, link: Locator) -> bool:
+    try:
+        link.scroll_into_view_if_needed(timeout=4_000)
+    except Exception:
+        pass
+    card = _shelf_card_root(link)
+    if not _click_more_on_shelf_card(page, card, link):
+        return False
+    if not _click_menu_action(page, action="delete"):
+        return False
+    _confirm_if_needed(page, prefer_delete=True)
+    page.wait_for_timeout(1_200)
+    return True
 
 
 def _is_content_unavailable(page: Page) -> bool:

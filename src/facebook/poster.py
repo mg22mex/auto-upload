@@ -69,6 +69,17 @@ def create_vehicle_listing(
             f"Not on vehicle composer after opening create URL (at {page.url})"
         )
 
+    # Hard gate: any matching shelf card (any tab) must be deleted first.
+    from src.facebook.remover import ensure_no_matching_shelf_listings
+
+    if not ensure_no_matching_shelf_listings(
+        page, vehicle, autosell_id=vehicle.autosell_id
+    ):
+        raise FacebookPostingError(
+            f"SKIP_CREATE: matching listing still on selling shelf for "
+            f"{vehicle.autosell_id} — refusing duplicate publish"
+        )
+
     photo_paths = download_vehicle_photos(vehicle, max_photos=max_photos)
     capture = MarketplaceItemCapture()
     capture.attach(page)
