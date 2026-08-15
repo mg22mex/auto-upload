@@ -13,10 +13,13 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.facebook.renewer import execute_renews
-from src.facebook.util import env_int
 from src.inventory.snapshot import load_catalog_snapshot
 from src.store.db import SyncStore
-from src.sync.repost import parse_older_than_days, plan_repost_actions
+from src.sync.repost import (
+    resolve_max_per_account,
+    resolve_min_age_days,
+    plan_repost_actions,
+)
 
 
 def load_config(path: Path) -> dict:
@@ -52,19 +55,21 @@ def main() -> int:
     )
     parser.add_argument(
         "--older-than",
+        "--min-age-days",
+        dest="older_than",
         default=None,
-        help="Min days since last post/renew for --all-eligible (default: 3)",
+        help="Min days since last post/renew for --all-eligible (default: 3). Pass 0 to include recent listings.",
     )
     parser.add_argument(
         "--max",
         type=int,
         default=None,
-        help="Max renews per account (default: RENEW_MAX or config)",
+        help="Max renews per account (default: RENEW_MAX or config; uncapped when --force or --min-age-days 0)",
     )
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Ignore repost holds (admin)",
+        help="Ignore holds and min-age; process all live catalog listings",
     )
     parser.add_argument("--dry-run", action="store_true", help="Plan only")
     parser.add_argument("--catalog", default="data/catalog_latest.json")
@@ -77,22 +82,26 @@ def main() -> int:
     repost_cfg = config.get("sync", {}).get("repost", {})
 
     account_ids = resolve_accounts(config, args.account)
-    older_than = parse_older_than_days(
-        args.older_than
-        or os.getenv("RENEW_MIN_AGE_DAYS")
-        or str(renew_cfg.get("min_age_days", repost_cfg.get("min_age_days", 3)))
+    older_than = resolve_min_age_days(
+        args.older_than,
+        env_names=("RENEW_MIN_AGE_DAYS", "REPOST_MIN_AGE_DAYS"),
+        config_default=int(
+            renew_cfg.get("min_age_days", repost_cfg.get("min_age_days", 3))
+        ),
+        force=args.force,
     )
-    max_per = args.max
-    if max_per is None:
-        max_per = env_int(
-            "RENEW_MAX_PER_ACCOUNT_PER_RUN",
-            int(
-                renew_cfg.get(
-                    "max_per_account_per_run",
-                    repost_cfg.get("max_per_account_per_run", 25),
-                )
-            ),
-        )
+    max_per = resolve_max_per_account(
+        args.max,
+        older_than_days=older_than,
+        force=args.force,
+        env_name="RENEW_MAX_PER_ACCOUNT_PER_RUN",
+        config_default=int(
+            renew_cfg.get(
+                "max_per_account_per_run",
+                repost_cfg.get("max_per_account_per_run", 25),
+            )
+        ),
+    )
 
     catalog_path = ROOT / args.catalog
     if not catalog_path.is_file():

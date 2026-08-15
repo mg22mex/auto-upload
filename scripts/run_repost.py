@@ -12,12 +12,18 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from src.facebook.executor import execute_actions
 from src.facebook.reposter import execute_reposts
 from src.facebook.session import format_session_login_error, resolve_session_dir, session_health_report
 from src.facebook.util import env_int
 from src.inventory.snapshot import load_catalog_snapshot
 from src.store.db import SyncStore
-from src.sync.repost import parse_older_than_days, plan_repost_actions
+from src.sync.engine import plan_sync_actions, split_executable_actions
+from src.sync.repost import (
+    resolve_max_per_account,
+    resolve_min_age_days,
+    plan_repost_actions,
+)
 
 
 def load_config(path: Path) -> dict:
@@ -60,19 +66,24 @@ def main() -> int:
     )
     parser.add_argument(
         "--older-than",
+        "--min-age-days",
+        dest="older_than",
         default=None,
-        help="Min days since last post for --all-eligible (default: 3 or config)",
+        help=(
+            "Min days since last post for --all-eligible "
+            "(default: 3 or config). Pass 0 to include listings posted in the last 1–7 days."
+        ),
     )
     parser.add_argument(
         "--max",
         type=int,
         default=None,
-        help="Max reposts per account this run (default: REPOST_MAX_PER_ACCOUNT or 5)",
+        help="Max reposts per account this run (default: REPOST_MAX_PER_ACCOUNT or 5; ignored cap when --force or --min-age-days 0)",
     )
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Ignore repost holds (admin; use with --ids)",
+        help="Ignore holds and min-age; process all live catalog listings (still respects --max if set)",
     )
     parser.add_argument("--dry-run", action="store_true", help="Plan only; do not touch Facebook")
     parser.add_argument("--catalog", default="data/catalog_latest.json")
@@ -84,17 +95,19 @@ def main() -> int:
     repost_cfg = config.get("sync", {}).get("repost", {})
 
     account_ids = resolve_accounts(config, args.account)
-    older_than = parse_older_than_days(
-        args.older_than
-        or os.getenv("REPOST_MIN_AGE_DAYS")
-        or str(repost_cfg.get("min_age_days", 3))
+    older_than = resolve_min_age_days(
+        args.older_than,
+        env_names=("REPOST_MIN_AGE_DAYS",),
+        config_default=int(repost_cfg.get("min_age_days", 3)),
+        force=args.force,
     )
-    max_per = args.max
-    if max_per is None:
-        max_per = env_int(
-            "REPOST_MAX_PER_ACCOUNT_PER_RUN",
-            int(repost_cfg.get("max_per_account_per_run", 5)),
-        )
+    max_per = resolve_max_per_account(
+        args.max,
+        older_than_days=older_than,
+        force=args.force,
+        env_name="REPOST_MAX_PER_ACCOUNT_PER_RUN",
+        config_default=int(repost_cfg.get("max_per_account_per_run", 5)),
+    )
 
     catalog_path = ROOT / args.catalog
     if not catalog_path.is_file():
@@ -108,6 +121,22 @@ def main() -> int:
     explicit_ids = None
     if args.ids:
         explicit_ids = {part.strip() for part in args.ids.split(",") if part.strip()}
+
+    create_actions = []
+    deferred_creates = []
+    if args.all_eligible:
+        max_creates = env_int(
+            "MAX_POSTS_PER_ACCOUNT_PER_RUN",
+            int(config.get("sync", {}).get("max_posts_per_account_per_run", 10)),
+        )
+        sync_planned = plan_sync_actions(
+            vehicles,
+            account_ids,
+            store.get_live_listings(),
+            max_creates_per_account=max_creates,
+        )
+        executable_sync, deferred_creates = split_executable_actions(sync_planned)
+        create_actions = [a for a in executable_sync if a.action == "create"]
 
     actions, skipped = plan_repost_actions(
         vehicles,
@@ -124,6 +153,9 @@ def main() -> int:
     print("")
     print("=== Facebook repost ===")
     print(f"Accounts:     {', '.join(account_ids)}")
+    print(f"Force:        {args.force}")
+    print(f"Min age days: {older_than}  (--force or 0 = all live dates)")
+    print(f"New creates:  {len(create_actions)} (catalog missing from sync.db)")
     print(f"Would repost: {len(actions)}")
     print(f"Skipped:      {len(skipped)}")
     print("")
@@ -164,6 +196,18 @@ def main() -> int:
         print("", file=sys.stderr)
     print("")
 
+    if create_actions:
+        print("New listings (catalog → Facebook create):")
+        for action in create_actions[:20]:
+            title = action.vehicle.marketplace_title if action.vehicle else action.slug
+            print(f"  - [{action.account_id}] {title} ({action.autosell_id})")
+        if len(create_actions) > 20:
+            print(f"  ... and {len(create_actions) - 20} more")
+        print("")
+    if deferred_creates:
+        print(f"Deferred creates (daily cap): {len(deferred_creates)}")
+        print("")
+
     if actions:
         print("Reposts:")
         for action in actions:
@@ -179,25 +223,41 @@ def main() -> int:
             print(f"  ... and {len(skipped) - 25} more")
         print("")
 
-    if args.dry_run or not actions:
-        if session_warns and not args.dry_run and not actions:
+    if args.dry_run or (not actions and not create_actions):
+        if session_warns and not args.dry_run and not actions and not create_actions:
             return 0
         return 0
 
-    result = execute_reposts(actions, store, config, root=ROOT, account_order=account_ids)
-    print(f"Repost done: {result.reposts} reposted, {len(result.errors)} error(s).")
-    if result.errors:
-        for err in result.errors:
-            print(f"  FB error: {err}", file=sys.stderr)
-            if "Not logged in" in err or "session expired" in err.lower():
-                print(
-                    "  → Fix: on fb-worker run "
-                    "`python scripts/fb_login.py --account <id>` (headed) "
-                    "and confirm sessions/ lives under the persistent data bind.",
-                    file=sys.stderr,
-                )
-        return 1
-    return 0
+    rc = 0
+    if create_actions:
+        print("Creating new catalog vehicles missing from sync.db ...")
+        create_result = execute_actions(
+            create_actions, store, config, root=ROOT, account_order=account_ids
+        )
+        print(
+            f"Create done: {create_result.creates} posted, "
+            f"{len(create_result.errors)} error(s)."
+        )
+        if create_result.errors:
+            rc = 1
+            for err in create_result.errors:
+                print(f"  FB create error: {err}", file=sys.stderr)
+
+    if actions:
+        result = execute_reposts(actions, store, config, root=ROOT, account_order=account_ids)
+        print(f"Repost done: {result.reposts} reposted, {len(result.errors)} error(s).")
+        if result.errors:
+            rc = 1
+            for err in result.errors:
+                print(f"  FB error: {err}", file=sys.stderr)
+                if "Not logged in" in err or "session expired" in err.lower():
+                    print(
+                        "  → Fix: on fb-worker run "
+                        "`python scripts/fb_login.py --account <id>` (headed) "
+                        "and confirm sessions/ lives under the persistent data bind.",
+                        file=sys.stderr,
+                    )
+    return rc
 
 
 if __name__ == "__main__":

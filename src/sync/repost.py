@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 
 from src.models import SyncAction, Vehicle
@@ -7,6 +8,8 @@ from src.sync.weekly_bump import DEFAULT_MIN_AGE_DAYS
 
 # Live listings at least this old are eligible for relist/repost (and renew).
 DEFAULT_REPOST_MIN_AGE_DAYS = DEFAULT_MIN_AGE_DAYS
+# When --force or --min-age-days 0 and --max is omitted, process the whole shelf.
+UNLIMITED_PER_ACCOUNT = 10_000
 
 
 def parse_older_than_days(raw: str) -> int:
@@ -14,6 +17,43 @@ def parse_older_than_days(raw: str) -> int:
     if text.endswith("d"):
         text = text[:-1]
     return max(0, int(text))
+
+
+def resolve_min_age_days(
+    cli_raw: str | None,
+    *,
+    env_names: tuple[str, ...] = ("REPOST_MIN_AGE_DAYS",),
+    config_default: int = DEFAULT_REPOST_MIN_AGE_DAYS,
+    force: bool = False,
+) -> int:
+    """CLI ``0`` and ``--force`` both disable the posted-at age floor."""
+    if force:
+        return 0
+    if cli_raw is not None and str(cli_raw).strip() != "":
+        return parse_older_than_days(str(cli_raw))
+    for name in env_names:
+        raw = os.getenv(name)
+        if raw is not None and str(raw).strip() != "":
+            return parse_older_than_days(raw)
+    return max(0, int(config_default))
+
+
+def resolve_max_per_account(
+    cli_max: int | None,
+    *,
+    older_than_days: int,
+    force: bool,
+    env_name: str,
+    config_default: int,
+) -> int:
+    if cli_max is not None:
+        return max(0, int(cli_max))
+    if force or older_than_days <= 0:
+        return UNLIMITED_PER_ACCOUNT
+    raw = os.getenv(env_name)
+    if raw is not None and str(raw).strip() != "":
+        return max(0, int(raw))
+    return max(0, int(config_default))
 
 
 def _posted_age_days(posted_at: str | None, now: datetime) -> float | None:
@@ -44,7 +84,8 @@ def plan_repost_actions(
     """Plan repost/renew actions for live listings.
 
     With ``all_eligible=True``, only rows with
-    ``now - posted_at >= older_than_days`` (default 3) are planned.
+    ``now - posted_at >= older_than_days`` (default 3) are planned unless
+    ``force=True`` or ``older_than_days == 0`` (all live dates).
     ``action_name='repost'`` means full delete+recreate (relist);
     ``'renew'`` is FB native Renovar (same URL). Prefer repost for momentum.
 
@@ -86,7 +127,8 @@ def plan_repost_actions(
             skipped.append(f"{autosell_id} on {account_id}: {hold_label} active")
             return
 
-        if all_eligible and older_than_days > 0:
+        apply_age = all_eligible and older_than_days > 0 and not force
+        if apply_age:
             posted_at = row["posted_at"] if "posted_at" in row.keys() else None
             if posted_at:
                 try:
@@ -109,6 +151,8 @@ def plan_repost_actions(
 
         if explicit_ids:
             reason = f"Manual {action_name}"
+        elif force or older_than_days <= 0:
+            reason = f"Eligible (force/min-age {older_than_days}d)"
         else:
             reason = f"Eligible (>{older_than_days}d since post)"
         actions.append(

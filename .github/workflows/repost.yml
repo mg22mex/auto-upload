@@ -35,6 +35,15 @@ on:
         description: Comma-separated autosell ids (skips --all-eligible). Empty = eligible
         required: false
         type: string
+      force:
+        description: Ignore holds and min-age; repost all live catalog listings
+        required: false
+        default: false
+        type: boolean
+      min_age_days:
+        description: Min days since last post (0 = include listings from the last 1–7 days). Empty = config
+        required: false
+        type: string
 
 jobs:
   listing-bump:
@@ -87,7 +96,22 @@ jobs:
       - name: Scrape autosell.mx (fresh catalog for eligibility)
         env:
           AUTOSELL_BASE_URL: ${{ secrets.AUTOSELL_BASE_URL }}
-        run: python run_sync.py --scrape-only --output data/catalog_latest.json
+        run: |
+          set -eux
+          python run_sync.py --scrape-only --output data/catalog_latest.json
+          mkdir -p data/snapshots
+          cp -f data/catalog_latest.json data/snapshots/catalog_latest.json
+
+      - name: Sync Odoo product inventory
+        env:
+          ODOO_URL: ${{ secrets.ODOO_URL }}
+          ODOO_DB: ${{ secrets.ODOO_DB }}
+          ODOO_USER: ${{ secrets.ODOO_USER }}
+          ODOO_PASSWORD: ${{ secrets.ODOO_PASSWORD }}
+          ODOO_USERNAME: ${{ secrets.ODOO_USERNAME }}
+          ODOO_API_KEY: ${{ secrets.ODOO_API_KEY }}
+        run: python scripts/sync_odoo_inventory.py --from-snapshot data/snapshots/catalog_latest.json
+        continue-on-error: true
 
       - name: "Resolve bump mode (default: repost)"
         id: mode
@@ -152,10 +176,21 @@ jobs:
           if [ -n "${{ inputs.account }}" ]; then
             ACCOUNT_ARGS=(--account "${{ inputs.account }}")
           fi
+          FORCE_ARGS=()
+          if [ "${{ inputs.force }}" = "true" ]; then
+            FORCE_ARGS=(--force)
+          fi
+          AGE_ARGS=()
+          if [ -n "${{ inputs.min_age_days }}" ]; then
+            AGE_ARGS=(--min-age-days "${{ inputs.min_age_days }}")
+          fi
           if [ -n "${{ inputs.ids }}" ]; then
             python scripts/run_weekly_bump.py --mode "$MODE" \
-              "${ACCOUNT_ARGS[@]}" --ids "${{ inputs.ids }}" $EXTRA
+              "${ACCOUNT_ARGS[@]}" "${FORCE_ARGS[@]}" "${AGE_ARGS[@]}" \
+              --ids "${{ inputs.ids }}" $EXTRA
           else
+            # Reuse scrape; catalog sync posts vehicles missing from sync.db then bump.
             python scripts/run_weekly_bump.py --mode "$MODE" \
-              "${ACCOUNT_ARGS[@]}" --all-eligible $EXTRA
+              "${ACCOUNT_ARGS[@]}" "${FORCE_ARGS[@]}" "${AGE_ARGS[@]}" \
+              --all-eligible --skip-scrape $EXTRA
           fi

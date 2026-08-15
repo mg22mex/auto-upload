@@ -235,6 +235,73 @@ class TestPlanRepostAgeFilter(unittest.TestCase):
         self.assertEqual(actions, [])
         self.assertTrue(any("hold" in line for line in skipped))
 
+    def test_min_age_zero_includes_recent_posts(self):
+        now = datetime.now(timezone.utc)
+        live = [
+            _listing(
+                "obj_fresh",
+                "account_1",
+                posted_at=(now - timedelta(days=1)).isoformat(),
+            ),
+            _listing(
+                "obj_week",
+                "account_1",
+                posted_at=(now - timedelta(days=6)).isoformat(),
+            ),
+        ]
+        actions, skipped = plan_repost_actions(
+            [_vehicle("obj_fresh"), _vehicle("obj_week")],
+            ["account_1"],
+            live,
+            all_eligible=True,
+            older_than_days=0,
+            max_per_account=10,
+            is_on_hold=lambda *_: False,
+        )
+        self.assertEqual({a.autosell_id for a in actions}, {"obj_fresh", "obj_week"})
+        self.assertEqual(skipped, [])
+
+    def test_force_skips_age_and_holds(self):
+        now = datetime.now(timezone.utc)
+        live = [
+            _listing(
+                "obj_hold",
+                "account_1",
+                posted_at=(now - timedelta(days=1)).isoformat(),
+            ),
+        ]
+        actions, skipped = plan_repost_actions(
+            [_vehicle("obj_hold")],
+            ["account_1"],
+            live,
+            all_eligible=True,
+            older_than_days=7,
+            max_per_account=10,
+            is_on_hold=lambda *_: True,
+            force=True,
+        )
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0].autosell_id, "obj_hold")
+        self.assertEqual(skipped, [])
+
+
+class TestResolveMinAgeDays(unittest.TestCase):
+    def test_cli_zero_wins_over_config(self):
+        from src.sync.repost import resolve_min_age_days
+
+        self.assertEqual(
+            resolve_min_age_days("0", config_default=3, force=False),
+            0,
+        )
+
+    def test_force_zeros_age(self):
+        from src.sync.repost import resolve_min_age_days
+
+        self.assertEqual(
+            resolve_min_age_days("7", config_default=3, force=True),
+            0,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
