@@ -245,12 +245,12 @@ def _repost_one(
         )
         if not ok:
             # Soft skip: controls not found / unverified — continue queue, no create.
-        print(
-            f"WARNING: {action.autosell_id}: remove not confirmed — "
-            f"SKIP_CREATE (soft); continuing remaining queue "
-            f"(will not post a duplicate)"
-        )
-        return
+            print(
+                f"WARNING: {action.autosell_id}: remove not confirmed — "
+                f"SKIP_CREATE (soft); continuing remaining queue "
+                f"(will not post a duplicate)"
+            )
+            return
         removed = True
         # Clear old URL so a mid-create crash is not treated as still live.
         store.mark_fb_listing_removed(
