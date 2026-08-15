@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 from pathlib import Path
 from typing import Callable, Literal
 from urllib.parse import urlparse
@@ -233,9 +234,11 @@ def remove_vehicle_listing(
         action = "mark_sold"
 
     item_id = extract_item_id(listing_url)
+    must_purge = bool(require_verified and action == "delete")
     print(
         f"  {autosell_id}: remove start action={action} "
         f"item_id={item_id or '?'} url={listing_url}"
+        f"{' (must leave selling shelf before create)' if must_purge else ''}"
     )
 
     def _purge_orphan_mapping(reason: str) -> bool:
@@ -266,19 +269,36 @@ def remove_vehicle_listing(
         print(f"  {autosell_id}: listing URL navigation failed ({exc}) — checking if gone")
 
     if _is_content_unavailable(page):
-        return _purge_orphan_mapping(
-            "listing content isn't available (already deleted/unavailable)"
-        )
+        if must_purge and item_id and _item_on_any_selling_shelf(page, item_id):
+            print(
+                f"  {autosell_id}: detail unavailable but item still on "
+                f"selling shelf — will delete from shelf"
+            )
+        else:
+            return _purge_orphan_mapping(
+                "listing content isn't available (already deleted/unavailable)"
+            )
 
     if _listing_already_gone(page, listing_url=listing_url, item_id=item_id):
-        print(f"  {autosell_id}: listing already sold/unavailable — treating as removed")
-        if require_verified and not _is_content_unavailable(page):
-            if not _verify_listing_removed(page, listing_url):
-                # Unavailable/sold banners can flap; prefer soft-success if banner seen.
-                if _is_content_unavailable(page) or _is_sold_or_deactivated(page):
-                    return True
-                _assert_removed_or_raise(page, listing_url, autosell_id, log_dir)
-        return True
+        if must_purge and item_id:
+            if _wait_until_item_gone_from_shelf(page, item_id):
+                print(
+                    f"  {autosell_id}: listing already gone and not on "
+                    f"selling shelf — treating as removed"
+                )
+                return True
+            print(
+                f"  {autosell_id}: detail looks gone/sold but card still on "
+                f"shelf — will delete listing (avoid FB duplicate)"
+            )
+        else:
+            print(f"  {autosell_id}: listing already sold/unavailable — treating as removed")
+            if require_verified and not _is_content_unavailable(page):
+                if not _verify_listing_removed(page, listing_url):
+                    if _is_content_unavailable(page) or _is_sold_or_deactivated(page):
+                        return True
+                    _assert_removed_or_raise(page, listing_url, autosell_id, log_dir)
+            return True
 
     visitor_detail = _is_visitor_listing_view(page)
     owner_detail = _is_owner_listing_view(page)
@@ -302,7 +322,7 @@ def remove_vehicle_listing(
             last_error = exc
             print(f"  {autosell_id}: detail-page remove failed: {exc}")
             # Owner page often has direct Marcar como vendido but no Eliminar in menu
-            if action == "delete":
+            if action == "delete" and not must_purge:
                 try:
                     print(f"  {autosell_id}: detail fallback mark_sold (owner chrome)")
                     _perform_removal_on_current_page(page, action="mark_sold")
@@ -315,19 +335,28 @@ def remove_vehicle_listing(
         page, listing_url=listing_url, item_id=item_id
     ):
         print(f"  {autosell_id}: listing gone after detail remove")
-        if require_verified and not _is_content_unavailable(page):
-            _assert_removed_or_raise(page, listing_url, autosell_id, log_dir)
-        return True
+        if must_purge and item_id:
+            if _wait_until_item_gone_from_shelf(page, item_id):
+                return True
+            print(
+                f"  {autosell_id}: still on selling shelf after detail remove"
+            )
+        else:
+            if require_verified and not _is_content_unavailable(page):
+                _assert_removed_or_raise(page, listing_url, autosell_id, log_dir)
+            return True
 
     # --- Fallback: selling shelf (scroll-loaded inventory) ---
     shelf_removed = False
     if item_id:
         try:
             print(f"  {autosell_id}: trying selling-shelf removal for item {item_id}")
-            if _remove_from_selling_shelf(page, item_id, action=action):
+            if _remove_from_selling_shelf(
+                page, item_id, action=action, confirm_gone=must_purge
+            ):
                 shelf_removed = True
                 page.wait_for_timeout(2_000)
-            elif action == "delete":
+            elif action == "delete" and not must_purge:
                 print(f"  {autosell_id}: selling-shelf retry with mark_sold")
                 if _remove_from_selling_shelf(page, item_id, action="mark_sold"):
                     shelf_removed = True
@@ -336,6 +365,24 @@ def remove_vehicle_listing(
             last_error = exc
             print(f"  {autosell_id}: selling-shelf remove failed: {exc}")
 
+    # Visitor chrome + not on selling shelf → orphan / already-deleted URL.
+    if saw_visitor_only and item_id and not shelf_removed:
+        if not _item_on_any_selling_shelf(page, item_id):
+            return _purge_orphan_mapping(
+                "visitor/buyer detail chrome and item not found on selling shelf"
+            )
+
+    if must_purge and item_id:
+        if _wait_until_item_gone_from_shelf(page, item_id):
+            print(f"  {autosell_id}: selling-shelf purge confirmed — safe to create")
+            return True
+        print(
+            f"WARNING: {autosell_id}: listing still on selling shelf after delete "
+            f"— SKIP_CREATE to avoid 'publicación duplicada'"
+        )
+        _save_debug(page, log_dir, autosell_id, "remove_still_on_shelf")
+        return False
+
     if _is_content_unavailable(page) or _listing_already_gone(
         page, listing_url=listing_url, item_id=item_id
     ):
@@ -343,13 +390,6 @@ def remove_vehicle_listing(
         if require_verified and not _is_content_unavailable(page):
             _assert_removed_or_raise(page, listing_url, autosell_id, log_dir)
         return True
-
-    # Visitor chrome + not on selling shelf → orphan / already-deleted URL.
-    if saw_visitor_only and item_id and not shelf_removed:
-        if not _item_on_any_selling_shelf(page, item_id):
-            return _purge_orphan_mapping(
-                "visitor/buyer detail chrome and item not found on selling shelf"
-            )
 
     # Detail again after opening from selling
     try:
@@ -585,12 +625,14 @@ def _click_role_name(page: Page, pattern: re.Pattern[str], *, roles: tuple[str, 
     return False
 
 
-def _remove_from_selling_shelf(page: Page, item_id: str, *, action: str) -> bool:
+def _remove_from_selling_shelf(
+    page: Page, item_id: str, *, action: str, confirm_gone: bool = False
+) -> bool:
     """Locate the item card on selling dashboard and act via its ⋮ menu.
 
     Delete path: card "…" → "Delete listing" / "Eliminar publicación".
-    Already-sold cards (Mark as available) count as handled for mark_sold;
-    for delete we still try ⋮ → Delete to purge, else accept sold as done.
+    When ``confirm_gone`` (repost), wait until the card leaves the shelf
+    before returning True. Sold-only (Mark as available) is not enough.
     """
     for shelf in _SELLING_SHELVES:
         try:
@@ -601,6 +643,9 @@ def _remove_from_selling_shelf(page: Page, item_id: str, *, action: str) -> bool
 
         link = _find_item_link_scrolled(page, item_id)
         if link is None:
+            if confirm_gone:
+                print(f"  shelf item {item_id}: not found on {shelf} — already gone")
+                return True
             continue
 
         try:
@@ -612,7 +657,7 @@ def _remove_from_selling_shelf(page: Page, item_id: str, *, action: str) -> bool
         card = _shelf_card_root(link)
         already_sold = _shelf_card_is_sold(card)
 
-        if already_sold and action == "mark_sold":
+        if already_sold and action == "mark_sold" and not confirm_gone:
             print(
                 f"  shelf item {item_id}: already sold "
                 f"(Mark as available) — treating as removed"
@@ -625,11 +670,12 @@ def _remove_from_selling_shelf(page: Page, item_id: str, *, action: str) -> bool
                 if _click_menu_action(page, action="delete"):
                     _confirm_if_needed(page, prefer_delete=True)
                     page.wait_for_timeout(1_500)
+                    if confirm_gone:
+                        return _wait_until_item_gone_from_shelf(page, item_id)
                     return True
-                # Menu open but no delete — try mark_sold then accept sold state
-                if _click_menu_action(page, action="mark_sold"):
+                if not confirm_gone and _click_menu_action(page, action="mark_sold"):
                     return _finish_mark_sold_flow(page) or already_sold
-                if already_sold:
+                if already_sold and not confirm_gone:
                     print(
                         f"  shelf item {item_id}: sold (Mark as available) and "
                         f"no Delete in menu — treating as handled"
@@ -640,12 +686,13 @@ def _remove_from_selling_shelf(page: Page, item_id: str, *, action: str) -> bool
                     return _finish_mark_sold_flow(page)
                 if _click_menu_action(page, action="delete"):
                     _confirm_if_needed(page, prefer_delete=True)
+                    if confirm_gone:
+                        return _wait_until_item_gone_from_shelf(page, item_id)
                     return True
-                if already_sold:
+                if already_sold and not confirm_gone:
                     return True
 
-        # Direct Mark as available on card = already sold (no need to open detail).
-        if already_sold:
+        if already_sold and not confirm_gone:
             print(
                 f"  shelf item {item_id}: Mark as available on card — "
                 f"treating as already sold/handled"
@@ -669,11 +716,19 @@ def _remove_from_selling_shelf(page: Page, item_id: str, *, action: str) -> bool
                 link.click(timeout=8_000)
             page.wait_for_timeout(2_500)
             if _is_sold_or_deactivated(page) or _is_content_unavailable(page):
+                if confirm_gone:
+                    if _wait_until_item_gone_from_shelf(page, item_id):
+                        return True
+                    continue
                 return True
             try:
                 _perform_removal_on_current_page(page, action=action)
+                if confirm_gone:
+                    return _wait_until_item_gone_from_shelf(page, item_id)
                 return True
             except Exception:
+                if confirm_gone:
+                    continue
                 alt = "mark_sold" if action == "delete" else "delete"
                 try:
                     _perform_removal_on_current_page(page, action=alt)
@@ -682,6 +737,28 @@ def _remove_from_selling_shelf(page: Page, item_id: str, *, action: str) -> bool
                     continue
         except Exception:
             continue
+    if confirm_gone:
+        return _wait_until_item_gone_from_shelf(page, item_id)
+    return False
+
+
+def _wait_until_item_gone_from_shelf(
+    page: Page, item_id: str, *, timeout_ms: int = 40_000
+) -> bool:
+    """Reload selling dashboard until the item card is gone (or timeout)."""
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    attempt = 0
+    while time.monotonic() < deadline:
+        attempt += 1
+        if not _item_on_any_selling_shelf(page, item_id):
+            print(f"  shelf confirm: item {item_id} gone (attempt {attempt})")
+            return True
+        print(f"  shelf confirm: item {item_id} still listed — waiting")
+        try:
+            page.wait_for_timeout(2_000)
+        except Exception:
+            break
+    print(f"  shelf confirm: item {item_id} still on selling dashboard")
     return False
 
 
