@@ -114,6 +114,7 @@ class TestWeeklyBumpConfig(unittest.TestCase):
         self.assertEqual(cfg["odd_week"], "repost")
         self.assertEqual(cfg["min_age_days"], 3)
         self.assertEqual(cfg["timezone"], "America/Chihuahua")
+        self.assertEqual(cfg["max_per_account_per_run"], 15)
 
     def test_reads_nested(self):
         cfg = weekly_bump_config(
@@ -283,6 +284,75 @@ class TestPlanRepostAgeFilter(unittest.TestCase):
         self.assertEqual(len(actions), 1)
         self.assertEqual(actions[0].autosell_id, "obj_hold")
         self.assertEqual(skipped, [])
+
+    def test_fifo_oldest_posted_at_first_within_cap(self):
+        now = datetime.now(timezone.utc)
+        live = [
+            _listing("obj_mid", "account_1", posted_at=(now - timedelta(days=8)).isoformat()),
+            _listing("obj_old", "account_1", posted_at=(now - timedelta(days=20)).isoformat()),
+            _listing("obj_newer", "account_1", posted_at=(now - timedelta(days=4)).isoformat()),
+        ]
+        vehicles = [_vehicle("obj_mid"), _vehicle("obj_old"), _vehicle("obj_newer")]
+        actions, skipped = plan_repost_actions(
+            vehicles,
+            ["account_1"],
+            live,
+            all_eligible=True,
+            older_than_days=3,
+            max_per_account=2,
+            is_on_hold=lambda *_: False,
+        )
+        self.assertEqual([a.autosell_id for a in actions], ["obj_old", "obj_mid"])
+
+    def test_force_still_respects_max_cap(self):
+        now = datetime.now(timezone.utc)
+        live = [
+            _listing(f"obj_{i}", "account_1", posted_at=(now - timedelta(days=1)).isoformat())
+            for i in range(5)
+        ]
+        vehicles = [_vehicle(f"obj_{i}") for i in range(5)]
+        actions, skipped = plan_repost_actions(
+            vehicles,
+            ["account_1"],
+            live,
+            all_eligible=True,
+            older_than_days=7,
+            max_per_account=2,
+            is_on_hold=lambda *_: False,
+            force=True,
+        )
+        self.assertEqual(len(actions), 2)
+
+
+class TestResolveMaxPerAccount(unittest.TestCase):
+    def test_force_does_not_uncap(self):
+        from src.sync.repost import resolve_max_per_account
+
+        self.assertEqual(
+            resolve_max_per_account(
+                None,
+                older_than_days=0,
+                force=True,
+                env_name="REPOST_MAX_PER_ACCOUNT_PER_RUN_UNSET_XYZ",
+                config_default=15,
+            ),
+            15,
+        )
+
+    def test_unlimited_flag(self):
+        from src.sync.repost import UNLIMITED_PER_ACCOUNT, resolve_max_per_account
+
+        self.assertEqual(
+            resolve_max_per_account(
+                None,
+                older_than_days=3,
+                force=False,
+                env_name="REPOST_MAX_PER_ACCOUNT_PER_RUN_UNSET_XYZ",
+                config_default=15,
+                unlimited=True,
+            ),
+            UNLIMITED_PER_ACCOUNT,
+        )
 
 
 class TestResolveMinAgeDays(unittest.TestCase):

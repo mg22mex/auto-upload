@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from src.facebook.browser_health import is_browser_dead
-from src.facebook.errors import FacebookAutomationError, FacebookPostingError, FacebookSessionError
+from src.facebook.errors import FacebookAutomationError, FacebookDeferredError, FacebookPostingError, FacebookSessionError
 from src.facebook.poster import create_vehicle_listing
 from src.facebook.remover import extract_item_id, ensure_no_matching_shelf_listings, remove_vehicle_listing
 from src.facebook.ui import dismiss_overlays
@@ -139,6 +139,17 @@ def execute_reposts(
                             )
                             remaining.pop(0)
                             done_in_session += 1
+                        except FacebookDeferredError as exc:
+                            print(
+                                f"DEFERRED_FAILED: {action.autosell_id} on {account_id}: {exc}",
+                                flush=True,
+                            )
+                            result.errors.append(
+                                f"DEFERRED_FAILED {action.autosell_id} on {account_id}: {exc}"
+                            )
+                            remaining.pop(0)
+                            reopen_requested = True
+                            break
                         except Exception as exc:
                             if is_browser_dead(exc):
                                 print(
@@ -295,6 +306,8 @@ def _repost_one(
             max_photos=max_photos,
             log_dir=log_dir,
         )
+    except FacebookDeferredError:
+        raise
     except Exception as exc:
         if removed and not is_browser_dead(exc):
             raise FacebookPostingError(

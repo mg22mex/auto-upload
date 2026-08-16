@@ -78,4 +78,11 @@ def weekly_bump_config(config: dict[str, Any] | None) -> dict[str, Any]:
             or ""
         ),
         "min_age_days": int(min_age),
+        "max_per_account_per_run": int(
+            bump.get("max_per_account_per_run")
+            if bump.get("max_per_account_per_run") is not None
+            else repost.get("max_per_account_per_run")
+            if repost.get("max_per_account_per_run") is not None
+            else 15
+        ),
     }

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError
 
-from src.facebook.errors import FacebookPostingError, FacebookSessionError
+from src.facebook.errors import FacebookDeferredError, FacebookPostingError, FacebookSessionError
 from src.facebook.session import page_shows_login_form
 from src.facebook.network import MarketplaceItemCapture
 from src.facebook.photos import download_vehicle_photos
@@ -118,6 +118,8 @@ def create_vehicle_listing(
                 "Publish likely did not complete — check obj969_after_publish.png."
             )
         return listing_url
+    except FacebookDeferredError:
+        raise
     except Exception as exc:
         _save_debug(page, log_dir, vehicle.autosell_id, "create_failed")
         raise FacebookPostingError(f"Create failed for {vehicle.autosell_id}: {exc}") from exc
@@ -226,46 +228,80 @@ def _try_attach_photos(page: Page, photo_paths: list[Path]) -> bool:
 
 
 def _upload_photos(page: Page, photo_paths: list[Path], log_dir: Path, autosell_id: str) -> None:
-    attached = False
     last_exc: Exception | None = None
-    for attempt in range(1, 4):
-        dismiss_overlays(page)
-        if attempt > 1:
-            print(f"  photo upload control retry {attempt}/3 (2s backoff)")
-            page.wait_for_timeout(2_000)
-            _wait_for_photo_file_input(page, timeout_ms=8_000)
+    for ui_attempt in range(1, 3):
+        attached = False
+        for attempt in range(1, 4):
+            dismiss_overlays(page)
+            if attempt > 1:
+                print(
+                    f"  photo upload control retry {attempt}/3 (2s backoff)",
+                    flush=True,
+                )
+                page.wait_for_timeout(2_000)
+                _wait_for_photo_file_input(page, timeout_ms=8_000)
+            try:
+                if _try_attach_photos(page, photo_paths):
+                    attached = True
+                    break
+            except Exception as exc:
+                last_exc = exc
+                print(f"  photo upload attempt {attempt}/3 failed: {exc}", flush=True)
+        if not attached:
+            last_exc = last_exc or FacebookPostingError("Photo upload control not found")
+            print(
+                f"  UI upload attempt {ui_attempt}/2 failed: photo control missing",
+                flush=True,
+            )
+            if ui_attempt == 1:
+                page.wait_for_timeout(2_000)
+                continue
+            _save_debug(page, log_dir, autosell_id, "no_file_input")
+            raise FacebookDeferredError(
+                f"DEFERRED_FAILED {autosell_id}: Photo upload control not found "
+                f"after 2 UI attempts"
+            )
+
+        n = len(photo_paths)
+        print(f"Uploaded {n} photo(s); waiting for previews...", flush=True)
+        preview_timeout = max(120_000, n * 8_000)
+        wait_for_photo_previews(page, min_count=n, timeout_ms=preview_timeout)
+        next_timeout = max(30_000, min(n * 5_000, 120_000))
+        print(
+            f"  waiting for Siguiente after {n} photo preview(s) (up to {next_timeout}ms)",
+            flush=True,
+        )
+        next_ready = _wait_for_next_enabled_polling(page, timeout_ms=next_timeout)
+        if not next_ready:
+            print("  Siguiente still disabled after previews — will force-click", flush=True)
+        _save_debug(page, log_dir, autosell_id, "after_upload")
+        log_page_state(page, "photos_uploaded")
+
         try:
-            if _try_attach_photos(page, photo_paths):
-                attached = True
-                break
-        except Exception as exc:
+            advance_past_photo_step(
+                page,
+                timeout_ms=max(60_000, n * 4_000),
+                photos_already_ready=True,
+                next_enable_polled=next_ready,
+            )
+            log_page_state(page, "after_photo_next")
+            return
+        except FacebookPostingError as exc:
             last_exc = exc
-            print(f"  photo upload attempt {attempt}/3 failed: {exc}")
-    if not attached:
-        _save_debug(page, log_dir, autosell_id, "no_file_input")
-        detail = f": {last_exc}" if last_exc else ""
-        raise FacebookPostingError("Photo upload control not found" + detail)
-
-    n = len(photo_paths)
-    print(f"Uploaded {n} photo(s); waiting for previews...")
-    preview_timeout = max(120_000, n * 8_000)
-    wait_for_photo_previews(page, min_count=n, timeout_ms=preview_timeout)
-    # Poll Siguiente/Next — no fixed 80–100s sleep after large uploads.
-    next_timeout = max(30_000, min(n * 5_000, 120_000))
-    print(f"  waiting for Siguiente after {n} photo preview(s) (up to {next_timeout}ms)")
-    next_ready = _wait_for_next_enabled_polling(page, timeout_ms=next_timeout)
-    if not next_ready:
-        print("  Siguiente still disabled after previews — will force-click")
-    _save_debug(page, log_dir, autosell_id, "after_upload")
-    log_page_state(page, "photos_uploaded")
-
-    advance_past_photo_step(
-        page,
-        timeout_ms=max(60_000, n * 4_000),
-        photos_already_ready=True,
-        next_enable_polled=next_ready,
+            print(
+                f"  Siguiente after photos failed (UI attempt {ui_attempt}/2): {exc}",
+                flush=True,
+            )
+            if ui_attempt == 1:
+                page.wait_for_timeout(2_000)
+                continue
+            raise FacebookDeferredError(
+                f"DEFERRED_FAILED {autosell_id}: Siguiente unusable after 2 photo-step attempts"
+            ) from exc
+    raise FacebookDeferredError(
+        f"DEFERRED_FAILED {autosell_id}: photo step failed after 2 UI attempts"
+        + (f": {last_exc}" if last_exc else "")
     )
-    log_page_state(page, "after_photo_next")
 
 
 def _fill_vehicle_form(

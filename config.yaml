@@ -8,34 +8,40 @@ autosell:
 sync:
   timezone: America/Chihuahua
   max_posts_per_account_per_run: 10
+  max_listings_per_account: 15  # live Marketplace slots per FB profile
+  slot_allocator:
+    enabled: true
+    # false = do not auto-delete extra live listings while downsizing from 1:1 clone
+    enforce_overflow_removals: false
   removal_action: mark_sold  # mark_sold | delete
   # Live sync accounts. account_3 excluded until operator clears old FB listings.
   active_accounts:
     - account_1
     - account_2
-  # Listing bump: relist-first (full delete+recreate). Cron Wed + Sun 09:00 Chihuahua.
+  # Listing bump: daily incremental relist (FIFO by posted_at / last bump).
   # renew remains optional via weekly_bump.even_week / --mode renew.
   weekly_bump:
     timezone: America/Chihuahua
     even_week: repost
     odd_week: repost
     min_age_days: 3
-    schedule: "0 15 * * 0,3"  # Sun + Wed 15:00 UTC ≈ 09:00 America/Chihuahua
+    max_per_account_per_run: 15
+    schedule: "0 15 * * *"  # daily 15:00 UTC ≈ 09:00 America/Chihuahua
   renew:
     min_age_days: 3
-    max_per_account_per_run: 25
+    max_per_account_per_run: 15
     restart_browser_every: 10  # close/reopen Chromium to limit VPS RAM flake
     max_browser_reopens: 5
-    schedule: "0 15 * * 0,3"
+    schedule: "0 15 * * *"
   # Full delete+recreate (primary bump path; listings ≥ min_age_days old)
   repost:
     min_age_days: 3
     # Hard delete before create — mark_sold alone often triggers FB "publicación duplicada"
     removal_action: delete
-    max_per_account_per_run: 5  # smaller batches; browser restarts every N below
+    max_per_account_per_run: 15  # daily incremental batch (not a full-catalog dump)
     restart_browser_every: 3
     max_browser_reopens: 5
-    schedule: "0 15 * * 0,3"
+    schedule: "0 15 * * *"
 
 facebook:
   location_city: Chihuahua

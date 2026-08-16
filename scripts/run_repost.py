@@ -15,10 +15,11 @@ sys.path.insert(0, str(ROOT))
 from src.facebook.executor import execute_actions
 from src.facebook.reposter import execute_reposts
 from src.facebook.session import format_session_login_error, resolve_session_dir, session_health_report
-from src.facebook.util import env_int
+from src.facebook.util import ensure_unbuffered_stdio, env_int
 from src.inventory.snapshot import load_catalog_snapshot
 from src.store.db import SyncStore
 from src.sync.engine import plan_sync_actions, split_executable_actions
+from src.sync.allocator import allocate_from_config, slot_allocator_config
 from src.sync.repost import (
     resolve_max_per_account,
     resolve_min_age_days,
@@ -50,6 +51,7 @@ def resolve_accounts(config: dict, requested: list[str] | None) -> list[str]:
 
 
 def main() -> int:
+    ensure_unbuffered_stdio()
     parser = argparse.ArgumentParser(
         description="Repost live Facebook listings (mark sold → create → update sync.db URL)."
     )
@@ -76,14 +78,21 @@ def main() -> int:
     )
     parser.add_argument(
         "--max",
+        "--max-per-account",
+        dest="max",
         type=int,
         default=None,
-        help="Max reposts per account this run (default: REPOST_MAX_PER_ACCOUNT or 5; ignored cap when --force or --min-age-days 0)",
+        help="Max reposts per account this run (default: 15). --force does not lift this cap.",
+    )
+    parser.add_argument(
+        "--unlimited",
+        action="store_true",
+        help="Ignore per-account cap (full shelf). Prefer daily --max-per-account 15.",
     )
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Ignore holds and min-age; process all live catalog listings (still respects --max if set)",
+        help="Ignore holds and min-age; still respects --max-per-account unless --unlimited",
     )
     parser.add_argument("--dry-run", action="store_true", help="Plan only; do not touch Facebook")
     parser.add_argument("--catalog", default="data/catalog_latest.json")
@@ -106,7 +115,8 @@ def main() -> int:
         older_than_days=older_than,
         force=args.force,
         env_name="REPOST_MAX_PER_ACCOUNT_PER_RUN",
-        config_default=int(repost_cfg.get("max_per_account_per_run", 5)),
+        config_default=int(repost_cfg.get("max_per_account_per_run", 15)),
+        unlimited=args.unlimited,
     )
 
     catalog_path = ROOT / args.catalog
@@ -122,6 +132,18 @@ def main() -> int:
     if args.ids:
         explicit_ids = {part.strip() for part in args.ids.split(",") if part.strip()}
 
+    live_listings = store.get_live_listings()
+    allocation = allocate_from_config(config, vehicles, account_ids, live_listings)
+    alloc_cfg = slot_allocator_config(config)
+    assigned_by_account = None
+    if allocation:
+        assigned_by_account = {
+            acct: allocation.assigned_ids(acct) for acct in account_ids
+        }
+        print("=== Slot allocation ===", flush=True)
+        print(allocation.format_table(), flush=True)
+        print("", flush=True)
+
     create_actions = []
     deferred_creates = []
     if args.all_eligible:
@@ -132,8 +154,10 @@ def main() -> int:
         sync_planned = plan_sync_actions(
             vehicles,
             account_ids,
-            store.get_live_listings(),
+            live_listings,
             max_creates_per_account=max_creates,
+            allocation=allocation,
+            enforce_overflow_removals=alloc_cfg["enforce_overflow_removals"],
         )
         executable_sync, deferred_creates = split_executable_actions(sync_planned)
         create_actions = [a for a in executable_sync if a.action == "create"]
@@ -141,13 +165,14 @@ def main() -> int:
     actions, skipped = plan_repost_actions(
         vehicles,
         account_ids,
-        store.get_live_listings(),
+        live_listings,
         explicit_ids=explicit_ids,
         all_eligible=args.all_eligible,
         older_than_days=older_than,
         max_per_account=max_per,
         is_on_hold=store.is_on_repost_hold,
         force=args.force,
+        assigned_by_account=assigned_by_account,
     )
 
     print("")
@@ -155,6 +180,7 @@ def main() -> int:
     print(f"Accounts:     {', '.join(account_ids)}")
     print(f"Force:        {args.force}")
     print(f"Min age days: {older_than}  (--force or 0 = all live dates)")
+    print(f"Max / account: {max_per}")
     print(f"New creates:  {len(create_actions)} (catalog missing from sync.db)")
     print(f"Would repost: {len(actions)}")
     print(f"Skipped:      {len(skipped)}")
@@ -247,7 +273,7 @@ def main() -> int:
         result = execute_reposts(actions, store, config, root=ROOT, account_order=account_ids)
         print(f"Repost done: {result.reposts} reposted, {len(result.errors)} error(s).")
         if result.errors:
-            rc = 1
+            hard = [e for e in result.errors if "DEFERRED_FAILED" not in e]
             for err in result.errors:
                 print(f"  FB error: {err}", file=sys.stderr)
                 if "Not logged in" in err or "session expired" in err.lower():
@@ -257,6 +283,8 @@ def main() -> int:
                         "and confirm sessions/ lives under the persistent data bind.",
                         file=sys.stderr,
                     )
+            if hard:
+                rc = 1
     return rc
 
 

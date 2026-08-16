@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import random
 import re
+import sys
 import time
 from pathlib import Path
 
@@ -154,3 +155,13 @@ def ensure_log_dir(log_dir: str | Path) -> Path:
     path = Path(log_dir)
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def ensure_unbuffered_stdio() -> None:
+    """Line-buffer stdout/stderr so long Playwright waits still emit logs."""
+    os.environ["PYTHONUNBUFFERED"] = "1"
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True)
+        except Exception:
+            pass

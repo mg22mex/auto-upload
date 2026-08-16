@@ -14,6 +14,8 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from src.facebook.util import ensure_unbuffered_stdio
+from src.sync.process_lock import ProcessLock
 from src.sync.weekly_bump import resolve_weekly_bump_mode, weekly_bump_config
 
 
@@ -108,7 +110,12 @@ def main() -> int:
     group.add_argument(
         "--all-eligible",
         action="store_true",
-        help="Process all eligible live listings (age ≥ min days, or all dates with --force / --min-age-days 0)",
+        help="Process eligible live listings (age ≥ min days). Capped by --max-per-account.",
+    )
+    group.add_argument(
+        "--dry-run-allocation",
+        action="store_true",
+        help="Print slot allocation table (Account | assigned | free) and exit",
     )
     parser.add_argument(
         "--older-than",
@@ -117,11 +124,28 @@ def main() -> int:
         default=None,
         help="Min age days (default: config/env, usually 3). Pass 0 to include 1–7 day old listings.",
     )
-    parser.add_argument("--max", type=int, default=None, help="Max per account")
+    parser.add_argument(
+        "--max",
+        "--max-per-account",
+        dest="max",
+        type=int,
+        default=None,
+        help="Max reposts per account (default: config 15). --force does not lift this.",
+    )
+    parser.add_argument(
+        "--unlimited",
+        action="store_true",
+        help="Full-shelf run (ignore per-account cap)",
+    )
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Ignore holds and min-age; process all live catalog listings",
+        help="Ignore holds and min-age; still respects --max-per-account unless --unlimited",
+    )
+    parser.add_argument(
+        "--no-lock",
+        action="store_true",
+        help="Skip /tmp/auto_upload_bump.lock (not recommended)",
     )
     parser.add_argument(
         "--sync-catalog",
@@ -139,10 +163,76 @@ def main() -> int:
     parser.add_argument("--config", default="config.yaml")
     args = parser.parse_args()
 
+    ensure_unbuffered_stdio()
+    os.environ.setdefault("PYTHONUNBUFFERED", "1")
     load_dotenv(ROOT / ".env")
     config = load_config(ROOT / args.config)
     bump = weekly_bump_config(config)
+    repost_cfg = (config.get("sync") or {}).get("repost") or {}
 
+    lock: ProcessLock | None = None
+    if not args.dry_run and not args.dry_run_allocation and not args.no_lock:
+        lock = ProcessLock()
+        lock.install_signal_handlers()
+        lock.acquire()
+
+    try:
+        return _run_bump(args, config, bump, repost_cfg)
+    finally:
+        if lock is not None:
+            lock.release()
+
+
+def _print_allocation(args, config: dict) -> int:
+    from src.inventory.snapshot import load_catalog_snapshot
+    from src.store.db import SyncStore
+    from src.sync.allocator import allocate_slots, slot_allocator_config
+
+    alloc_cfg = slot_allocator_config(config)
+    accounts = args.account
+    if not accounts:
+        accounts = list(config.get("sync", {}).get("active_accounts") or [])
+        if not accounts:
+            accounts = [a["id"] for a in config.get("accounts", []) if a.get("id")]
+    catalog_path = ROOT / args.catalog
+    if not catalog_path.is_file():
+        print(f"Catalog not found: {catalog_path}", file=sys.stderr)
+        return 1
+    vehicles = load_catalog_snapshot(catalog_path)
+    db_path = os.getenv("DB_PATH", "data/sync.db")
+    store = SyncStore(ROOT / db_path if not Path(db_path).is_absolute() else db_path)
+    allocation = allocate_slots(
+        vehicles,
+        accounts,
+        store.get_live_listings(),
+        max_per_account=alloc_cfg["max_listings_per_account"],
+    )
+    print("=== Slot allocation (dry-run) ===", flush=True)
+    print(
+        f"Active accounts: {', '.join(allocation.account_ids)}  |  "
+        f"cap={allocation.max_per_account}/account  |  "
+        f"capacity={allocation.total_capacity()}  |  catalog={len(vehicles)}",
+        flush=True,
+    )
+    print(allocation.format_table(), flush=True)
+    if allocation.waitlist:
+        print(
+            f"Waitlist sample: {', '.join(allocation.waitlist[:12])}"
+            + (" …" if len(allocation.waitlist) > 12 else ""),
+            flush=True,
+        )
+    if allocation.overflow:
+        print(
+            f"Overflow live (not in 15-slot partition): {len(allocation.overflow)} "
+            f"(set sync.slot_allocator.enforce_overflow_removals: true to remove)",
+            flush=True,
+        )
+    return 0
+
+
+def _run_bump(args, config: dict, bump: dict, repost_cfg: dict) -> int:
+    if args.dry_run_allocation:
+        return _print_allocation(args, config)
     force = None if args.mode == "auto" else args.mode
     env_force = (os.getenv("WEEKLY_BUMP_MODE") or "").strip().lower()
     if force is None and env_force in ("renew", "repost", "auto"):
@@ -176,7 +266,14 @@ def main() -> int:
     script = ROOT / "scripts" / (
         "run_renew.py" if mode == "renew" else "run_repost.py"
     )
-    cmd: list[str] = [sys.executable, str(script)]
+    max_per = args.max
+    if max_per is None:
+        max_per = int(
+            repost_cfg.get("max_per_account_per_run")
+            or bump.get("max_per_account_per_run")
+            or 15
+        )
+    cmd: list[str] = [sys.executable, "-u", str(script)]
     if args.account:
         cmd.extend(["--account", *args.account])
     if args.ids:
@@ -185,18 +282,21 @@ def main() -> int:
         cmd.append("--all-eligible")
     if args.older_than is not None:
         cmd.extend(["--min-age-days", str(args.older_than)])
-    if args.max is not None:
-        cmd.extend(["--max", str(args.max)])
+    if args.unlimited:
+        cmd.append("--unlimited")
+    else:
+        cmd.extend(["--max", str(max_per)])
     if args.force:
         cmd.append("--force")
     if args.dry_run:
         cmd.append("--dry-run")
     cmd.extend(["--catalog", args.catalog, "--config", args.config])
 
-    print("=== Listing bump (relist-first) ===", flush=True)
+    print("=== Listing bump (daily incremental) ===", flush=True)
     print(f"Mode:      {mode} ({'forced' if force else 'auto config'})", flush=True)
     print(f"Timezone:  {bump['timezone']}", flush=True)
     print(f"Force:     {args.force}", flush=True)
+    print(f"Max/acct:  {'unlimited' if args.unlimited else max_per}", flush=True)
     print(
         f"Even/odd:  {bump['even_week']} / {bump['odd_week']} "
         f"(min_age_days={args.older_than if args.older_than is not None else bump.get('min_age_days', 3)}"
@@ -206,7 +306,9 @@ def main() -> int:
     print(f"Command:   {' '.join(cmd)}", flush=True)
     print("", flush=True)
 
-    result = subprocess.run(cmd, cwd=str(ROOT))
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    result = subprocess.run(cmd, cwd=str(ROOT), env=env)
     return int(result.returncode)
 
 

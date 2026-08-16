@@ -8,7 +8,8 @@ from src.sync.weekly_bump import DEFAULT_MIN_AGE_DAYS
 
 # Live listings at least this old are eligible for relist/repost (and renew).
 DEFAULT_REPOST_MIN_AGE_DAYS = DEFAULT_MIN_AGE_DAYS
-# When --force or --min-age-days 0 and --max is omitted, process the whole shelf.
+DEFAULT_MAX_PER_ACCOUNT = 15
+# Explicit --unlimited only (not --force). Daily runs must keep the batch cap.
 UNLIMITED_PER_ACCOUNT = 10_000
 
 
@@ -45,11 +46,18 @@ def resolve_max_per_account(
     force: bool,
     env_name: str,
     config_default: int,
+    unlimited: bool = False,
 ) -> int:
+    """Daily batch cap. ``--force`` does not lift the cap (anti-ban).
+
+    Pass ``unlimited=True`` or ``cli_max`` >= UNLIMITED_PER_ACCOUNT for a
+    full-shelf run. ``older_than_days`` is unused for the cap (kept for callers).
+    """
+    del older_than_days, force  # age/holds are separate; cap always applies
+    if unlimited:
+        return UNLIMITED_PER_ACCOUNT
     if cli_max is not None:
         return max(0, int(cli_max))
-    if force or older_than_days <= 0:
-        return UNLIMITED_PER_ACCOUNT
     raw = os.getenv(env_name)
     if raw is not None and str(raw).strip() != "":
         return max(0, int(raw))
@@ -80,6 +88,7 @@ def plan_repost_actions(
     is_on_hold,
     force: bool = False,
     action_name: str = "repost",
+    assigned_by_account: dict[str, set[str]] | None = None,
 ) -> tuple[list[SyncAction], list[str]]:
     """Plan repost/renew actions for live listings.
 
@@ -174,13 +183,18 @@ def plan_repost_actions(
                 consider(autosell_id, account_id)
     else:
         for account_id in account_ids:
+            assigned = None
+            if assigned_by_account is not None:
+                assigned = assigned_by_account.get(account_id)
             candidates: list[tuple[str, str | None]] = []
             for (aid, acct), row in live_by_key.items():
                 if acct != account_id or aid not in active_by_id:
                     continue
+                if assigned is not None and aid not in assigned:
+                    continue
                 posted_at = row["posted_at"] if "posted_at" in row.keys() else None
                 candidates.append((aid, posted_at))
-            candidates.sort(key=lambda item: item[1] or "")
+            candidates.sort(key=lambda item: item[1] or "")  # FIFO: oldest posted_at first
             for autosell_id, _ in candidates:
                 if budget[account_id] <= 0:
                     break

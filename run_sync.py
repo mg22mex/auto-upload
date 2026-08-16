@@ -17,6 +17,7 @@ from src.facebook.util import env_int
 from src.inventory.autosell import AutosellCatalogError, fetch_catalog
 from src.inventory.snapshot import load_catalog_snapshot, save_catalog_snapshot
 from src.sync.engine import plan_sync_actions, split_executable_actions
+from src.sync.allocator import allocate_from_config, slot_allocator_config
 from src.store.db import SyncStore
 
 def load_config(config_path: Path) -> dict:
@@ -126,11 +127,19 @@ def run_sync_from_catalog(
         store.commit()
 
         live_listings = store.get_live_listings()
+        allocation = allocate_from_config(config, vehicles, account_ids, live_listings)
+        alloc_cfg = slot_allocator_config(config)
+        if allocation:
+            print("=== Slot allocation ===", flush=True)
+            print(allocation.format_table(), flush=True)
+            print("", flush=True)
         actions = plan_sync_actions(
             vehicles,
             account_ids,
             live_listings,
             max_creates_per_account=max_posts,
+            allocation=allocation,
+            enforce_overflow_removals=alloc_cfg["enforce_overflow_removals"],
         )
         executable, deferred = split_executable_actions(actions)
         print_report(vehicles, executable, deferred)
