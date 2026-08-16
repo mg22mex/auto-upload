@@ -26,6 +26,13 @@ DISMISS_LABELS = (
     "Allow all cookies",
     "Aceptar",
     "Accept",
+    "Entendido",
+    "Got it",
+)
+
+DRAFT_SAVED_RE = re.compile(
+    r"borrador guardado|draft saved|se guard[oó] un borrador",
+    re.I,
 )
 
 
@@ -53,6 +60,34 @@ def dismiss_overlays(page: Page) -> None:
                     page.wait_for_timeout(800)
             except Exception:
                 continue
+    _dismiss_draft_saved(page)
+
+
+def _dismiss_draft_saved(page: Page) -> None:
+    """Close 'Draft saved' / 'Borrador guardado' toasts so the composer is usable."""
+    try:
+        hit = page.get_by_text(DRAFT_SAVED_RE)
+        if not hit.count():
+            return
+        dialog = page.locator('[role="dialog"], [aria-modal="true"]').filter(
+            has_text=DRAFT_SAVED_RE
+        )
+        root = dialog.first if dialog.count() else hit.first
+        for label in ("OK", "Entendido", "Got it", "Cerrar", "Close", "Descartar", "Discard"):
+            for btn in (
+                root.get_by_role("button", name=label),
+                page.get_by_role("button", name=label),
+                page.locator(f'[aria-label="{label}"]'),
+            ):
+                try:
+                    if btn.count() and btn.first.is_visible():
+                        btn.first.click(timeout=2_000)
+                        page.wait_for_timeout(800)
+                        return
+                except Exception:
+                    continue
+    except Exception:
+        return
 
 
 def click_labeled_action(

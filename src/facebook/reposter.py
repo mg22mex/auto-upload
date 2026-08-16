@@ -8,6 +8,7 @@ from src.facebook.browser_health import is_browser_dead
 from src.facebook.errors import FacebookAutomationError, FacebookPostingError, FacebookSessionError
 from src.facebook.poster import create_vehicle_listing
 from src.facebook.remover import extract_item_id, ensure_no_matching_shelf_listings, remove_vehicle_listing
+from src.facebook.ui import dismiss_overlays
 from src.facebook.session import (
     format_session_login_error,
     get_page,
@@ -262,6 +263,7 @@ def _repost_one(
             f"  {action.autosell_id}: old listing cleared in sync.db "
             f"(status=removed, url=null)"
         )
+        dismiss_overlays(page)
     except Exception as exc:
         if is_browser_dead(exc):
             raise

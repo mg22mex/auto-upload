@@ -52,7 +52,7 @@ def create_vehicle_listing(
 ) -> str:
     create_url = fb_config.get("create_url", "https://www.facebook.com/marketplace/create/vehicle")
     page.goto(create_url, wait_until="domcontentloaded", timeout=90_000)
-    page.wait_for_timeout(3_000)
+    _wait_for_photo_file_input(page, timeout_ms=15_000)
     dismiss_overlays(page)
     log_page_state(page, "create_opened")
     if page_shows_login_form(page):
@@ -79,6 +79,9 @@ def create_vehicle_listing(
             f"SKIP_CREATE: matching listing still on selling shelf for "
             f"{vehicle.autosell_id} — refusing duplicate publish"
         )
+
+    # Shelf scan navigates to /you/selling* — reopen composer and wait for DOM.
+    _reopen_vehicle_composer(page, create_url=create_url)
 
     photo_paths = download_vehicle_photos(vehicle, max_photos=max_photos)
     capture = MarketplaceItemCapture()
@@ -155,29 +158,93 @@ def _ensure_vehicle_create_flow(page: Page, *, create_url: str) -> None:
             continue
 
     page.goto(create_url, wait_until="domcontentloaded", timeout=90_000)
-    page.wait_for_timeout(2_000)
+    _wait_for_photo_file_input(page, timeout_ms=15_000)
     dismiss_overlays(page)
     log_page_state(page, "create_retry")
 
 
-def _upload_photos(page: Page, photo_paths: list[Path], log_dir: Path, autosell_id: str) -> None:
-    file_input = page.locator('input[type="file"]').first
-    if file_input.count() == 0:
-        add_photos = _first_visible(
-            page.get_by_role("button", name=re.compile(r"add photos|agregar fotos|a[nñ]adir fotos", re.I)),
-            page.locator('[aria-label*="fotos" i], [aria-label*="photos" i]'),
-            page.get_by_text(re.compile(r"add photos|agregar fotos|a[nñ]adir fotos", re.I)),
+PHOTO_ADD_RE = re.compile(
+    r"add photos|agregar fotos|a[nñ]adir fotos|add pictures|agregar im[aá]genes",
+    re.I,
+)
+
+
+def _reopen_vehicle_composer(page: Page, *, create_url: str) -> None:
+    dismiss_overlays(page)
+    page.goto(create_url, wait_until="domcontentloaded", timeout=90_000)
+    _wait_for_photo_file_input(page, timeout_ms=20_000)
+    dismiss_overlays(page)
+    log_page_state(page, "create_composer_ready")
+    if page_shows_login_form(page):
+        raise FacebookSessionError(
+            "Facebook session expired — log in again with scripts/fb_login.py"
         )
-        if add_photos:
-            with page.expect_file_chooser(timeout=30_000) as fc_info:
-                add_photos.click()
-            file_chooser = fc_info.value
-            file_chooser.set_files([str(p) for p in photo_paths])
-        else:
-            _save_debug(page, log_dir, autosell_id, "no_file_input")
-            raise FacebookPostingError("Photo upload control not found")
-    else:
-        file_input.set_input_files([str(p) for p in photo_paths])
+
+
+def _wait_for_photo_file_input(page: Page, *, timeout_ms: int = 20_000) -> bool:
+    """Wait until the hidden file input (or photo step) is in the DOM."""
+    try:
+        page.wait_for_selector('input[type="file"]', state="attached", timeout=timeout_ms)
+        page.wait_for_timeout(1_500)
+        return True
+    except PlaywrightTimeoutError:
+        print("  WARN: input[type=file] not attached; settling then retrying via Add Photos")
+        page.wait_for_timeout(3_000)
+        return False
+
+
+def _add_photos_locator(page: Page) -> Locator | None:
+    return _first_visible(
+        page.get_by_role("button", name=PHOTO_ADD_RE),
+        page.locator('[aria-label*="fotos" i], [aria-label*="photos" i]'),
+        page.get_by_text(PHOTO_ADD_RE),
+        page.locator('[role="button"]').filter(has_text=PHOTO_ADD_RE),
+    )
+
+
+def _try_attach_photos(page: Page, photo_paths: list[Path]) -> bool:
+    paths = [str(p) for p in photo_paths]
+    file_input = page.locator('input[type="file"]').first
+    try:
+        if file_input.count() == 0:
+            page.wait_for_selector('input[type="file"]', state="attached", timeout=8_000)
+            file_input = page.locator('input[type="file"]').first
+    except PlaywrightTimeoutError:
+        pass
+    except Exception:
+        pass
+    if file_input.count():
+        file_input.set_input_files(paths)
+        return True
+    add_photos = _add_photos_locator(page)
+    if not add_photos:
+        return False
+    with page.expect_file_chooser(timeout=30_000) as fc_info:
+        add_photos.click()
+    fc_info.value.set_files(paths)
+    return True
+
+
+def _upload_photos(page: Page, photo_paths: list[Path], log_dir: Path, autosell_id: str) -> None:
+    attached = False
+    last_exc: Exception | None = None
+    for attempt in range(1, 4):
+        dismiss_overlays(page)
+        if attempt > 1:
+            print(f"  photo upload control retry {attempt}/3 (2s backoff)")
+            page.wait_for_timeout(2_000)
+            _wait_for_photo_file_input(page, timeout_ms=8_000)
+        try:
+            if _try_attach_photos(page, photo_paths):
+                attached = True
+                break
+        except Exception as exc:
+            last_exc = exc
+            print(f"  photo upload attempt {attempt}/3 failed: {exc}")
+    if not attached:
+        _save_debug(page, log_dir, autosell_id, "no_file_input")
+        detail = f": {last_exc}" if last_exc else ""
+        raise FacebookPostingError("Photo upload control not found" + detail)
 
     n = len(photo_paths)
     print(f"Uploaded {n} photo(s); waiting for previews...")
