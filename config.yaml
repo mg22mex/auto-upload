@@ -57,7 +57,7 @@ accounts:
     session_dir: sessions/account_2
     # Personal identity (Marco Gastelum). facebook_c_user is filled after headed login
     # (`scripts/fb_login.py` + `scripts/fb_whoami.py`); do not copy account_1's id.
-    facebook_c_user: ""
+    facebook_c_user: "100047574648142"
     facebook_profile: "marco.gastelum.3954"
   - id: account_3
     session_dir: sessions/account_3
