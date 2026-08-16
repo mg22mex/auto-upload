@@ -255,36 +255,72 @@ def main() -> int:
         return 0
 
     rc = 0
+    session_expired_n = 0
+    processed_n = 0
+
+    def _sessionish(err: str) -> bool:
+        low = err.lower()
+        return (
+            "FAILED_SESSION_EXPIRED" in err
+            or "not logged in" in low
+            or "session expired" in low
+            or "DEFERRED_FAILED" in err
+        )
+
     if create_actions:
-        print("Creating new catalog vehicles missing from sync.db ...")
+        print("Creating new catalog vehicles missing from sync.db ...", flush=True)
         create_result = execute_actions(
             create_actions, store, config, root=ROOT, account_order=account_ids
         )
         print(
             f"Create done: {create_result.creates} posted, "
-            f"{len(create_result.errors)} error(s)."
+            f"{len(create_result.errors)} error(s).",
+            flush=True,
         )
         if create_result.errors:
-            rc = 1
+            hard = []
             for err in create_result.errors:
                 print(f"  FB create error: {err}", file=sys.stderr)
+                if _sessionish(err):
+                    print(
+                        f"[SKIP] create: session expired. Run fb_login.py to refresh.",
+                        file=sys.stderr,
+                    )
+                else:
+                    hard.append(err)
+            if hard:
+                rc = 1
 
     if actions:
         result = execute_reposts(actions, store, config, root=ROOT, account_order=account_ids)
-        print(f"Repost done: {result.reposts} reposted, {len(result.errors)} error(s).")
+        processed_n = len(result.accounts_ok)
+        session_expired_n = len(result.session_expired_accounts)
+        print(f"Repost done: {result.reposts} reposted, {len(result.errors)} error(s).", flush=True)
+        print(
+            f"Total accounts processed: {processed_n}  |  "
+            f"Total accounts skipped / expired: {session_expired_n}",
+            flush=True,
+        )
         if result.errors:
-            hard = [e for e in result.errors if "DEFERRED_FAILED" not in e]
+            hard = []
             for err in result.errors:
                 print(f"  FB error: {err}", file=sys.stderr)
-                if "Not logged in" in err or "session expired" in err.lower():
+                if _sessionish(err):
                     print(
-                        "  → Fix: on fb-worker run "
-                        "`python scripts/fb_login.py --account <id>` (headed) "
-                        "and confirm sessions/ lives under the persistent data bind.",
+                        "  → Fix: python scripts/fb_login.py --account <id> (headed).",
                         file=sys.stderr,
                     )
+                else:
+                    hard.append(err)
             if hard:
                 rc = 1
+    else:
+        processed_n = len(account_ids)
+
+    print(
+        f"Repost summary: processed={processed_n} expired={session_expired_n}",
+        flush=True,
+    )
     return rc
 
 

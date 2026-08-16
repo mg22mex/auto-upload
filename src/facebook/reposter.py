@@ -28,10 +28,16 @@ class RepostResult:
     reposts: int = 0
     errors: list[str] = None  # type: ignore[assignment]
     browser_reopens: int = 0
+    session_expired_accounts: list[str] = None  # type: ignore[assignment]
+    accounts_ok: list[str] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         if self.errors is None:
             self.errors = []
+        if self.session_expired_accounts is None:
+            self.session_expired_accounts = []
+        if self.accounts_ok is None:
+            self.accounts_ok = []
 
 
 def execute_reposts(
@@ -82,8 +88,9 @@ def execute_reposts(
     for account_id in ordered_accounts:
         remaining = list(by_account.get(account_id) or [])
         if not remaining:
+            result.accounts_ok.append(account_id)
             continue
-        print(f"Repost: processing {len(remaining)} listing(s) for {account_id}")
+        print(f"Repost: processing {len(remaining)} listing(s) for {account_id}", flush=True)
         try:
             session_dir = resolve_session_dir(config, account_id, root)
         except FacebookSessionError:
@@ -93,13 +100,12 @@ def execute_reposts(
             f"Repost: session health {account_id}: "
             f"exists={health['exists']} files={health['file_count']} "
             f"cookies_file={health['has_cookies_file']} "
-            f"looks_empty={health['looks_empty']} path={health['path']}"
+            f"looks_empty={health['looks_empty']} path={health['path']}",
+            flush=True,
         )
         if health["looks_empty"]:
             msg = format_session_login_error(account_id, session_dir)
-            print(f"WARN: {msg}")
-            # Still try browser open — report definitive login error from Marketplace UI.
-            # (Do not skip here; empty check is advisory only.)
+            print(f"WARN: {msg}", flush=True)
 
         reopens = 0
 
@@ -154,12 +160,13 @@ def execute_reposts(
                             if is_browser_dead(exc):
                                 print(
                                     f"WARN: repost {action.autosell_id} on {account_id}: "
-                                    f"browser died ({exc}); will reopen and retry"
+                                    f"browser died ({exc}); will reopen and retry",
+                                    flush=True,
                                 )
                                 reopen_requested = True
                                 break
                             msg = f"repost {action.autosell_id} on {account_id}: {exc}"
-                            print(f"ERROR: {msg}")
+                            print(f"ERROR: {msg}", flush=True)
                             result.errors.append(msg)
                             remaining.pop(0)
 
@@ -174,18 +181,27 @@ def execute_reposts(
                             print(
                                 f"Repost: restarting browser after {done_in_session} "
                                 f"listing(s) for {account_id} "
-                                f"({len(remaining)} left)"
+                                f"({len(remaining)} left)",
+                                flush=True,
                             )
                             break
             except FacebookSessionError as exc:
-                result.errors.append(str(exc))
+                print(
+                    f"[SKIP] {account_id}: Session expired. "
+                    f"Run fb_login.py to refresh. ({exc})",
+                    flush=True,
+                )
+                result.errors.append(f"FAILED_SESSION_EXPIRED {account_id}: {exc}")
+                result.session_expired_accounts.append(account_id)
+                remaining.clear()
                 break
             except Exception as exc:
                 if is_browser_dead(exc):
                     reopen_requested = True
                     print(
                         f"WARN: repost on {account_id}: browser died ({exc}); "
-                        f"will reopen and retry"
+                        f"will reopen and retry",
+                        flush=True,
                     )
                 else:
                     result.errors.append(f"{account_id}: {exc}")
@@ -194,7 +210,6 @@ def execute_reposts(
             if not remaining:
                 break
             if not reopen_requested and restart_every > 0:
-                # Proactive chunk restart — do not count against reopen budget.
                 continue
             if reopen_requested:
                 reopens += 1
@@ -207,10 +222,14 @@ def execute_reposts(
                     break
                 print(
                     f"Repost: reopening browser for {account_id} "
-                    f"({reopens}/{max_reopens}, {len(remaining)} left)"
+                    f"({reopens}/{max_reopens}, {len(remaining)} left)",
+                    flush=True,
                 )
                 continue
             break
+
+        if account_id not in result.session_expired_accounts:
+            result.accounts_ok.append(account_id)
 
     return result
 

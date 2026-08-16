@@ -135,6 +135,68 @@ class ResilientRepostTests(unittest.TestCase):
         self.assertEqual(contexts_opened["n"], 2)  # 2 + 2
         self.assertEqual(result.browser_reopens, 0)
 
+    def test_session_expired_skips_account_continues_next(self):
+        """account_2 not logged in must not abort account_1."""
+        actions = [
+            _repost_action("a2_car", account_id="account_2"),
+            _repost_action("a1_car", account_id="account_1"),
+        ]
+        store = MagicMock()
+        config = {
+            "facebook": {"headless": True, "max_photos_per_listing": 1},
+            "sync": {"repost": {"restart_browser_every": 99, "max_browser_reopens": 5}},
+        }
+        root = Path("/tmp")
+        posted: list[str] = []
+
+        @contextmanager
+        def fake_context(*_a, **_k):
+            yield MagicMock()
+
+        def fake_logged_in(_page):
+            # First context is account_2 (ordered first).
+            return fake_logged_in.calls.pop(0) if fake_logged_in.calls else True
+
+        fake_logged_in.calls = [False, True]
+
+        def fake_repost_one(_page, action, _store, **kwargs):
+            posted.append(action.account_id)
+            kwargs["result"].reposts += 1
+
+        with (
+            patch("src.facebook.reposter.open_account_context", fake_context),
+            patch("src.facebook.reposter.get_page", return_value=MagicMock()),
+            patch("src.facebook.reposter.is_logged_in", side_effect=fake_logged_in),
+            patch("src.facebook.reposter.page_shows_login_form", return_value=False),
+            patch("src.facebook.reposter._repost_one", side_effect=fake_repost_one),
+            patch("src.facebook.reposter.random_delay"),
+            patch("src.facebook.reposter.ensure_log_dir", return_value=root),
+            patch(
+                "src.facebook.reposter.session_health_report",
+                return_value={
+                    "exists": True,
+                    "file_count": 1,
+                    "has_cookies_file": True,
+                    "looks_empty": False,
+                    "path": "/tmp",
+                },
+            ),
+        ):
+            result = execute_reposts(
+                actions,
+                store,
+                config,
+                root=root,
+                account_order=["account_2", "account_1"],
+            )
+
+        self.assertEqual(result.session_expired_accounts, ["account_2"])
+        self.assertEqual(result.accounts_ok, ["account_1"])
+        self.assertEqual(posted, ["account_1"])
+        self.assertEqual(result.reposts, 1)
+        self.assertTrue(any("FAILED_SESSION_EXPIRED" in e for e in result.errors))
+        self.assertTrue(any("[SKIP] account_2" in e or "account_2" in e for e in result.errors))
+
 
 if __name__ == "__main__":
     unittest.main()

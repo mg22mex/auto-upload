@@ -20,10 +20,13 @@ class ExecutionResult:
     updates: int = 0
     removals: int = 0
     errors: list[str] = None  # type: ignore[assignment]
+    session_expired_accounts: list[str] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         if self.errors is None:
             self.errors = []
+        if self.session_expired_accounts is None:
+            self.session_expired_accounts = []
 
 
 def execute_actions(
@@ -102,7 +105,13 @@ def execute_actions(
                         result.errors.append(msg)
                     random_delay(delay_min, delay_max)
         except FacebookSessionError as exc:
-            result.errors.append(str(exc))
+            print(
+                f"[SKIP] {account_id}: Session expired. "
+                f"Run fb_login.py to refresh. ({exc})",
+                flush=True,
+            )
+            result.errors.append(f"FAILED_SESSION_EXPIRED {account_id}: {exc}")
+            result.session_expired_accounts.append(account_id)
         except Exception as exc:
             result.errors.append(f"{account_id}: {exc}")
 
