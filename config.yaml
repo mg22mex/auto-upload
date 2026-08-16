@@ -50,13 +50,14 @@ accounts:
   # facebook_profile = short label printed at repost start; facebook_c_user = FB cookie id
   - id: account_1
     session_dir: sessions/account_1
-    # Live Marketplace URLs for both account_1 and account_2 rows are owned by this identity
-    # (owner-chrome matrix 2026-08-10). marco.gastelum.3954 is visitor on those items.
+    # Business identity (Marco Autosell). Do not reuse this profile for account_2.
     facebook_c_user: "61568552875980"
     facebook_profile: "61568552875980"
   - id: account_2
     session_dir: sessions/account_2
-    facebook_c_user: "61568552875980"
-    facebook_profile: "61568552875980"
+    # Personal identity (Marco Gastelum). facebook_c_user is filled after headed login
+    # (`scripts/fb_login.py` + `scripts/fb_whoami.py`); do not copy account_1's id.
+    facebook_c_user: ""
+    facebook_profile: "marco.gastelum.3954"
   - id: account_3
     session_dir: sessions/account_3
