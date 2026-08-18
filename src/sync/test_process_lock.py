@@ -13,11 +13,11 @@ def _try_acquire(path: str, q: multiprocessing.Queue) -> None:
         ProcessLock(Path(path)).acquire()
         q.put("acquired")
     except SystemExit as exc:
-        q.put(f"abort:{exc}")
+        q.put(("exit", exc.code, str(exc)))
 
 
 class TestProcessLock(unittest.TestCase):
-    def test_other_process_aborts(self):
+    def test_other_process_exits_cleanly(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "auto_upload_bump.lock"
             first = ProcessLock(path)
@@ -28,9 +28,9 @@ class TestProcessLock(unittest.TestCase):
                 proc.start()
                 proc.join(timeout=5)
                 self.assertEqual(proc.exitcode, 0)
-                msg = q.get(timeout=2)
-                self.assertTrue(str(msg).startswith("abort:"), msg)
-                self.assertIn("ABORT", str(msg))
+                kind, code, _msg = q.get(timeout=2)
+                self.assertEqual(kind, "exit")
+                self.assertEqual(code, 0)
             finally:
                 first.release()
 

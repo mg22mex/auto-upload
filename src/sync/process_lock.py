@@ -56,10 +56,9 @@ class ProcessLock:
             self._fd = None
             extra = f" pid={other}" if other else ""
             alive = f" (alive={_pid_alive(other)})" if other else ""
-            raise SystemExit(
-                f"ABORT: another bump is running{extra}{alive}. "
-                f"Lock: {self.path}. Wait for it to finish — do not pkill chromium."
-            ) from None
+            print("Another instance is currently running. Exiting cleanly.", flush=True)
+            print(f"Lock: {self.path}{extra}{alive}", flush=True)
+            sys.exit(0)
         os.ftruncate(fd, 0)
         os.lseek(fd, 0, os.SEEK_SET)
         os.write(fd, f"{os.getpid()}\n".encode("utf-8"))

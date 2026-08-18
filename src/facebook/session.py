@@ -113,11 +113,17 @@ def open_account_context(
     session_dir.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as playwright:
-        context = launch_persistent_context(playwright, session_dir, headless=headless)
+        context = None
         try:
+            context = launch_persistent_context(playwright, session_dir, headless=headless)
             yield context
         finally:
-            context.close()
+            if context is not None:
+                try:
+                    context.close()
+                except Exception as exc:
+                    print(f"WARN: context.close() failed for {account_id}: {exc}", flush=True)
+            _clear_profile_locks(session_dir)
 
 
 def _session_profile_writable(session_dir: Path) -> bool:
@@ -247,49 +253,51 @@ def login_interactive(config: dict, account_id: str, *, root: Path) -> None:
     print("")
 
     with sync_playwright() as playwright:
+        context = None
         try:
+            try:
+                context = launch_persistent_context(playwright, session_dir, headless=False)
+            except Exception as exc:
+                raise FacebookSessionError(
+                    f"Chromium failed to start ({exc}). "
+                    "On Arch/KDE try: FB_BROWSER_CHANNEL=chromium FB_OZONE_PLATFORM=x11 "
+                    "FB_DISABLE_GPU=1 (and clear crash locks with the refresh script)."
+                ) from exc
+            page = get_page(context)
+            try:
+                page.goto(
+                    "https://www.facebook.com/",
+                    wait_until="domcontentloaded",
+                    timeout=90_000,
+                )
+            except Exception as exc:
+                print(
+                    f"WARN: initial navigation failed ({exc}); "
+                    "continue logging in if the window is up."
+                )
+
+            input("Press Enter after you are logged in and can see Facebook...")
+
+            logged_in = False
+            try:
+                if context.pages:
+                    logged_in = _verify_marketplace_login(get_page(context))
+            except Exception as exc:
+                print(f"WARN: live-window verify failed ({exc})")
+
+            try:
+                context.close()
+            except Exception:
+                pass
+            context = None
+
+            if logged_in:
+                print("Login OK. Session saved.")
+                return
+
+            print("Re-opening profile to verify cookies…")
+            _clear_profile_locks(session_dir)
             context = launch_persistent_context(playwright, session_dir, headless=False)
-        except Exception as exc:
-            raise FacebookSessionError(
-                f"Chromium failed to start ({exc}). "
-                "On Arch/KDE try: FB_BROWSER_CHANNEL=chromium FB_OZONE_PLATFORM=x11 "
-                "FB_DISABLE_GPU=1 (and clear crash locks with the refresh script)."
-            ) from exc
-        page = get_page(context)
-        try:
-            page.goto(
-                "https://www.facebook.com/",
-                wait_until="domcontentloaded",
-                timeout=90_000,
-            )
-        except Exception as exc:
-            print(
-                f"WARN: initial navigation failed ({exc}); "
-                "continue logging in if the window is up."
-            )
-
-        input("Press Enter after you are logged in and can see Facebook...")
-
-        logged_in = False
-        try:
-            if context.pages:
-                logged_in = _verify_marketplace_login(get_page(context))
-        except Exception as exc:
-            print(f"WARN: live-window verify failed ({exc})")
-
-        try:
-            context.close()
-        except Exception:
-            pass
-
-        if logged_in:
-            print("Login OK. Session saved.")
-            return
-
-        print("Re-opening profile to verify cookies…")
-        _clear_profile_locks(session_dir)
-        context = launch_persistent_context(playwright, session_dir, headless=False)
-        try:
             if _verify_marketplace_login(get_page(context)):
                 print("Login OK. Session saved (verified after relaunch).")
                 return
@@ -299,10 +307,12 @@ def login_interactive(config: dict, account_id: str, *, root: Path) -> None:
                 "finish any FB checkpoint/2FA first."
             )
         finally:
-            try:
-                context.close()
-            except Exception:
-                pass
+            if context is not None:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+            _clear_profile_locks(session_dir)
 
 
 def _verify_marketplace_login(page: Page) -> bool:

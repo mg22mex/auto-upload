@@ -55,8 +55,8 @@ jobs:
     concurrency:
       group: facebook-bump
       cancel-in-progress: false
-    # 15 listings/account × ~10–15 min; two accounts sequential
-    timeout-minutes: 360
+    # Hard cap: kill hung Playwright/Chromium instead of multi-hour overlaps.
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
