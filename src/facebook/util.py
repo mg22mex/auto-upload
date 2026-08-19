@@ -7,6 +7,7 @@ import sys
 import time
 from pathlib import Path
 
+from src.facebook.listing_cta import whatsapp_cta_for_vehicle
 from src.models import Vehicle
 
 
@@ -97,14 +98,14 @@ def fb_vehicle_type_candidates(vehicle: Vehicle) -> tuple[str, ...]:
     return tuple(ordered)
 
 
-def vehicle_description(vehicle: Vehicle) -> str:
+def vehicle_description(vehicle: Vehicle, *, branch: str | None = None) -> str:
     lines = [vehicle.marketplace_title]
     lines.append(f"Kilometraje: {mileage_for_listing(vehicle.mileage)} km")
     for key, value in vehicle.specs.items():
         if value and key.lower() not in {"kilometraje", "precio"}:
             lines.append(f"{key}: {value}")
     lines.append(f"Más información: {vehicle.url}")
-    return "\n".join(lines)
+    return "\n".join(lines) + whatsapp_cta_for_vehicle(vehicle, branch=branch)
 
 
 def env_str(name: str, default: str, *fallbacks: str) -> str:
