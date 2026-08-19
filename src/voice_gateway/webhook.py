@@ -20,20 +20,29 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 _ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(_ROOT / ".env")
 
+from src.odoo_sync.client import OdooCRMClient
 from src.meta_gateway.gateway import MetaWebhookGateway, parse_messenger_events
-from src.pipeline import AutosellPipeline, PipelineResult
+from src.whatsapp_worker.client import WhatsAppWorkerClient
 from src.voice_gateway.intent import (
     VOICE_CHANNEL,
     VoiceIntent,
     format_tts_quote,
     parse_voice_intent,
 )
+from src.whatsapp_worker.routing import (
+    apply_whatsapp_branch_context,
+    branch_context_for_instance,
+)
 from src.whatsapp_worker.inbound import (
     WA_CHANNEL,
+    QualificationStore,
+    QualificationTurnResult,
     inbound_to_voice_payload,
     parse_evolution_inbound,
+    process_qualification_turn,
+    qualification_enabled,
 )
-from src.whatsapp_worker.routing import apply_whatsapp_branch_context
+from src.pipeline import AutosellPipeline, PipelineResult
 
 logger = logging.getLogger(__name__)
 
@@ -144,11 +153,109 @@ async def _run_pipeline(
     return await asyncio.to_thread(pipeline.process_lead, lead_data)
 
 
+def _apply_qualification_odoo(
+    odoo: OdooCRMClient,
+    event: Any,
+    turn: QualificationTurnResult,
+) -> int | None:
+    """Create or update Odoo CRM lead for a qualification turn."""
+    session = turn.session
+    branch_id = int(session.branch_id or os.getenv("VOICE_DEFAULT_BRANCH_ID") or 1)
+    odoo.authenticate()
+    if turn.odoo_create:
+        note = f"WhatsApp inbound: {session.initial_message or event.text}"
+        lead_result = odoo.create_or_update_lead(
+            session.contact_name or event.name,
+            event.phone,
+            session.initial_message or event.text,
+            branch_id,
+            quote_summary=note,
+            stage_name="New",
+            channel=WA_CHANNEL,
+            schedule_follow_up=True,
+        )
+        session.lead_id = lead_result.lead_id
+        return lead_result.lead_id
+    if turn.odoo_handoff:
+        lead_result = odoo.create_or_update_lead(
+            session.contact_name or event.name,
+            event.phone,
+            session.initial_message or event.text,
+            branch_id,
+            quote_summary=turn.odoo_notes,
+            stage_name="New",
+            channel=WA_CHANNEL,
+            schedule_follow_up=True,
+        )
+        session.lead_id = lead_result.lead_id
+        return lead_result.lead_id
+    return session.lead_id
+
+
+async def _handle_whatsapp_qualification(
+    event: Any,
+    *,
+    store: QualificationStore,
+    odoo: OdooCRMClient,
+    whatsapp: WhatsAppWorkerClient,
+) -> dict[str, Any]:
+    branch_ctx = branch_context_for_instance(event.instance)
+    session = store.get(event.phone, event.instance)
+    turn = process_qualification_turn(
+        event,
+        session,
+        branch=branch_ctx["branch"],
+        branch_id=branch_ctx.get("branch_id"),
+        physical_location=branch_ctx["physical_location"],
+    )
+    lead_id = await asyncio.to_thread(_apply_qualification_odoo, odoo, event, turn)
+    reply_error: str | None = None
+    reply_sent = False
+    try:
+        await asyncio.to_thread(
+            whatsapp.send_text_message,
+            event.phone,
+            turn.reply_text,
+            instance=event.instance or None,
+            branch=turn.session.branch,
+        )
+        reply_sent = True
+    except Exception as exc:
+        reply_error = str(exc)
+    store.save(turn.session)
+    logger.info(
+        "WhatsApp qualification %s instance=%s state=%s branch=%s team=%s "
+        "lead=%s reply=%s",
+        event.phone,
+        event.instance,
+        turn.session.state,
+        turn.session.branch,
+        turn.session.branch_id,
+        lead_id,
+        reply_sent,
+    )
+    return {
+        "status": "ok",
+        "phone": event.phone,
+        "instance": event.instance,
+        "branch": turn.session.branch,
+        "branch_id": turn.session.branch_id,
+        "lead_id": lead_id,
+        "qualification_state": turn.session.state,
+        "auto_reply_sent": reply_sent,
+        "auto_reply_error": reply_error,
+        "error": None,
+    }
+
+
 def create_app(
     pipeline: AutosellPipeline | None = None,
     pipeline_factory: Callable[[], AutosellPipeline] | None = None,
     meta_gateway: MetaWebhookGateway | None = None,
     meta_gateway_factory: Callable[[], MetaWebhookGateway] | None = None,
+    qualification_store: QualificationStore | None = None,
+    odoo_client: OdooCRMClient | None = None,
+    whatsapp_client: WhatsAppWorkerClient | None = None,
 ) -> FastAPI:
     """Build FastAPI app. Inject pipeline for tests."""
     app = FastAPI(title="Autosell Voice Gateway", version="0.2.0")
@@ -157,6 +264,9 @@ def create_app(
         "pipeline_factory": pipeline_factory or AutosellPipeline,
         "meta_gateway": meta_gateway,
         "meta_gateway_factory": meta_gateway_factory or MetaWebhookGateway,
+        "qualification_store": qualification_store,
+        "odoo_client": odoo_client,
+        "whatsapp_client": whatsapp_client,
     }
 
     def _get_pipeline() -> AutosellPipeline:
@@ -168,6 +278,21 @@ def create_app(
         if state["meta_gateway"] is not None:
             return state["meta_gateway"]
         return state["meta_gateway_factory"]()
+
+    def _get_qualification_store() -> QualificationStore:
+        if state["qualification_store"] is not None:
+            return state["qualification_store"]
+        return QualificationStore()
+
+    def _get_odoo_client() -> OdooCRMClient:
+        if state["odoo_client"] is not None:
+            return state["odoo_client"]
+        return OdooCRMClient()
+
+    def _get_whatsapp_client() -> WhatsAppWorkerClient:
+        if state["whatsapp_client"] is not None:
+            return state["whatsapp_client"]
+        return WhatsAppWorkerClient()
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -323,6 +448,16 @@ def create_app(
         results: list[dict[str, Any]] = []
         for event in inbound:
             try:
+                if qualification_enabled():
+                    result_body = await _handle_whatsapp_qualification(
+                        event,
+                        store=_get_qualification_store(),
+                        odoo=_get_odoo_client(),
+                        whatsapp=_get_whatsapp_client(),
+                    )
+                    results.append(result_body)
+                    continue
+
                 voice_payload = inbound_to_voice_payload(event)
                 intent = parse_voice_intent(voice_payload)
                 try:

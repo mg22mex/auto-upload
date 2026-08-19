@@ -5,7 +5,7 @@ import sys
 import unittest
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -262,23 +262,24 @@ class TestVoiceWebhookHTTP(unittest.TestCase):
             lead_id=91,
             channel="WhatsApp",
         )
-        client = TestClient(create_app(pipeline=pipeline))
-        resp = client.post(
-            "/webhook/whatsapp",
-            json={
-                "event": "messages.upsert",
-                "instance": "autosell_periferico",
-                "data": {
-                    "key": {
-                        "remoteJid": "5216141234567@s.whatsapp.net",
-                        "fromMe": False,
-                        "id": "WA1",
+        with patch.dict("os.environ", {"WHATSAPP_QUALIFICATION": "false"}, clear=False):
+            client = TestClient(create_app(pipeline=pipeline))
+            resp = client.post(
+                "/webhook/whatsapp",
+                json={
+                    "event": "messages.upsert",
+                    "instance": "autosell_periferico",
+                    "data": {
+                        "key": {
+                            "remoteJid": "5216141234567@s.whatsapp.net",
+                            "fromMe": False,
+                            "id": "WA1",
+                        },
+                        "pushName": "Ana",
+                        "message": {"conversation": "Hola, cotiza un Vento 2018 precio 150000"},
                     },
-                    "pushName": "Ana",
-                    "message": {"conversation": "Hola, cotiza un Vento 2018 precio 150000"},
                 },
-            },
-        )
+            )
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         self.assertEqual(body["processed"], 1)
@@ -301,23 +302,24 @@ class TestVoiceWebhookHTTP(unittest.TestCase):
             lead_id=92,
             channel="WhatsApp",
         )
-        client = TestClient(create_app(pipeline=pipeline))
-        resp = client.post(
-            "/webhook/whatsapp",
-            json={
-                "event": "messages.upsert",
-                "instance": "autosell_san_felipe",
-                "data": {
-                    "key": {
-                        "remoteJid": "5216149998888@s.whatsapp.net",
-                        "fromMe": False,
-                        "id": "WA2",
+        with patch.dict("os.environ", {"WHATSAPP_QUALIFICATION": "false"}, clear=False):
+            client = TestClient(create_app(pipeline=pipeline))
+            resp = client.post(
+                "/webhook/whatsapp",
+                json={
+                    "event": "messages.upsert",
+                    "instance": "autosell_san_felipe",
+                    "data": {
+                        "key": {
+                            "remoteJid": "5216149998888@s.whatsapp.net",
+                            "fromMe": False,
+                            "id": "WA2",
+                        },
+                        "pushName": "Luis",
+                        "message": {"conversation": "Precio de una Hilux"},
                     },
-                    "pushName": "Luis",
-                    "message": {"conversation": "Precio de una Hilux"},
                 },
-            },
-        )
+            )
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         self.assertEqual(body["results"][0]["branch"], "san_felipe")
@@ -332,6 +334,89 @@ class TestVoiceWebhookHTTP(unittest.TestCase):
         text = format_inbound_greeting("San Felipe")
         self.assertIn("Autosell San Felipe", text)
         self.assertIn("vehículo", text.lower())
+
+    def test_whatsapp_qualification_webhook_san_felipe(self):
+        try:
+            from fastapi.testclient import TestClient
+        except ImportError:
+            self.skipTest("fastapi not installed")
+
+        from src.odoo_sync.client import QuoteLeadResult
+        from src.whatsapp_worker.inbound import (
+            QualificationStore,
+            STATE_AWAITING_DOWN_PAYMENT,
+            STATE_AWAITING_PAYMENT_METHOD,
+        )
+
+        odoo = MagicMock()
+        odoo.authenticate.return_value = 1
+        odoo.create_or_update_lead.return_value = QuoteLeadResult(
+            lead_id=501, activity_id=None, tag_ids=()
+        )
+        whatsapp = MagicMock()
+        whatsapp.send_text_message.return_value = {"ok": True}
+        store = QualificationStore(":memory:")
+
+        with patch.dict(
+            "os.environ",
+            {
+                "WHATSAPP_QUALIFICATION": "true",
+                "WHATSAPP_INSTANCE_SAN_FELIPE": "autosell_san_felipe",
+                "ODOO_TEAM_SAN_FELIPE": "5",
+            },
+            clear=False,
+        ):
+            client = TestClient(
+                create_app(
+                    pipeline=MagicMock(),
+                    qualification_store=store,
+                    odoo_client=odoo,
+                    whatsapp_client=whatsapp,
+                )
+            )
+            r1 = client.post(
+                "/webhook/whatsapp",
+                json={
+                    "event": "messages.upsert",
+                    "instance": "autosell_san_felipe",
+                    "data": {
+                        "key": {
+                            "remoteJid": "5216149998888@s.whatsapp.net",
+                            "fromMe": False,
+                            "id": "Q1",
+                        },
+                        "pushName": "Luis",
+                        "message": {"conversation": "Precio Hilux"},
+                    },
+                },
+            )
+            self.assertEqual(r1.status_code, 200)
+            body1 = r1.json()["results"][0]
+            self.assertEqual(body1["qualification_state"], STATE_AWAITING_PAYMENT_METHOD)
+            self.assertTrue(body1["auto_reply_sent"])
+            odoo.create_or_update_lead.assert_called_once()
+
+            r2 = client.post(
+                "/webhook/whatsapp",
+                json={
+                    "event": "messages.upsert",
+                    "instance": "autosell_san_felipe",
+                    "data": {
+                        "key": {
+                            "remoteJid": "5216149998888@s.whatsapp.net",
+                            "fromMe": False,
+                            "id": "Q2",
+                        },
+                        "pushName": "Luis",
+                        "message": {"conversation": "financiamiento"},
+                    },
+                },
+            )
+            body2 = r2.json()["results"][0]
+            self.assertEqual(body2["qualification_state"], STATE_AWAITING_DOWN_PAYMENT)
+            self.assertEqual(body2["branch_id"], 5)
+
+        store.close()
 
 
 if __name__ == "__main__":

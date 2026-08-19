@@ -10,8 +10,13 @@ from src.whatsapp_worker.client import (
 )
 from src.whatsapp_worker.inbound import (
     WA_CHANNEL,
+    QualificationSession,
+    QualificationStore,
+    QualificationTurnResult,
     WhatsAppInboundEvent,
     parse_evolution_inbound,
+    process_qualification_turn,
+    qualification_enabled,
 )
 from src.whatsapp_worker.routing import (
     apply_whatsapp_branch_context,
@@ -21,6 +26,9 @@ from src.whatsapp_worker.routing import (
 
 __all__ = [
     "WA_CHANNEL",
+    "QualificationSession",
+    "QualificationStore",
+    "QualificationTurnResult",
     "WhatsAppInboundEvent",
     "WhatsAppWorkerClient",
     "WhatsAppWorkerError",
@@ -29,5 +37,7 @@ __all__ = [
     "format_quote_message",
     "normalize_phone_number",
     "parse_evolution_inbound",
+    "process_qualification_turn",
+    "qualification_enabled",
     "resolve_instance_for_branch",
 ]
