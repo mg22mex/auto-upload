@@ -342,7 +342,46 @@ class TestAutosellPipeline(unittest.TestCase):
         self.assertEqual(steps["quote"]["status"], "skipped")
         self.assertEqual(steps["pdf_spec_sheet"]["status"], "skipped")
 
-    def test_test_drive_booking_step(self):
+    def test_whatsapp_soft_capture_auto_reply(self):
+        odoo = MagicMock()
+        odoo.authenticate.return_value = 1
+        odoo.create_or_update_lead.return_value = QuoteLeadResult(
+            lead_id=99, activity_id=None, tag_ids=()
+        )
+        wa = MagicMock()
+        wa.send_text_message.return_value = {"key": {"id": "wamid.greet"}}
+        pipeline = AutosellPipeline(
+            odoo=odoo,
+            whatsapp=wa,
+            dispatch_whatsapp=True,
+            assign_advisor=False,
+        )
+        result = pipeline.process_lead(
+            {
+                "name": "Luis",
+                "phone": "5216149998888",
+                "vehicle_name": "Precio de una Hilux",
+                "branch_id": 5,
+                "branch": "san_felipe",
+                "physical_location": "San Felipe",
+                "whatsapp_instance": "autosell_san_felipe",
+                "channel": "WhatsApp",
+                "soft_capture": True,
+                "auto_reply": True,
+            }
+        )
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(result.lead_id, 99)
+        odoo.create_or_update_lead.assert_called_once()
+        self.assertEqual(odoo.create_or_update_lead.call_args.args[3], 5)
+        wa.send_text_message.assert_called_once()
+        args, kwargs = wa.send_text_message.call_args
+        self.assertEqual(args[0], "5216149998888")
+        self.assertIn("Autosell San Felipe", args[1])
+        self.assertEqual(kwargs.get("instance"), "autosell_san_felipe")
+        steps = {s["step"]: s for s in result.steps}
+        self.assertEqual(steps["whatsapp"]["status"], "ok")
+        self.assertEqual(steps["whatsapp"]["kind"], "auto_reply")
         from src.odoo_sync.client import TestDriveEventResult
 
         quote_engine = MagicMock(spec=CalibratedQuoteEngine)

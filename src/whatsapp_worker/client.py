@@ -102,20 +102,48 @@ def format_quote_message(
     return "\n".join(lines)
 
 
+def format_inbound_greeting(branch_name: str) -> str:
+    """Immediate WhatsApp auto-reply for inbound Evolution messages."""
+    branch = (branch_name or "Periférico").strip()
+    return (
+        f"¡Hola! Gracias por comunicarte con Autosell {branch}. 🚗\n\n"
+        "¿Qué vehículo estás buscando o en qué te podemos ayudar hoy? "
+        "Un asesor revisará tu mensaje en breve."
+    )
+
+
+def _whatsapp_auto_reply_enabled(lead_data: dict[str, Any]) -> bool:
+    if not bool(lead_data.get("auto_reply")):
+        return False
+    channel = str(lead_data.get("channel") or "").strip().lower()
+    if channel != "whatsapp":
+        return False
+    raw = os.getenv("WHATSAPP_AUTO_REPLY", "true").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _first_env(*names: str, default: str = "") -> str:
+    for name in names:
+        raw = os.getenv(name)
+        if raw is not None and str(raw).strip():
+            return str(raw).strip()
+    return default
+
+
 class WhatsAppWorkerClient:
     """HTTP client for Evolution API or open-wa.
 
-    Env:
+    Env (new names preferred; aliases kept):
       WHATSAPP_PROVIDER=evolution|openwa  (default evolution)
-      WHATSAPP_BASE_URL=https://...
-      WHATSAPP_API_KEY=...
-      WHATSAPP_INSTANCE=autosell          (Evolution instance name)
+      WHATSAPP_API_URL / WHATSAPP_BASE_URL
+      WHATSAPP_API_KEY
+      WHATSAPP_INSTANCE_NAME / WHATSAPP_INSTANCE  (default autosell_main)
     """
 
     ENV_PROVIDER = "WHATSAPP_PROVIDER"
-    ENV_BASE_URL = "WHATSAPP_BASE_URL"
+    ENV_BASE_URL = "WHATSAPP_API_URL"
     ENV_API_KEY = "WHATSAPP_API_KEY"
-    ENV_INSTANCE = "WHATSAPP_INSTANCE"
+    ENV_INSTANCE = "WHATSAPP_INSTANCE_NAME"
 
     def __init__(
         self,
@@ -128,11 +156,17 @@ class WhatsAppWorkerClient:
         timeout_sec: float = 30.0,
     ) -> None:
         self.provider = (
-            provider or os.getenv(self.ENV_PROVIDER, "evolution")
+            provider or _first_env(self.ENV_PROVIDER, default="evolution")
         ).strip().lower()
-        self.base_url = (base_url or os.getenv(self.ENV_BASE_URL, "")).rstrip("/")
-        self.api_key = api_key or os.getenv(self.ENV_API_KEY, "")
-        self.instance = instance or os.getenv(self.ENV_INSTANCE, "autosell")
+        self.base_url = (
+            base_url
+            or _first_env("WHATSAPP_API_URL", "WHATSAPP_BASE_URL")
+        ).rstrip("/")
+        self.api_key = api_key if api_key is not None else _first_env(self.ENV_API_KEY)
+        self.instance = (
+            instance
+            or _first_env("WHATSAPP_INSTANCE_NAME", "WHATSAPP_INSTANCE", default="")
+        )
         self.timeout_sec = timeout_sec
         self._session = session or requests.Session()
 
@@ -148,7 +182,9 @@ class WhatsAppWorkerClient:
 
     def _require_config(self) -> None:
         if not self.base_url:
-            raise WhatsAppWorkerError(f"Missing {self.ENV_BASE_URL}")
+            raise WhatsAppWorkerError(
+                "Missing WHATSAPP_API_URL (alias WHATSAPP_BASE_URL)"
+            )
         if not self.api_key:
             raise WhatsAppWorkerError(f"Missing {self.ENV_API_KEY}")
 
@@ -218,12 +254,30 @@ class WhatsAppWorkerClient:
     ) -> str:
         return format_quote_message(lead_name, vehicle_name, quote_result)
 
-    def send_text_message(self, phone_number: str, text_body: str) -> dict[str, Any]:
+    def send_text_message(
+        self,
+        phone_number: str,
+        text_body: str,
+        *,
+        branch: str | None = None,
+        instance: str | None = None,
+    ) -> dict[str, Any]:
         """Send WhatsApp text. Returns provider response dict."""
         text = (text_body or "").strip()
         if not text:
             raise WhatsAppWorkerError("text_body is required")
         phone = normalize_phone_number(phone_number)
+        target_instance = instance
+        if not target_instance and branch:
+            from src.whatsapp_worker.routing import resolve_instance_for_branch
+
+            target_instance = resolve_instance_for_branch(branch)
+        if not target_instance:
+            target_instance = self.instance
+        if not target_instance:
+            from src.whatsapp_worker.routing import resolve_instance_for_branch
+
+            target_instance = resolve_instance_for_branch(None)
 
         if self.provider == "openwa":
             payload = {
@@ -237,13 +291,16 @@ class WhatsAppWorkerClient:
             "number": phone,
             "text": text,
         }
-        return self._post(f"/message/sendText/{self.instance}", payload)
+        return self._post(f"/message/sendText/{target_instance}", payload)
 
     def send_quote_pdf(
         self,
         phone_number: str,
         pdf_path: str | Path,
         caption: str = "",
+        *,
+        branch: str | None = None,
+        instance: str | None = None,
     ) -> dict[str, Any]:
         """Dispatch quote PDF to WhatsApp."""
         path = Path(pdf_path)
@@ -251,6 +308,17 @@ class WhatsAppWorkerClient:
             raise WhatsAppWorkerError(f"PDF not found: {path}")
         phone = normalize_phone_number(phone_number)
         caption_text = (caption or path.name).strip()
+        target_instance = instance
+        if not target_instance and branch:
+            from src.whatsapp_worker.routing import resolve_instance_for_branch
+
+            target_instance = resolve_instance_for_branch(branch)
+        if not target_instance:
+            target_instance = self.instance
+        if not target_instance:
+            from src.whatsapp_worker.routing import resolve_instance_for_branch
+
+            target_instance = resolve_instance_for_branch(None)
 
         if self.provider == "openwa":
             return self._post_multipart(
@@ -266,7 +334,7 @@ class WhatsAppWorkerClient:
 
         # Evolution: media message with local file upload
         return self._post_multipart(
-            f"/message/sendMedia/{self.instance}",
+            f"/message/sendMedia/{target_instance}",
             {
                 "number": phone,
                 "mediatype": "document",

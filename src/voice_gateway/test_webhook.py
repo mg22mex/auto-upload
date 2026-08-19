@@ -250,6 +250,89 @@ class TestVoiceWebhookHTTP(unittest.TestCase):
         resp = client.post("/webhook/voice-lead", json={"caller_name": "only"})
         self.assertEqual(resp.status_code, 422)
 
+    def test_whatsapp_evolution_upsert_periferico(self):
+        try:
+            from fastapi.testclient import TestClient
+        except ImportError:
+            self.skipTest("fastapi not installed")
+
+        pipeline = MagicMock()
+        pipeline.process_lead.return_value = PipelineResult(
+            ok=True,
+            lead_id=91,
+            channel="WhatsApp",
+        )
+        client = TestClient(create_app(pipeline=pipeline))
+        resp = client.post(
+            "/webhook/whatsapp",
+            json={
+                "event": "messages.upsert",
+                "instance": "autosell_periferico",
+                "data": {
+                    "key": {
+                        "remoteJid": "5216141234567@s.whatsapp.net",
+                        "fromMe": False,
+                        "id": "WA1",
+                    },
+                    "pushName": "Ana",
+                    "message": {"conversation": "Hola, cotiza un Vento 2018 precio 150000"},
+                },
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["processed"], 1)
+        self.assertEqual(body["results"][0]["lead_id"], 91)
+        self.assertEqual(body["results"][0]["branch"], "periferico")
+        lead = pipeline.process_lead.call_args.args[0]
+        self.assertEqual(lead["channel"], "WhatsApp")
+        self.assertEqual(lead["branch"], "periferico")
+        self.assertEqual(lead["physical_location"], "Periférico")
+
+    def test_whatsapp_evolution_upsert_san_felipe(self):
+        try:
+            from fastapi.testclient import TestClient
+        except ImportError:
+            self.skipTest("fastapi not installed")
+
+        pipeline = MagicMock()
+        pipeline.process_lead.return_value = PipelineResult(
+            ok=True,
+            lead_id=92,
+            channel="WhatsApp",
+        )
+        client = TestClient(create_app(pipeline=pipeline))
+        resp = client.post(
+            "/webhook/whatsapp",
+            json={
+                "event": "messages.upsert",
+                "instance": "autosell_san_felipe",
+                "data": {
+                    "key": {
+                        "remoteJid": "5216149998888@s.whatsapp.net",
+                        "fromMe": False,
+                        "id": "WA2",
+                    },
+                    "pushName": "Luis",
+                    "message": {"conversation": "Precio de una Hilux"},
+                },
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["results"][0]["branch"], "san_felipe")
+        lead = pipeline.process_lead.call_args.args[0]
+        self.assertEqual(lead["branch"], "san_felipe")
+        self.assertEqual(lead["physical_location"], "San Felipe")
+        self.assertTrue(lead.get("auto_reply"))
+
+    def test_whatsapp_greeting_template_san_felipe(self):
+        from src.whatsapp_worker.client import format_inbound_greeting
+
+        text = format_inbound_greeting("San Felipe")
+        self.assertIn("Autosell San Felipe", text)
+        self.assertIn("vehículo", text.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

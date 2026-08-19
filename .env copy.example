@@ -45,11 +45,14 @@ SNAPSHOT_DIR=data/snapshots
 # ODOO_USERNAME=api@autosell.mx
 # ODOO_API_KEY=
 
-# Phase 2 — WhatsApp (Evolution API or open-wa). Isolated from FB sessions/.
-# WHATSAPP_PROVIDER=evolution
-# WHATSAPP_BASE_URL=https://wa.example.com
-# WHATSAPP_API_KEY=
-# WHATSAPP_INSTANCE=autosell
+# Phase 2 — WhatsApp via Evolution API (deploy/docker-compose.evolution.yml).
+WHATSAPP_PROVIDER=evolution
+WHATSAPP_API_URL=http://127.0.0.1:8082
+WHATSAPP_API_KEY=
+WHATSAPP_INSTANCE_PERIFERICO=autosell_periferico
+WHATSAPP_INSTANCE_SAN_FELIPE=autosell_san_felipe
+WHATSAPP_WEBHOOK_URL=http://host.docker.internal:8080/webhook/whatsapp
+EVOLUTION_POSTGRES_PASSWORD=
 
 # Phase 2 — Voice AI webhook (default crm.team / branch)
 # VOICE_DEFAULT_BRANCH_ID=1

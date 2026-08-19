@@ -11,7 +11,11 @@ from src.odoo_sync.client import OdooCRMClient
 from src.pdf_engine.generator import generate_vehicle_quote_pdf
 from src.quote_engine.engine import CalibratedQuoteEngine
 from src.quote_engine.trade_in import TradeInEngine, TradeInVehicle
-from src.whatsapp_worker.client import WhatsAppWorkerClient
+from src.whatsapp_worker.client import (
+    WhatsAppWorkerClient,
+    format_inbound_greeting,
+    _whatsapp_auto_reply_enabled,
+)
 
 DEFAULT_CHANNEL = "Voice / Phone"
 
@@ -97,11 +101,13 @@ class AutosellPipeline:
             # Soft CRM capture (degraded STT) — no quote/PDF math.
             if bool(lead_data.get("soft_capture")):
                 self.odoo.authenticate()
-                note = str(
-                    lead_data.get("notes")
-                    or "Voice capture with degraded audio / failed STT. "
+                default_note = (
+                    f"WhatsApp inbound: {vehicle_name}"
+                    if channel == "WhatsApp"
+                    else "Voice capture with degraded audio / failed STT. "
                     "Advisor follow-up required."
                 )
+                note = str(lead_data.get("notes") or default_note)
                 lead_result = self.odoo.create_or_update_lead(
                     name,
                     phone,
@@ -120,6 +126,7 @@ class AutosellPipeline:
                         "tag_ids": list(lead_result.tag_ids),
                         "channel": channel,
                         "soft_capture": True,
+                        "branch_id": branch_id,
                     }
                 )
                 if lead_result.activity_id is not None:
@@ -135,7 +142,46 @@ class AutosellPipeline:
                     log.append({"step": "odoo_follow_up", "status": "skipped"})
                 log.append({"step": "quote", "status": "skipped"})
                 log.append({"step": "pdf_spec_sheet", "status": "skipped"})
-                log.append({"step": "whatsapp", "status": "skipped"})
+                if (
+                    self.dispatch_whatsapp
+                    and bool(lead_data.get("dispatch_whatsapp", True))
+                    and _whatsapp_auto_reply_enabled(lead_data)
+                ):
+                    branch_label = str(
+                        lead_data.get("physical_location") or "Periférico"
+                    )
+                    greeting = format_inbound_greeting(branch_label)
+                    try:
+                        wa_resp = self.whatsapp.send_text_message(
+                            phone,
+                            greeting,
+                            branch=str(lead_data.get("branch") or ""),
+                            instance=str(lead_data.get("whatsapp_instance") or "")
+                            or None,
+                        )
+                        log.append(
+                            {
+                                "step": "whatsapp",
+                                "status": "ok",
+                                "kind": "auto_reply",
+                                "branch": lead_data.get("branch"),
+                                "instance": lead_data.get("whatsapp_instance"),
+                                "response": wa_resp,
+                            }
+                        )
+                    except Exception as exc:
+                        log.append(
+                            {
+                                "step": "whatsapp",
+                                "status": "failed",
+                                "kind": "auto_reply",
+                                "branch": lead_data.get("branch"),
+                                "instance": lead_data.get("whatsapp_instance"),
+                                "error": str(exc),
+                            }
+                        )
+                else:
+                    log.append({"step": "whatsapp", "status": "skipped"})
                 result.ok = True
                 return result
 
@@ -467,7 +513,12 @@ class AutosellPipeline:
                 lead_data.get("dispatch_whatsapp", True)
             )
             if do_wa:
-                wa_resp = self.whatsapp.send_text_message(phone, quote_summary)
+                wa_resp = self.whatsapp.send_text_message(
+                    phone,
+                    quote_summary,
+                    branch=str(lead_data.get("branch") or ""),
+                    instance=str(lead_data.get("whatsapp_instance") or "") or None,
+                )
                 log.append(
                     {
                         "step": "whatsapp",

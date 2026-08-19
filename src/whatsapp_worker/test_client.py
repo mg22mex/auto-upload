@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -167,9 +167,35 @@ class TestSendQuotePdf(unittest.TestCase):
 
 class TestConfig(unittest.TestCase):
     def test_missing_base_url(self):
-        client = WhatsAppWorkerClient(base_url="", api_key="x", session=MagicMock())
-        with self.assertRaises(WhatsAppWorkerError):
-            client.send_text_message("6141234567", "hi")
+        with patch.dict(
+            "os.environ",
+            {"WHATSAPP_API_URL": "", "WHATSAPP_BASE_URL": ""},
+            clear=False,
+        ):
+            client = WhatsAppWorkerClient(api_key="x", session=MagicMock())
+            with self.assertRaises(WhatsAppWorkerError):
+                client.send_text_message("6141234567", "hi")
+
+    def test_reads_api_url_and_instance_name(self):
+        session = MagicMock()
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.content = b"{}"
+        resp.json.return_value = {}
+        session.post.return_value = resp
+        env = {
+            "WHATSAPP_API_URL": "http://127.0.0.1:8082",
+            "WHATSAPP_API_KEY": "k",
+            "WHATSAPP_INSTANCE_PERIFERICO": "autosell_periferico",
+            "WHATSAPP_PROVIDER": "evolution",
+        }
+        with patch.dict("os.environ", env, clear=False):
+            client = WhatsAppWorkerClient(session=session)
+        client.send_text_message("6141234567", "hola", branch="periferico", instance="")
+        args, _kwargs = session.post.call_args
+        self.assertEqual(
+            args[0], "http://127.0.0.1:8082/message/sendText/autosell_periferico"
+        )
 
 
 if __name__ == "__main__":

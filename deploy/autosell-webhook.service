@@ -18,13 +18,15 @@ EnvironmentFile=/home/ubuntu/auto-upload/.env
 Environment=PYTHONUNBUFFERED=1
 
 # Absolute venv uvicorn so PATH / system python cannot shadow deps (fastapi, uvicorn, dotenv).
-ExecStart=/home/ubuntu/auto-upload/.venv/bin/uvicorn src.voice_gateway.webhook:app --host 127.0.0.1 --port 8080
+ExecStart=/home/ubuntu/auto-upload/.venv/bin/uvicorn src.voice_gateway.webhook:app --host 0.0.0.0 --port 8080
 
 Restart=always
 RestartSec=5
 TimeoutStopSec=20
 
 # Soft isolation from Playwright Marketplace sessions under sessions/
+# Bind 0.0.0.0 so Evolution (Docker host.docker.internal) can POST /webhook/whatsapp.
+# Keep TCP 8080 closed on the public firewall; Cloudflared / localhost remain the ingress.
 NoNewPrivileges=true
 
 [Install]

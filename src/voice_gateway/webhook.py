@@ -28,6 +28,12 @@ from src.voice_gateway.intent import (
     format_tts_quote,
     parse_voice_intent,
 )
+from src.whatsapp_worker.inbound import (
+    WA_CHANNEL,
+    inbound_to_voice_payload,
+    parse_evolution_inbound,
+)
+from src.whatsapp_worker.routing import apply_whatsapp_branch_context
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +54,8 @@ def parse_voice_lead_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if branch is None:
         branch = int(os.getenv("VOICE_DEFAULT_BRANCH_ID") or "1")
     lead["branch_id"] = branch
-    lead["channel"] = VOICE_CHANNEL
+    channel = str(payload.get("channel") or "").strip()
+    lead["channel"] = channel if channel else VOICE_CHANNEL
 
     # Preserve strict price requirement for legacy structured posts without
     # Odoo resolve: missing price only OK when inventory lookup is intended.
@@ -300,6 +307,96 @@ def create_app(
         return JSONResponse(
             status_code=200,
             content={"status": "event_received", "processed": len(events), "results": results},
+        )
+
+    @app.post("/webhook/whatsapp")
+    async def whatsapp_webhook(request: Request) -> JSONResponse:
+        """Inbound Evolution API events (messages.upsert → quote pipeline)."""
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"invalid JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="payload must be a JSON object")
+
+        inbound = parse_evolution_inbound(payload)
+        results: list[dict[str, Any]] = []
+        for event in inbound:
+            try:
+                voice_payload = inbound_to_voice_payload(event)
+                intent = parse_voice_intent(voice_payload)
+                try:
+                    lead_data = parse_voice_lead_payload(voice_payload)
+                except ValueError:
+                    lead_data = {
+                        "name": event.name,
+                        "phone": event.phone,
+                        "vehicle_name": event.text,
+                        "channel": WA_CHANNEL,
+                        "soft_capture": True,
+                        "generate_pdf": False,
+                    }
+                lead_data["channel"] = WA_CHANNEL
+                lead_data["auto_reply"] = True
+                apply_whatsapp_branch_context(lead_data, event.instance)
+                # Inbound WhatsApp → CRM upsert + greeting (not full quote pipeline).
+                lead_data["soft_capture"] = True
+                lead_data["generate_pdf"] = False
+                lead_data["dispatch_whatsapp"] = True
+                result = await _run_pipeline(_get_pipeline(), lead_data)
+                wa_step = next(
+                    (s for s in (result.steps or []) if s.get("step") == "whatsapp"),
+                    None,
+                )
+                auto_reply_sent = (
+                    wa_step is not None
+                    and wa_step.get("status") == "ok"
+                    and wa_step.get("kind") == "auto_reply"
+                )
+                auto_reply_error = (
+                    wa_step.get("error") if wa_step and wa_step.get("status") == "failed" else None
+                )
+                logger.info(
+                    "WhatsApp inbound %s / %s instance=%s branch=%s team=%s "
+                    "-> lead %s ok=%s auto_reply=%s",
+                    event.phone,
+                    event.text[:80],
+                    event.instance,
+                    lead_data.get("branch"),
+                    lead_data.get("branch_id"),
+                    result.lead_id,
+                    result.ok,
+                    auto_reply_sent,
+                )
+                results.append(
+                    {
+                        "status": "ok" if result.ok else "error",
+                        "phone": event.phone,
+                        "instance": event.instance,
+                        "branch": lead_data.get("branch"),
+                        "branch_id": lead_data.get("branch_id"),
+                        "lead_id": result.lead_id,
+                        "auto_reply_sent": auto_reply_sent,
+                        "auto_reply_error": auto_reply_error,
+                        "error": result.error,
+                    }
+                )
+            except Exception as exc:
+                results.append(
+                    {
+                        "status": "error",
+                        "phone": event.phone,
+                        "error": str(exc),
+                    }
+                )
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "event_received",
+                "processed": len(inbound),
+                "ignored": 0 if inbound else 1,
+                "results": results,
+            },
         )
 
     app.state.gateway = state  # type: ignore[attr-defined]
