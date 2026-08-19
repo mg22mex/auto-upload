@@ -419,5 +419,187 @@ class TestVoiceWebhookHTTP(unittest.TestCase):
         store.close()
 
 
+@unittest.skipUnless(_HAS_WEBHOOK_DEPS, "fastapi/dotenv not installed")
+class TestInboundCallParsing(unittest.TestCase):
+    def test_parse_json_fields(self):
+        from src.voice_gateway.inbound_call import parse_inbound_call_payload
+
+        event = parse_inbound_call_payload(
+            {
+                "caller_number": "+526141111111",
+                "called_number": "+526142222222",
+                "call_sid": "CA123",
+                "call_status": "ringing",
+                "duration_sec": 42,
+            }
+        )
+        self.assertEqual(event.caller_phone, "+526141111111")
+        self.assertEqual(event.called_number, "+526142222222")
+        self.assertEqual(event.call_sid, "CA123")
+        self.assertEqual(event.call_status, "ringing")
+        self.assertEqual(event.duration_sec, 42)
+
+    def test_parse_twilio_form_keys(self):
+        from src.voice_gateway.inbound_call import parse_inbound_call_payload
+
+        event = parse_inbound_call_payload(
+            {
+                "From": "+526141111111",
+                "To": "+526149876543",
+                "CallSid": "CA999",
+                "CallStatus": "in-progress",
+                "CallerName": "María",
+            }
+        )
+        self.assertEqual(event.caller_phone, "+526141111111")
+        self.assertEqual(event.called_number, "+526149876543")
+        self.assertEqual(event.caller_name, "María")
+
+    def test_missing_caller_raises(self):
+        from src.voice_gateway.inbound_call import parse_inbound_call_payload
+
+        with self.assertRaises(ValueError):
+            parse_inbound_call_payload({"To": "+526141234567"})
+
+
+@unittest.skipUnless(_HAS_WEBHOOK_DEPS, "fastapi/dotenv not installed")
+class TestInboundCallBranchRouting(unittest.TestCase):
+    def test_did_periferico(self):
+        from src.voice_gateway.inbound_call import (
+            branch_context_for_inbound_call,
+            parse_inbound_call_payload,
+        )
+
+        with patch.dict(
+            "os.environ",
+            {"VOICE_DID_PERIFERICO": "6141234567", "ODOO_TEAM_PERIFERICO": "1"},
+            clear=False,
+        ):
+            event = parse_inbound_call_payload(
+                {
+                    "caller_number": "6145551234",
+                    "called_number": "+526141234567",
+                }
+            )
+            ctx = branch_context_for_inbound_call(event)
+        self.assertEqual(ctx["branch"], "periferico")
+        self.assertEqual(ctx["branch_id"], 1)
+        self.assertEqual(ctx["physical_location"], "Periférico")
+
+    def test_did_san_felipe(self):
+        from src.voice_gateway.inbound_call import (
+            branch_context_for_inbound_call,
+            parse_inbound_call_payload,
+        )
+
+        with patch.dict(
+            "os.environ",
+            {
+                "VOICE_DID_SAN_FELIPE": "6149876543",
+                "ODOO_TEAM_SAN_FELIPE": "5",
+                "VOICE_FORWARD_SAN_FELIPE": "+526142222222",
+            },
+            clear=False,
+        ):
+            event = parse_inbound_call_payload(
+                {
+                    "From": "+526145551234",
+                    "To": "+526149876543",
+                }
+            )
+            ctx = branch_context_for_inbound_call(event)
+        self.assertEqual(ctx["branch"], "san_felipe")
+        self.assertEqual(ctx["branch_id"], 5)
+        self.assertEqual(ctx["forward_to"], "+526142222222")
+
+
+@unittest.skipUnless(_HAS_WEBHOOK_DEPS, "fastapi/dotenv not installed")
+class TestVoiceInboundWebhookHTTP(unittest.TestCase):
+    def test_voice_inbound_periferico_json(self):
+        try:
+            from fastapi.testclient import TestClient
+        except ImportError:
+            self.skipTest("fastapi not installed")
+
+        crm = MagicMock()
+        crm.log_inbound_call.return_value = {
+            "lead_id": 100,
+            "activity_id": 200,
+            "team_id": 1,
+            "status": "created",
+        }
+        with patch.dict(
+            "os.environ",
+            {
+                "VOICE_DID_PERIFERICO": "6141234567",
+                "ODOO_TEAM_PERIFERICO": "1",
+                "VOICE_FORWARD_PERIFERICO": "+526141111111",
+            },
+            clear=False,
+        ):
+            client = TestClient(create_app(crm_manager=crm))
+            resp = client.post(
+                "/voice/inbound?format=json",
+                json={
+                    "caller_number": "6145551234",
+                    "called_number": "+526141234567",
+                    "CallStatus": "ringing",
+                },
+                headers={"Accept": "application/json"},
+            )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["lead_id"], 100)
+        self.assertEqual(body["activity_id"], 200)
+        self.assertEqual(body["branch"], "periferico")
+        self.assertEqual(body["branch_id"], 1)
+        self.assertEqual(body["forward_to"], "+526141111111")
+        crm.log_inbound_call.assert_called_once()
+        kwargs = crm.log_inbound_call.call_args.kwargs
+        self.assertEqual(kwargs["branch"], "periferico")
+        self.assertEqual(kwargs["caller_phone"], "6145551234")
+
+    def test_voice_inbound_san_felipe_twiml(self):
+        try:
+            from fastapi.testclient import TestClient
+        except ImportError:
+            self.skipTest("fastapi not installed")
+
+        crm = MagicMock()
+        crm.log_inbound_call.return_value = {
+            "lead_id": 101,
+            "activity_id": 201,
+            "team_id": 5,
+            "status": "created",
+        }
+        with patch.dict(
+            "os.environ",
+            {
+                "VOICE_DID_SAN_FELIPE": "6149876543",
+                "ODOO_TEAM_SAN_FELIPE": "5",
+                "VOICE_FORWARD_SAN_FELIPE": "+526142222222",
+            },
+            clear=False,
+        ):
+            client = TestClient(create_app(crm_manager=crm))
+            resp = client.post(
+                "/voice/inbound?format=twiml",
+                json={
+                    "From": "+526145551234",
+                    "To": "+526149876543",
+                    "CallSid": "CA-SF",
+                    "CallStatus": "ringing",
+                },
+            )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("xml", resp.headers.get("content-type", ""))
+        self.assertIn("<Dial", resp.text)
+        self.assertIn("+526142222222", resp.text)
+        self.assertIn("San Felipe", resp.text)
+        kwargs = crm.log_inbound_call.call_args.kwargs
+        self.assertEqual(kwargs["branch"], "san_felipe")
+        self.assertEqual(kwargs["call_sid"], "CA-SF")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -14,13 +14,14 @@ except ImportError:  # pragma: no cover
         return False
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
 # Load repo .env before Odoo / Meta clients read os.environ.
 _ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(_ROOT / ".env")
 
 from src.odoo_sync.client import OdooCRMClient
+from src.odoo_sync.crm import CRMLeadManager
 from src.meta_gateway.gateway import MetaWebhookGateway, parse_messenger_events
 from src.whatsapp_worker.client import WhatsAppWorkerClient
 from src.voice_gateway.intent import (
@@ -43,6 +44,12 @@ from src.whatsapp_worker.inbound import (
     qualification_enabled,
 )
 from src.pipeline import AutosellPipeline, PipelineResult
+from src.voice_gateway.inbound_call import (
+    branch_context_for_inbound_call,
+    build_inbound_call_response,
+    parse_inbound_call_payload,
+    parse_inbound_call_request,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -255,6 +262,7 @@ def create_app(
     meta_gateway_factory: Callable[[], MetaWebhookGateway] | None = None,
     qualification_store: QualificationStore | None = None,
     odoo_client: OdooCRMClient | None = None,
+    crm_manager: CRMLeadManager | None = None,
     whatsapp_client: WhatsAppWorkerClient | None = None,
 ) -> FastAPI:
     """Build FastAPI app. Inject pipeline for tests."""
@@ -266,6 +274,7 @@ def create_app(
         "meta_gateway_factory": meta_gateway_factory or MetaWebhookGateway,
         "qualification_store": qualification_store,
         "odoo_client": odoo_client,
+        "crm_manager": crm_manager,
         "whatsapp_client": whatsapp_client,
     }
 
@@ -288,6 +297,11 @@ def create_app(
         if state["odoo_client"] is not None:
             return state["odoo_client"]
         return OdooCRMClient()
+
+    def _get_crm_manager() -> CRMLeadManager:
+        if state["crm_manager"] is not None:
+            return state["crm_manager"]
+        return CRMLeadManager(client=_get_odoo_client())
 
     def _get_whatsapp_client() -> WhatsAppWorkerClient:
         if state["whatsapp_client"] is not None:
@@ -397,6 +411,43 @@ def create_app(
         if "utterance" in payload and "transcript" not in payload:
             payload = {**payload, "transcript": payload["utterance"]}
         return await _handle_voice(payload)
+
+    @app.post("/voice/inbound")
+    async def voice_inbound(request: Request) -> Response:
+        """Inbound VoIP/SIP call webhook — CRM log + TwiML/JSON forward."""
+        raw = await parse_inbound_call_request(request)
+        try:
+            event = parse_inbound_call_payload(raw)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        ctx = branch_context_for_inbound_call(event)
+        crm = _get_crm_manager()
+        result = await asyncio.to_thread(
+            crm.log_inbound_call,
+            caller_phone=event.caller_phone,
+            branch=str(ctx["branch"]),
+            caller_name=event.caller_name,
+            called_number=event.called_number or None,
+            call_sid=event.call_sid or None,
+            call_status=event.call_status or None,
+            duration_sec=event.duration_sec,
+        )
+        logger.info(
+            "Inbound call %s → %s branch=%s team=%s lead=%s activity=%s",
+            event.caller_phone,
+            event.called_number or "n/a",
+            ctx.get("branch"),
+            ctx.get("branch_id"),
+            result.get("lead_id"),
+            result.get("activity_id"),
+        )
+        return build_inbound_call_response(
+            request,
+            ctx=ctx,
+            crm_result=result,
+            raw=raw,
+        )
 
     @app.get("/webhook/facebook", response_class=PlainTextResponse)
     def verify_facebook_webhook(request: Request) -> PlainTextResponse:

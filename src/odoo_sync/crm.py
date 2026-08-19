@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from src.odoo_sync.base import OdooCRMError
@@ -639,6 +640,71 @@ class CRMLeadManager:
             f"Vehicle: {vehicle_info}\n\n"
             f"{description}"
         )
+
+    def log_inbound_call(
+        self,
+        *,
+        caller_phone: str,
+        branch: str = PRIMARY_BRANCH,
+        caller_name: str = "Llamada entrante",
+        called_number: str | None = None,
+        call_sid: str | None = None,
+        call_status: str | None = None,
+        duration_sec: int | None = None,
+        channel: str = "Voice / Phone",
+    ) -> dict[str, Any]:
+        """Upsert CRM lead for inbound caller and schedule ``Llamada Entrante`` activity."""
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        status_label = (call_status or "ringing").strip()
+        if duration_sec is not None:
+            duration_label = f"{duration_sec}s"
+        elif status_label.lower() in {"completed", "answered", "in-progress"}:
+            duration_label = "conectada"
+        else:
+            duration_label = "en curso"
+
+        note_lines = [
+            f"Llamada entrante recibida {ts}",
+            f"Estado: {status_label}",
+            f"Duración: {duration_label}",
+        ]
+        if called_number:
+            note_lines.append(f"Línea: {called_number}")
+        if call_sid:
+            note_lines.append(f"Call ID: {call_sid}")
+
+        payload: dict[str, Any] = {
+            "name": caller_name,
+            "phone": caller_phone,
+            "channel": channel,
+            "vehicle_name": "General",
+            "quote_summary": "\n".join(note_lines),
+        }
+
+        result = self.create_or_update_lead(payload, branch=branch)
+        lead_id = int(result["lead_id"])
+        team_id = result.get("team_id")
+        branch_id = (
+            int(team_id)
+            if team_id is not None
+            else int(os.getenv("VOICE_DEFAULT_BRANCH_ID") or 1)
+        )
+
+        activity_id = self._client.schedule_activity(
+            lead_id,
+            summary="Llamada Entrante",
+            activity_kind="call",
+            hours=0,
+            branch_id=branch_id,
+            note="\n".join(note_lines),
+            dry_run=self.dry_run,
+        )
+        return {
+            **result,
+            "activity_id": activity_id,
+            "call_status": status_label,
+            "duration_sec": duration_sec,
+        }
 
 
 __all__ = [
