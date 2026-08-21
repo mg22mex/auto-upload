@@ -136,24 +136,58 @@ class TestCRMLeadManagerDryRun(unittest.TestCase):
 
 
 class TestCRMLeadManagerLiveMocked(unittest.TestCase):
-    def test_creates_when_no_existing(self):
-        models = MagicMock()
+    @staticmethod
+    def _crm_rpc(*, create_id: int = 801, existing: list | None = None):
         created: dict = {}
+        writes: list = []
+        utm_ids = {"utm.medium": {}, "utm.source": {}}
+        next_utm = {"n": 40}
 
         def execute_kw(db, uid, key, model, method, args, kwargs=None):
             if model == "crm.lead" and method == "search":
-                return []
+                return list(existing or [])
             if model == "crm.lead" and method == "create":
                 created["vals"] = args[0]
-                return 801
+                return create_id
+            if model == "crm.lead" and method == "write":
+                writes.append(args)
+                return True
+            if model == "crm.tag" and method == "search_read":
+                name = args[0][0][2] if args and args[0] else ""
+                return [{"id": 77, "name": name}]
+            if model == "crm.tag" and method == "create":
+                return 77
+            if model in {"utm.medium", "utm.source"} and method == "search_read":
+                name = args[0][0][2] if args and args[0] else ""
+                store = utm_ids[model]
+                if name not in store:
+                    next_utm["n"] += 1
+                    store[name] = next_utm["n"]
+                return [{"id": store[name], "name": name}]
+            if model in {"utm.medium", "utm.source"} and method == "create":
+                name = args[0].get("name", "")
+                next_utm["n"] += 1
+                utm_ids[model][name] = next_utm["n"]
+                return next_utm["n"]
+            if model == "mail.message" and method == "create":
+                return 99
+            if model == "ir.model.data":
+                return ["mail.message.subtype", 1]
+            if model == "mail.message.subtype":
+                return [1]
             raise AssertionError(f"unexpected {model}.{method}")
 
+        return execute_kw, created, writes, utm_ids
+
+    def test_creates_when_no_existing(self):
+        execute_kw, created, _writes, utm_ids = self._crm_rpc()
+        models = MagicMock()
         models.execute_kw.side_effect = execute_kw
         client = _client(models)
         mgr = CRMLeadManager(client=client)
         with patch.dict(
             "os.environ",
-            {"ODOO_TEAM_PERIFERICO": "5", "ODOO_CRM_SOURCE_ID": "9"},
+            {"ODOO_TEAM_PERIFERICO": "5"},
             clear=False,
         ):
             result = mgr.create_or_update_lead(
@@ -179,30 +213,82 @@ class TestCRMLeadManagerLiveMocked(unittest.TestCase):
         self.assertEqual(vals["phone"], "6141234567")
         self.assertEqual(vals["email_from"], "ana@example.com")
         self.assertEqual(vals["team_id"], 5)
-        self.assertEqual(vals["source_id"], 9)
+        self.assertIn("medium_id", vals)
+        self.assertIn("source_id", vals)
+        self.assertEqual(vals["medium_id"], utm_ids["utm.medium"]["Phone"])
+        self.assertEqual(vals["source_id"], utm_ids["utm.source"]["Inbound Call"])
+        self.assertEqual(vals["tag_ids"][0][2], [77])
+        self.assertIn(77, result["tag_ids"])
         self.assertIn("Vehicle interest: CX-5", vals["description"])
+        tag_names = [
+            c.args[5][0][0][2]
+            for c in models.execute_kw.call_args_list
+            if c.args[3] == "crm.tag" and c.args[4] == "search_read"
+        ]
+        self.assertIn("MG Quote Lead", tag_names)
+
+    def test_whatsapp_attribution(self):
+        execute_kw, created, _writes, utm_ids = self._crm_rpc(create_id=902)
+        models = MagicMock()
+        models.execute_kw.side_effect = execute_kw
+        mgr = CRMLeadManager(client=_client(models))
+        with patch.dict(
+            "os.environ",
+            {"ODOO_TEAM_SAN_FELIPE": "5", "ODOO_TEAM_PERIFERICO": "1"},
+            clear=False,
+        ):
+            result = mgr.create_or_update_lead(
+                {
+                    "client_name": "Luis",
+                    "phone": "6149998888",
+                    "vehicle_info": "Hilux",
+                    "channel": "WhatsApp",
+                },
+                branch="san_felipe",
+            )
+        vals = created["vals"]
+        self.assertEqual(result["team_id"], 5)
+        self.assertEqual(vals["team_id"], 5)
+        self.assertEqual(vals["medium_id"], utm_ids["utm.medium"]["WhatsApp"])
+        self.assertEqual(
+            vals["source_id"], utm_ids["utm.source"]["Facebook Marketplace"]
+        )
+
+    def test_web_attribution(self):
+        execute_kw, created, _writes, utm_ids = self._crm_rpc(create_id=903)
+        models = MagicMock()
+        models.execute_kw.side_effect = execute_kw
+        mgr = CRMLeadManager(client=_client(models))
+        with patch.dict(
+            "os.environ",
+            {"ODOO_TEAM_PERIFERICO": "1"},
+            clear=False,
+        ):
+            mgr.create_or_update_lead(
+                {
+                    "client_name": "Web Lead",
+                    "phone": "6140001111",
+                    "vehicle_info": "Sentra",
+                    "channel": "Website",
+                },
+                branch="periferico",
+            )
+        vals = created["vals"]
+        self.assertEqual(vals["medium_id"], utm_ids["utm.medium"]["Website"])
+        self.assertEqual(vals["source_id"], utm_ids["utm.source"]["Autosell Web"])
 
     def test_dedupe_posts_chatter_no_create(self):
+        execute_kw, _created, writes, _utm = self._crm_rpc(existing=[4242])
         models = MagicMock()
-        writes: list = []
         messages: list = []
 
-        def execute_kw(db, uid, key, model, method, args, kwargs=None):
-            if model == "crm.lead" and method == "search":
-                return [4242]
-            if model == "crm.lead" and method == "write":
-                writes.append(args)
-                return True
+        def wrapped(db, uid, key, model, method, args, kwargs=None):
             if model == "mail.message" and method == "create":
                 messages.append(args[0])
                 return 99
-            if model == "ir.model.data":
-                return ["mail.message.subtype", 1]
-            if model == "mail.message.subtype":
-                return [1]
-            raise AssertionError(f"unexpected {model}.{method}")
+            return execute_kw(db, uid, key, model, method, args, kwargs)
 
-        models.execute_kw.side_effect = execute_kw
+        models.execute_kw.side_effect = wrapped
         client = _client(models)
         mgr = CRMLeadManager(client=client)
         result = mgr.create_or_update_lead(
@@ -211,6 +297,7 @@ class TestCRMLeadManagerLiveMocked(unittest.TestCase):
                 "phone": "6141234567",
                 "vehicle_info": "Q5",
                 "notes": "Segunda llamada",
+                "channel": "Voice / Phone",
             }
         )
         self.assertEqual(result["status"], "updated")
@@ -219,6 +306,10 @@ class TestCRMLeadManagerLiveMocked(unittest.TestCase):
         self.assertEqual(len(messages), 1)
         self.assertIn("deduplicated", messages[0]["body"].lower())
         self.assertTrue(writes)
+        write_vals = writes[0][1]
+        self.assertIn("medium_id", write_vals)
+        self.assertIn("source_id", write_vals)
+        self.assertIn("tag_ids", write_vals)
         # No create on crm.lead
         create_calls = [
             c
@@ -239,6 +330,13 @@ class TestCRMLeadManagerLiveMocked(unittest.TestCase):
                 return True
             if model == "fleet.vehicle" and method == "search_read":
                 return []
+            if model == "crm.tag" and method in {"search_read", "create"}:
+                return [{"id": 77, "name": "MG Quote Lead"}] if method == "search_read" else 77
+            if model in {"utm.medium", "utm.source"} and method in {
+                "search_read",
+                "create",
+            }:
+                return [{"id": 1, "name": "x"}] if method == "search_read" else 1
             raise AssertionError(f"unexpected {model}.{method}")
 
         models.execute_kw.side_effect = execute_kw
@@ -283,8 +381,6 @@ class TestCRMLeadManagerLiveMocked(unittest.TestCase):
                 created["vals"] = args[0]
                 return 902
             if model == "fleet.vehicle" and method == "search_read":
-                domain = args[0]
-                # VIN lookup
                 return [
                     {
                         "id": 44,
@@ -299,6 +395,13 @@ class TestCRMLeadManagerLiveMocked(unittest.TestCase):
                 ]
             if model == "crm.lead" and method == "write":
                 return True
+            if model == "crm.tag" and method in {"search_read", "create"}:
+                return [{"id": 77, "name": "MG Quote Lead"}] if method == "search_read" else 77
+            if model in {"utm.medium", "utm.source"} and method in {
+                "search_read",
+                "create",
+            }:
+                return [{"id": 1, "name": "x"}] if method == "search_read" else 1
             raise AssertionError(f"unexpected {model}.{method} {args}")
 
         models.execute_kw.side_effect = execute_kw

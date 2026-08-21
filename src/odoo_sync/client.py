@@ -531,6 +531,12 @@ class OdooCRMClient(WhatsAppMixin, FleetMixin, DocumentsMixin, OdooClient):
         if tag_ids:
             vals["tag_ids"] = [(6, 0, list(tag_ids))]
 
+        medium_id, source_id = self.resolve_lead_attribution(channel=channel)
+        if medium_id is not None:
+            vals["medium_id"] = int(medium_id)
+        if source_id is not None:
+            vals["source_id"] = int(source_id)
+
         def _write_or_create(existing_id: int | None) -> int:
             attempt_vals = dict(vals)
             last_exc: BaseException | None = None
@@ -552,6 +558,17 @@ class OdooCRMClient(WhatsAppMixin, FleetMixin, DocumentsMixin, OdooClient):
                     "x_term_months",
                     "stage_id",
                     "tag_ids",
+                    "medium_id",
+                    "source_id",
+                ),
+                (
+                    "x_vehicle_name",
+                    "x_down_payment",
+                    "x_term_months",
+                    "stage_id",
+                    "tag_ids",
+                    "medium_id",
+                    "source_id",
                     "team_id",
                 ),
                 (
@@ -560,6 +577,8 @@ class OdooCRMClient(WhatsAppMixin, FleetMixin, DocumentsMixin, OdooClient):
                     "x_term_months",
                     "stage_id",
                     "tag_ids",
+                    "medium_id",
+                    "source_id",
                     "team_id",
                     "type",
                 ),
@@ -685,9 +704,95 @@ class OdooCRMClient(WhatsAppMixin, FleetMixin, DocumentsMixin, OdooClient):
                 continue
         return None
 
+    # Channel → (utm.medium name, utm.source name) for CRM reporting.
+    LEAD_ATTRIBUTION: dict[str, tuple[str, str]] = {
+        "whatsapp": ("WhatsApp", "Facebook Marketplace"),
+        "voice / phone": ("Phone", "Inbound Call"),
+        "voice_ai": ("Phone", "Inbound Call"),
+        "voice": ("Phone", "Inbound Call"),
+        "phone": ("Phone", "Inbound Call"),
+        "inbound call": ("Phone", "Inbound Call"),
+        "website": ("Website", "Autosell Web"),
+        "web": ("Website", "Autosell Web"),
+        "autosell web": ("Website", "Autosell Web"),
+        "web form": ("Website", "Autosell Web"),
+    }
+    QUOTE_LEAD_TAG = "MG Quote Lead"
+
+    def attribution_names_for_channel(
+        self, channel: str | None
+    ) -> tuple[str | None, str | None]:
+        """Return (medium_name, source_name) for a lead channel label."""
+        key = (channel or "").strip().lower()
+        if not key:
+            return None, None
+        if key in self.LEAD_ATTRIBUTION:
+            return self.LEAD_ATTRIBUTION[key]
+        if "whatsapp" in key:
+            return self.LEAD_ATTRIBUTION["whatsapp"]
+        if "voice" in key or "phone" in key or "llamada" in key:
+            return self.LEAD_ATTRIBUTION["voice / phone"]
+        if "web" in key or "autosell" in key:
+            return self.LEAD_ATTRIBUTION["website"]
+        return None, None
+
+    def resolve_lead_attribution(
+        self,
+        *,
+        channel: str | None = None,
+        medium_name: str | None = None,
+        source_name: str | None = None,
+        medium_id: int | None = None,
+        source_id: int | None = None,
+    ) -> tuple[int | None, int | None]:
+        """Resolve ``(medium_id, source_id)`` from ids, names, or channel map.
+
+        Falls back to ``ODOO_CRM_MEDIUM_ID`` / ``ODOO_CRM_SOURCE_ID`` when set.
+        """
+        if medium_id is None and medium_name:
+            medium_id = self._ensure_utm_record("utm.medium", medium_name)
+        if source_id is None and source_name:
+            source_id = self._ensure_utm_record("utm.source", source_name)
+
+        if medium_id is None or source_id is None:
+            mapped_medium, mapped_source = self.attribution_names_for_channel(channel)
+            if medium_id is None and mapped_medium:
+                medium_id = self._ensure_utm_record("utm.medium", mapped_medium)
+            if source_id is None and mapped_source:
+                source_id = self._ensure_utm_record("utm.source", mapped_source)
+
+        if medium_id is None:
+            raw = (os.getenv("ODOO_CRM_MEDIUM_ID") or "").strip()
+            if raw.isdigit() and int(raw) > 0:
+                medium_id = int(raw)
+        if source_id is None:
+            raw = (os.getenv("ODOO_CRM_SOURCE_ID") or "").strip()
+            if raw.isdigit() and int(raw) > 0:
+                source_id = int(raw)
+        return medium_id, source_id
+
+    def _ensure_utm_record(self, model: str, name: str) -> int | None:
+        """Search or create ``utm.medium`` / ``utm.source`` by exact name."""
+        label = (name or "").strip()
+        if not label or model not in {"utm.medium", "utm.source"}:
+            return None
+        try:
+            rows = self.execute_kw(
+                model,
+                "search_read",
+                [[("name", "=", label)]],
+                {"fields": ["id"], "limit": 1},
+            )
+            if rows:
+                return int(rows[0]["id"])
+            return int(self.execute_kw(model, "create", [{"name": label}]))
+        except Exception as exc:
+            print(f"WARN _ensure_utm_record {model}={label!r}: {exc}")
+            return None
+
     def _resolve_quote_lead_tag_ids(self, channel: str | None) -> list[int]:
-        """Ensure AI Quote Lead (+ Messenger Bot when applicable) crm.tag ids."""
-        names = ["AI Quote Lead"]
+        """Ensure MG Quote Lead (+ Messenger Bot when applicable) crm.tag ids."""
+        names = [self.QUOTE_LEAD_TAG]
         channel_norm = (channel or "").strip().lower()
         if "messenger" in channel_norm or channel_norm.startswith("facebook"):
             names.append("Messenger Bot")

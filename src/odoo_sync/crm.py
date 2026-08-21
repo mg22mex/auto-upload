@@ -258,21 +258,23 @@ class CRMLeadManager:
             physical_location=physical_location,
         )
 
-        source_id = _optional_int(
-            payload.get("source_id") or os.getenv(ENV_SOURCE_ID)
-        )
-        medium_id = _optional_int(
-            payload.get("medium_id") or os.getenv(ENV_MEDIUM_ID)
-        )
+        medium_id: int | None = None
+        source_id: int | None = None
+        tag_ids: list[int] = []
 
         use_dry = self._use_dry_run()
         if use_dry:
+            medium_name, source_name = self._client.attribution_names_for_channel(
+                channel or None
+            )
             print(
                 f"DRY-RUN CRMLeadManager.create_or_update_lead "
                 f"title={title!r} phone={phone_digits} "
                 f"branch={effective_branch!r} team_id={team_id} "
                 f"physical_location={physical_location!r} "
-                f"location_overrode={location_overrode} fell_back={fell_back}"
+                f"location_overrode={location_overrode} fell_back={fell_back} "
+                f"medium={medium_name!r} source={source_name!r} "
+                f"tag={self._client.QUOTE_LEAD_TAG!r}"
             )
             vin = str(payload.get("vin") or payload.get("vin_sn") or "").strip()
             plate = str(
@@ -299,9 +301,17 @@ class CRMLeadManager:
                 "physical_location": physical_location,
                 "title": title,
                 "phone": phone_digits,
+                "medium_name": medium_name,
+                "source_name": source_name,
+                "medium_id": None,
+                "source_id": None,
+                "tag_ids": [],
                 "fleet": fleet_meta,
                 "dry_run": True,
             }
+
+        medium_id, source_id = self._resolve_attribution_ids(payload, channel=channel)
+        tag_ids = self._client._resolve_quote_lead_tag_ids(channel or None)
 
         existing_id = self._find_active_lead_id(phone_digits, phone_raw)
 
@@ -328,6 +338,12 @@ class CRMLeadManager:
                     update_vals["email_from"] = email
                 if team_id is not None:
                     update_vals["team_id"] = int(team_id)
+                if medium_id is not None:
+                    update_vals["medium_id"] = int(medium_id)
+                if source_id is not None:
+                    update_vals["source_id"] = int(source_id)
+                if tag_ids:
+                    update_vals["tag_ids"] = [(6, 0, list(tag_ids))]
                 self._client.execute_kw(
                     "crm.lead",
                     "write",
@@ -350,6 +366,9 @@ class CRMLeadManager:
                 "physical_location": physical_location,
                 "title": title,
                 "phone": phone_digits,
+                "medium_id": medium_id,
+                "source_id": source_id,
+                "tag_ids": list(tag_ids),
                 "fleet": fleet_meta,
                 "dry_run": False,
             }
@@ -370,15 +389,27 @@ class CRMLeadManager:
             vals["source_id"] = int(source_id)
         if medium_id is not None:
             vals["medium_id"] = int(medium_id)
+        if tag_ids:
+            vals["tag_ids"] = [(6, 0, list(tag_ids))]
 
         lead_id = self._create_lead_with_fallbacks(vals)
+        if tag_ids:
+            try:
+                self._client.execute_kw(
+                    "crm.lead",
+                    "write",
+                    [[int(lead_id)], {"tag_ids": [(6, 0, list(tag_ids))]}],
+                )
+            except Exception:
+                pass
         fleet_meta = self._maybe_link_fleet(int(lead_id), payload)
         if fleet_meta is not None and physical_location:
             fleet_meta = {**fleet_meta, "physical_location": physical_location}
         print(
             f"CRMLeadManager created lead id={lead_id} branch={effective_branch} "
             f"team_id={team_id} physical_location={physical_location} "
-            f"location_overrode={location_overrode}"
+            f"location_overrode={location_overrode} "
+            f"medium_id={medium_id} source_id={source_id}"
         )
         return {
             "status": "created",
@@ -391,9 +422,33 @@ class CRMLeadManager:
             "physical_location": physical_location,
             "title": title,
             "phone": phone_digits,
+            "medium_id": medium_id,
+            "source_id": source_id,
+            "tag_ids": list(tag_ids),
             "fleet": fleet_meta,
             "dry_run": False,
         }
+
+    def _resolve_attribution_ids(
+        self,
+        payload: dict[str, Any],
+        *,
+        channel: str,
+    ) -> tuple[int | None, int | None]:
+        """Resolve medium/source from payload ids/names or channel map."""
+        return self._client.resolve_lead_attribution(
+            channel=channel or None,
+            medium_name=str(
+                payload.get("medium_name") or payload.get("utm_medium") or ""
+            ).strip()
+            or None,
+            source_name=str(
+                payload.get("source_name") or payload.get("utm_source") or ""
+            ).strip()
+            or None,
+            medium_id=_optional_int(payload.get("medium_id")),
+            source_id=_optional_int(payload.get("source_id")),
+        )
 
     def _resolve_physical_location(
         self,
@@ -466,6 +521,7 @@ class CRMLeadManager:
             "email_from",
             "source_id",
             "medium_id",
+            "tag_ids",
             "team_id",
             "type",
         )

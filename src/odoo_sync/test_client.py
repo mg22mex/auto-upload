@@ -121,11 +121,23 @@ def _lead_rpc_side_effect(
         if model == "crm.tag" and method == "search_read":
             # Distinct ids per tag name for messenger dual-tag cases
             name = args[0][0][2] if args and args[0] else ""
-            tid = tag_id + (1 if "messenger" in str(name).lower() else 0)
+            name_l = str(name).lower()
+            tid = tag_id
+            if "messenger" in name_l:
+                tid = tag_id + 1
+            elif "mg quote" in name_l:
+                tid = tag_id
             return [{"id": tid, "name": name}]
         if model == "crm.tag" and method == "create":
             tag_seq["n"] += 1
             return tag_id + tag_seq["n"]
+        if model in {"utm.medium", "utm.source"} and method == "search_read":
+            name = args[0][0][2] if args and args[0] else ""
+            # Stable fake ids by name
+            base = 20 if model == "utm.medium" else 30
+            return [{"id": base + (hash(str(name)) % 7), "name": name}]
+        if model in {"utm.medium", "utm.source"} and method == "create":
+            return 99
         if model == "crm.lead" and method == "create":
             return lead_id
         if model == "crm.lead" and method == "write":
@@ -210,6 +222,77 @@ class TestCreateOrUpdateLead(unittest.TestCase):
         self.assertEqual(vals["tag_ids"][0][1], 0)
         self.assertIn(11, vals["tag_ids"][0][2])
         self.assertIn(12, vals["tag_ids"][0][2])  # Messenger Bot
+        tag_lookups = [
+            c.args[5][0][0][2]
+            for c in models.execute_kw.call_args_list
+            if c.args[3] == "crm.tag" and c.args[4] == "search_read"
+        ]
+        self.assertIn("MG Quote Lead", tag_lookups)
+        self.assertNotIn("AI Quote Lead", tag_lookups)
+
+    def test_whatsapp_attribution_medium_source(self):
+        client, models = self._client()
+        models.execute_kw.side_effect = _lead_rpc_side_effect(lead_id=1003)
+        client.create_or_update_lead(
+            "Luis",
+            "6149998888",
+            "Hilux",
+            branch_id=5,
+            channel="WhatsApp",
+            schedule_follow_up=False,
+        )
+        create_call = [
+            c
+            for c in models.execute_kw.call_args_list
+            if c.args[3] == "crm.lead" and c.args[4] == "create"
+        ][0]
+        vals = create_call.args[5][0]
+        self.assertIn("medium_id", vals)
+        self.assertIn("source_id", vals)
+        medium_names = [
+            c.args[5][0][0][2]
+            for c in models.execute_kw.call_args_list
+            if c.args[3] == "utm.medium" and c.args[4] == "search_read"
+        ]
+        source_names = [
+            c.args[5][0][0][2]
+            for c in models.execute_kw.call_args_list
+            if c.args[3] == "utm.source" and c.args[4] == "search_read"
+        ]
+        self.assertIn("WhatsApp", medium_names)
+        self.assertIn("Facebook Marketplace", source_names)
+
+    def test_voice_attribution_medium_source(self):
+        client, models = self._client()
+        models.execute_kw.side_effect = _lead_rpc_side_effect(lead_id=1004)
+        client.create_or_update_lead(
+            "María",
+            "6141112222",
+            "General",
+            branch_id=1,
+            channel="Voice / Phone",
+            schedule_follow_up=False,
+        )
+        create_call = [
+            c
+            for c in models.execute_kw.call_args_list
+            if c.args[3] == "crm.lead" and c.args[4] == "create"
+        ][0]
+        vals = create_call.args[5][0]
+        self.assertIn("medium_id", vals)
+        self.assertIn("source_id", vals)
+        medium_names = [
+            c.args[5][0][0][2]
+            for c in models.execute_kw.call_args_list
+            if c.args[3] == "utm.medium" and c.args[4] == "search_read"
+        ]
+        source_names = [
+            c.args[5][0][0][2]
+            for c in models.execute_kw.call_args_list
+            if c.args[3] == "utm.source" and c.args[4] == "search_read"
+        ]
+        self.assertIn("Phone", medium_names)
+        self.assertIn("Inbound Call", source_names)
 
     def test_update_existing_lead(self):
         client, models = self._client()
