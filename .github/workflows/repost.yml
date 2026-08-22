@@ -39,10 +39,15 @@ on:
         required: false
         default: false
         type: boolean
-      min_age_days:
-        description: Min days since last post (0 = include listings from the last 1–7 days). Empty = config
+      older_than:
+        description: "Alias for min_age_days. 0 = process all live listings (purge/recreate)."
         required: false
         type: string
+      min_age_days:
+        description: "Min listing age in days (default 2). Pass 0 to process all old listings."
+        required: false
+        type: string
+        default: "2"
       skip_odoo:
         description: "Skip Odoo fetch (Use local cached catalog_latest.json)"
         required: false
@@ -60,8 +65,7 @@ jobs:
     concurrency:
       group: facebook-bump
       cancel-in-progress: false
-    # Hard cap: kill hung Playwright/Chromium instead of multi-hour overlaps.
-    timeout-minutes: 15
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
@@ -203,8 +207,12 @@ jobs:
             FORCE_ARGS=(--force)
           fi
           AGE_ARGS=()
-          if [ -n "${{ inputs.min_age_days }}" ]; then
-            AGE_ARGS=(--min-age-days "${{ inputs.min_age_days }}")
+          AGE="${{ inputs.older_than }}"
+          if [ -z "$AGE" ]; then
+            AGE="${{ inputs.min_age_days }}"
+          fi
+          if [ -n "$AGE" ]; then
+            AGE_ARGS=(--min-age-days "$AGE")
           fi
           SKIP_ODOO_ARGS=()
           if [ "${{ inputs.skip_odoo }}" = "true" ]; then

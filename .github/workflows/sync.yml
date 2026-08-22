@@ -12,6 +12,19 @@ on:
         required: false
         type: boolean
         default: false
+      force:
+        description: "After catalog sync, relist all live listings (ignore min-age)"
+        required: false
+        type: boolean
+        default: false
+      older_than:
+        description: "Alias for min_age_days. 0 = process all live listings."
+        required: false
+        type: string
+      min_age_days:
+        description: "After catalog sync, relist listings this old (default 2). 0 = all. Empty on schedule = skip relist."
+        required: false
+        type: string
 
 # autosell.mx blocks or ignores GitHub-hosted runner IP ranges (connect timeout).
 # Scrape + diff + Facebook all run on the self-hosted fb-worker.
@@ -20,7 +33,7 @@ jobs:
   sync:
     name: Scrape + diff (+ Facebook on Phase 2)
     runs-on: [self-hosted, fb-worker]
-    timeout-minutes: 120
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
@@ -117,6 +130,39 @@ jobs:
             EXTRA=(--skip-odoo)
           fi
           python run_sync.py --from-snapshot data/catalog_latest.json "${EXTRA[@]}"
+
+      - name: Relist old listings (optional dispatch)
+        if: >-
+          github.event_name == 'workflow_dispatch' &&
+          (inputs.force == true || inputs.older_than || inputs.min_age_days)
+        env:
+          AUTOSELL_BASE_URL: ${{ secrets.AUTOSELL_BASE_URL }}
+          REPOST_MIN_AGE_DAYS: ${{ secrets.REPOST_MIN_AGE_DAYS || '2' }}
+          REPOST_MAX_PER_ACCOUNT_PER_RUN: ${{ secrets.REPOST_MAX_PER_ACCOUNT_PER_RUN || '25' }}
+          PYTHONUNBUFFERED: "1"
+          FB_HEADLESS: ${{ secrets.FB_HEADLESS || 'true' }}
+          DB_PATH: data/sync.db
+          SKIP_ODOO: ${{ inputs.skip_odoo == true && 'true' || 'false' }}
+        run: |
+          set -eux
+          AGE="${{ inputs.older_than }}"
+          if [ -z "$AGE" ]; then
+            AGE="${{ inputs.min_age_days }}"
+          fi
+          AGE_ARGS=()
+          if [ -n "$AGE" ]; then
+            AGE_ARGS=(--min-age-days "$AGE")
+          fi
+          FORCE_ARGS=()
+          if [ "${{ inputs.force }}" = "true" ]; then
+            FORCE_ARGS=(--force)
+          fi
+          SKIP_ODOO_ARGS=()
+          if [ "${{ inputs.skip_odoo }}" = "true" ]; then
+            SKIP_ODOO_ARGS=(--skip-odoo)
+          fi
+          python -u scripts/run_weekly_bump.py --mode repost --all-eligible --skip-scrape \
+            "${FORCE_ARGS[@]}" "${AGE_ARGS[@]}" "${SKIP_ODOO_ARGS[@]}"
 
       - name: Upload catalog snapshot artifact
         if: always()

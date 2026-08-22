@@ -411,5 +411,43 @@ class TestResolveMinAgeDays(unittest.TestCase):
         )
 
 
+class TestBuildBumpCommand(unittest.TestCase):
+    def test_older_than_zero_forwards_min_age_days_0(self):
+        import importlib.util
+
+        path = ROOT / "scripts" / "run_weekly_bump.py"
+        spec = importlib.util.spec_from_file_location("run_weekly_bump_cmd", path)
+        assert spec and spec.loader
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        cmd = mod.build_bump_command(
+            script=Path("/tmp/run_repost.py"),
+            older_than="0",
+            max_per=25,
+            python="python",
+        )
+        self.assertIn("--min-age-days", cmd)
+        self.assertEqual(cmd[cmd.index("--min-age-days") + 1], "0")
+        self.assertNotIn("--force", cmd)
+
+    def test_force_forwards_force_flag(self):
+        import importlib.util
+
+        path = ROOT / "scripts" / "run_weekly_bump.py"
+        spec = importlib.util.spec_from_file_location("run_weekly_bump_cmd", path)
+        assert spec and spec.loader
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        cmd = mod.build_bump_command(
+            script=Path("/tmp/run_repost.py"),
+            older_than="2",
+            max_per=25,
+            force=True,
+            python="python",
+        )
+        self.assertIn("--force", cmd)
+        self.assertEqual(cmd[cmd.index("--min-age-days") + 1], "2")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -258,6 +258,46 @@ def _print_allocation(args, config: dict) -> int:
     return 0
 
 
+def build_bump_command(
+    *,
+    script: Path,
+    accounts: list[str] | None = None,
+    ids: str | None = None,
+    older_than: str | None = None,
+    max_per: int | None = None,
+    unlimited: bool = False,
+    force: bool = False,
+    dry_run: bool = False,
+    catalog: str = "data/catalog_latest.json",
+    config: str = "config.yaml",
+    python: str = sys.executable,
+) -> list[str]:
+    """Build the run_repost.py / run_renew.py argv.
+
+    ``--older-than 0`` / ``--min-age-days 0`` is forwarded as ``--min-age-days 0``
+    (process all live dates). ``--force`` is forwarded separately.
+    """
+    cmd: list[str] = [python, "-u", str(script)]
+    if accounts:
+        cmd.extend(["--account", *accounts])
+    if ids:
+        cmd.extend(["--ids", ids])
+    else:
+        cmd.append("--all-eligible")
+    if older_than is not None:
+        cmd.extend(["--min-age-days", str(older_than)])
+    if unlimited:
+        cmd.append("--unlimited")
+    elif max_per is not None:
+        cmd.extend(["--max", str(max_per)])
+    if force:
+        cmd.append("--force")
+    if dry_run:
+        cmd.append("--dry-run")
+    cmd.extend(["--catalog", catalog, "--config", config])
+    return cmd
+
+
 def _run_bump(args, config: dict, bump: dict, repost_cfg: dict) -> int:
     if args.dry_run_allocation:
         return _print_allocation(args, config)
@@ -304,24 +344,18 @@ def _run_bump(args, config: dict, bump: dict, repost_cfg: dict) -> int:
             or bump.get("max_per_account_per_run")
             or 25
         )
-    cmd: list[str] = [sys.executable, "-u", str(script)]
-    if args.account:
-        cmd.extend(["--account", *args.account])
-    if args.ids:
-        cmd.extend(["--ids", args.ids])
-    else:
-        cmd.append("--all-eligible")
-    if args.older_than is not None:
-        cmd.extend(["--min-age-days", str(args.older_than)])
-    if args.unlimited:
-        cmd.append("--unlimited")
-    else:
-        cmd.extend(["--max", str(max_per)])
-    if args.force:
-        cmd.append("--force")
-    if args.dry_run:
-        cmd.append("--dry-run")
-    cmd.extend(["--catalog", args.catalog, "--config", args.config])
+    cmd = build_bump_command(
+        script=script,
+        accounts=args.account,
+        ids=args.ids,
+        older_than=args.older_than,
+        max_per=max_per,
+        unlimited=args.unlimited,
+        force=args.force,
+        dry_run=args.dry_run,
+        catalog=args.catalog,
+        config=args.config,
+    )
 
     print("=== Listing bump (daily incremental) ===", flush=True)
     print(f"Mode:      {mode} ({'forced' if force else 'auto config'})", flush=True)
