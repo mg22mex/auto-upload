@@ -94,7 +94,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Marketplace listing bump: default full repost/relist (delete+recreate). "
-            "Optional --mode renew for FB native Renovar. Age floor defaults to 3 days. "
+            "Optional --mode renew for FB native Renovar. Age floor defaults to 2 days. "
             "With --all-eligible, catalog sync (creates missing vehicles) runs first."
         )
     )
@@ -122,7 +122,7 @@ def main() -> int:
         "--min-age-days",
         dest="older_than",
         default=None,
-        help="Min age days (default: config/env, usually 3). Pass 0 to include 1–7 day old listings.",
+        help="Min age days (default: config/env, usually 2; supports 1.5). Pass 0 to include fresh listings.",
     )
     parser.add_argument(
         "--max",
@@ -130,7 +130,7 @@ def main() -> int:
         dest="max",
         type=int,
         default=None,
-        help="Max reposts per account (default: config 15). --force does not lift this.",
+        help="Max reposts per account (default: config 25). --force does not lift this.",
     )
     parser.add_argument(
         "--unlimited",
@@ -223,7 +223,7 @@ def _print_allocation(args, config: dict) -> int:
         )
     if allocation.overflow:
         print(
-            f"Overflow live (not in 15-slot partition): {len(allocation.overflow)} "
+            f"Overflow live (not in slot partition): {len(allocation.overflow)} "
             f"(set sync.slot_allocator.enforce_overflow_removals: true to remove)",
             flush=True,
         )
@@ -271,7 +271,7 @@ def _run_bump(args, config: dict, bump: dict, repost_cfg: dict) -> int:
         max_per = int(
             repost_cfg.get("max_per_account_per_run")
             or bump.get("max_per_account_per_run")
-            or 15
+            or 25
         )
     cmd: list[str] = [sys.executable, "-u", str(script)]
     if args.account:
@@ -299,7 +299,7 @@ def _run_bump(args, config: dict, bump: dict, repost_cfg: dict) -> int:
     print(f"Max/acct:  {'unlimited' if args.unlimited else max_per}", flush=True)
     print(
         f"Even/odd:  {bump['even_week']} / {bump['odd_week']} "
-        f"(min_age_days={args.older_than if args.older_than is not None else bump.get('min_age_days', 3)}"
+        f"(min_age_days={args.older_than if args.older_than is not None else bump.get('min_age_days', 2)}"
         f"{' overridden' if args.force or args.older_than == '0' else ''})",
         flush=True,
     )

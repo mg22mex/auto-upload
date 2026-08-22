@@ -239,7 +239,7 @@ def main() -> int:
     output_path = Path(args.output)
     max_posts = env_int(
         "MAX_POSTS_PER_ACCOUNT_PER_RUN",
-        int(config.get("sync", {}).get("max_posts_per_account_per_run", 10)),
+        int(config.get("sync", {}).get("max_posts_per_account_per_run", 15)),
     )
 
     all_account_ids = [account["id"] for account in config.get("accounts", [])]

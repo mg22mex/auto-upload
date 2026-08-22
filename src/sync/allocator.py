@@ -6,7 +6,7 @@ from typing import Any, Iterable, Sequence
 
 from src.models import Vehicle
 
-DEFAULT_MAX_LISTINGS_PER_ACCOUNT = 15
+DEFAULT_MAX_LISTINGS_PER_ACCOUNT = 25
 
 
 def slot_allocator_config(config: dict[str, Any] | None) -> dict[str, Any]:
@@ -117,13 +117,15 @@ def allocate_slots(
     """Sticky partition: keep existing live pairs, cap at max_per_account, fill empties.
 
     Duplicate live rows (same vehicle on two accounts) keep the oldest ``posted_at``.
-    Over-capacity on one account: keep the 15 oldest ``posted_at`` (FIFO bump queue).
-    Vacancies fill from unassigned catalog, catalog order (scrape/newest-first).
+    Over-capacity on one account: keep the oldest ``posted_at`` (FIFO bump queue).
+    Vacancies fill from unassigned catalog, prioritizing never-posted then
+    stale (oldest prior ``posted_at``), then catalog order.
     Sold/removed rows are absent from live_listings so their slots free automatically.
     """
     accounts = [a for a in account_ids if a]
     max_n = max(1, int(max_per_account))
     catalog_ids = [v.autosell_id for v in vehicles]
+    catalog_index = {aid: i for i, aid in enumerate(catalog_ids)}
     catalog_set = set(catalog_ids)
 
     live_rows: list[tuple[str, str, str | None]] = []
@@ -167,7 +169,26 @@ def allocate_slots(
             overflow.append((aid, acct))
 
     occupying = {aid for ids in assigned.values() for aid in ids}
-    waitlist = [aid for aid in catalog_ids if aid not in occupying]
+    # Oldest posted_at seen per vehicle (for stale waitlist priority).
+    oldest_posted: dict[str, str] = {}
+    for aid, _acct, posted in live_rows:
+        key = _posted_key(posted)
+        prev = oldest_posted.get(aid)
+        if prev is None or key < prev:
+            oldest_posted[aid] = key
+
+    def waitlist_priority(aid: str) -> tuple:
+        # 0 = never posted (no live row) → fill first
+        # 1 = previously/overflow live → older posted_at first (stale)
+        idx = catalog_index.get(aid, 10_000)
+        if aid not in oldest_posted:
+            return (0, "", idx)
+        return (1, oldest_posted[aid], idx)
+
+    waitlist = sorted(
+        (aid for aid in catalog_ids if aid not in occupying),
+        key=waitlist_priority,
+    )
     creates: list[tuple[str, str]] = []
 
     def emptiest() -> str | None:

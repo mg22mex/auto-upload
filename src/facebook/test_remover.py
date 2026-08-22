@@ -178,6 +178,7 @@ class TestRemoveVehicleListingFallbacks(unittest.TestCase):
         page = MagicMock()
         page.url = "https://www.facebook.com/marketplace/item/1/"
         log_dir = Path(tempfile.mkdtemp())
+        store = MagicMock()
 
         with (
             patch(
@@ -198,10 +199,15 @@ class TestRemoveVehicleListingFallbacks(unittest.TestCase):
                 removal_action="delete",
                 log_dir=log_dir,
                 require_verified=True,
+                store=store,
+                account_id="account_1",
             )
         self.assertTrue(ok)
         delete.assert_not_called()
         shelf.assert_not_called()
+        store.mark_fb_listing_removed.assert_called_once_with(
+            "obj1", "account_1", clear_url=True
+        )
 
     def test_selling_shelf_fallback_when_detail_delete_fails(self):
         page = MagicMock()

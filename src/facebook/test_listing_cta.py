@@ -142,6 +142,31 @@ class TestVehicleDescriptionCTA(unittest.TestCase):
         self.assertTrue(block.startswith("\n\n📲"))
         self.assertIn("Haz clic en el enlace", block)
 
+    def test_anti_duplicate_footprint_in_description(self):
+        from datetime import datetime, timezone
+
+        from src.facebook.util import anti_duplicate_footprint
+
+        vehicle = _sample_vehicle(
+            specs={
+                "Año": "2020",
+                "Versión": "Touring",
+                "Factura": "Agencia",
+                "Precio": "$300,000",
+            }
+        )
+        when = datetime(2026, 8, 21, 20, 0, 0, tzinfo=timezone.utc)
+        footprint = anti_duplicate_footprint(vehicle, when=when)
+        self.assertTrue(footprint.startswith("Ref. "))
+        self.assertEqual(len(footprint.split()[-1]), 8)
+
+        text = vehicle_description(vehicle)
+        self.assertRegex(text, r"Ref\. [0-9a-f]{8}")
+        self.assertIn("Más información:", text)
+        # Spec bullets still present (order may vary)
+        self.assertIn("Versión: Touring", text)
+        self.assertIn("Factura: Agencia", text)
+
 
 if __name__ == "__main__":
     unittest.main()

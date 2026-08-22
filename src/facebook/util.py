@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import random
 import re
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from src.facebook.listing_cta import whatsapp_cta_for_vehicle
@@ -98,13 +100,31 @@ def fb_vehicle_type_candidates(vehicle: Vehicle) -> tuple[str, ...]:
     return tuple(ordered)
 
 
-def vehicle_description(vehicle: Vehicle, *, branch: str | None = None) -> str:
-    lines = [vehicle.marketplace_title]
-    lines.append(f"Kilometraje: {mileage_for_listing(vehicle.mileage)} km")
+def anti_duplicate_footprint(vehicle: Vehicle, *, when: datetime | None = None) -> str:
+    """Short rotating ref so Meta's text fingerprint differs across reposts."""
+    stamp = (when or datetime.now(timezone.utc)).strftime("%Y%m%d%H%M%S")
+    seed = f"{vehicle.autosell_id}:{vehicle.slug}:{stamp}"
+    digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:8]
+    return f"Ref. {digest}"
+
+
+def _spec_feature_lines(vehicle: Vehicle) -> list[str]:
+    """Build feature bullets; shuffle order as a light anti-dupe variation."""
+    lines: list[str] = []
     for key, value in vehicle.specs.items():
         if value and key.lower() not in {"kilometraje", "precio"}:
             lines.append(f"{key}: {value}")
+    if len(lines) > 1:
+        random.shuffle(lines)
+    return lines
+
+
+def vehicle_description(vehicle: Vehicle, *, branch: str | None = None) -> str:
+    lines = [vehicle.marketplace_title]
+    lines.append(f"Kilometraje: {mileage_for_listing(vehicle.mileage)} km")
+    lines.extend(_spec_feature_lines(vehicle))
     lines.append(f"Más información: {vehicle.url}")
+    lines.append(anti_duplicate_footprint(vehicle))
     return "\n".join(lines) + whatsapp_cta_for_vehicle(vehicle, branch=branch)
 
 

@@ -85,8 +85,8 @@ def main() -> int:
     older_than = resolve_min_age_days(
         args.older_than,
         env_names=("RENEW_MIN_AGE_DAYS", "REPOST_MIN_AGE_DAYS"),
-        config_default=int(
-            renew_cfg.get("min_age_days", repost_cfg.get("min_age_days", 3))
+        config_default=float(
+            renew_cfg.get("min_age_days", repost_cfg.get("min_age_days", 2))
         ),
         force=args.force,
     )

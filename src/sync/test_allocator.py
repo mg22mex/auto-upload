@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from src.models import Vehicle
-from src.sync.allocator import allocate_slots
+from src.sync.allocator import DEFAULT_MAX_LISTINGS_PER_ACCOUNT, allocate_slots
 from src.sync.engine import plan_sync_actions
 
 
@@ -34,6 +34,9 @@ def _live(aid: str, acct: str, posted: str = "2026-01-01T00:00:00+00:00") -> dic
 
 
 class TestAllocateSlots(unittest.TestCase):
+    def test_default_cap_is_25(self):
+        self.assertEqual(DEFAULT_MAX_LISTINGS_PER_ACCOUNT, 25)
+
     def test_empty_live_fills_round_robin_up_to_cap(self):
         vehicles = [_v(f"obj{i}") for i in range(10)]
         alloc = allocate_slots(
@@ -61,7 +64,7 @@ class TestAllocateSlots(unittest.TestCase):
             _live("obj1", "account_1", "2026-01-01T00:00:00+00:00"),
         ]
         alloc = allocate_slots(
-            vehicles, ["account_1", "account_2"], live, max_per_account=15
+            vehicles, ["account_1", "account_2"], live, max_per_account=25
         )
         self.assertEqual(alloc.by_account["account_1"], ["obj1"])
         self.assertEqual(alloc.by_account["account_2"], [])
@@ -79,6 +82,26 @@ class TestAllocateSlots(unittest.TestCase):
         )
         self.assertEqual(alloc.by_account["account_1"], ["x", "y"])
         self.assertEqual(alloc.overflow, [("z", "account_1")])
+
+    def test_unposted_fill_before_overflow_stale(self):
+        """Never-posted catalog ids fill free slots ahead of overflow/stale ids."""
+        vehicles = [_v("a"), _v("b"), _v("c"), _v("never")]
+        live = [
+            _live("a", "account_1", "2026-01-01T00:00:00+00:00"),
+            _live("b", "account_1", "2026-02-01T00:00:00+00:00"),
+            _live("c", "account_1", "2026-03-01T00:00:00+00:00"),
+        ]
+        alloc = allocate_slots(
+            vehicles, ["account_1", "account_2"], live, max_per_account=2
+        )
+        self.assertEqual(alloc.by_account["account_1"], ["a", "b"])
+        self.assertEqual(alloc.overflow, [("c", "account_1")])
+        # account_2 empty: never-posted before overflow stale c
+        self.assertEqual(alloc.by_account["account_2"], ["never", "c"])
+        self.assertEqual(
+            alloc.creates, [("never", "account_2"), ("c", "account_2")]
+        )
+        self.assertEqual(alloc.waitlist, [])
 
     def test_sync_creates_only_assigned_slots(self):
         vehicles = [_v(f"obj{i}") for i in range(5)]

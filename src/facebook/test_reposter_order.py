@@ -103,6 +103,7 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
             patch("src.facebook.reposter.remove_vehicle_listing", side_effect=gone_remove),
             patch("src.facebook.reposter.create_vehicle_listing", side_effect=ok_create),
             patch("src.facebook.reposter.ensure_no_matching_shelf_listings", return_value=True),
+            patch("src.facebook.reposter.random_delay"),
         ):
             _repost_one(
                 page,
@@ -143,6 +144,9 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
         def rec_repost(*_a, **_k):
             order.append("db_record")
 
+        def fake_delay(*_a, **_k):
+            order.append("cooldown")
+
         store.mark_fb_listing_removed.side_effect = mark_removed
         store.record_repost.side_effect = rec_repost
 
@@ -150,6 +154,7 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
             patch("src.facebook.reposter.remove_vehicle_listing", side_effect=ok_remove),
             patch("src.facebook.reposter.create_vehicle_listing", side_effect=ok_create),
             patch("src.facebook.reposter.ensure_no_matching_shelf_listings", return_value=True),
+            patch("src.facebook.reposter.random_delay", side_effect=fake_delay),
         ):
             _repost_one(
                 page,
@@ -162,8 +167,113 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
                 result=result,
             )
 
-        self.assertEqual(order, ["remove", "db_clear", "create", "db_record"])
+        self.assertEqual(order, ["remove", "db_clear", "cooldown", "create", "db_record"])
         self.assertEqual(result.reposts, 1)
+
+    def test_delete_cooldown_runs_between_remove_and_create(self):
+        page = MagicMock()
+        store = MagicMock()
+        result = MagicMock(reposts=0)
+        order: list[str] = []
+
+        def ok_remove(*_a, **_k):
+            order.append("remove")
+            return True
+
+        def ok_create(*_a, **_k):
+            order.append("create")
+            return "https://www.facebook.com/marketplace/item/999/"
+
+        def fake_delay(*_a, **_k):
+            order.append("cooldown")
+
+        with (
+            patch("src.facebook.reposter.remove_vehicle_listing", side_effect=ok_remove),
+            patch("src.facebook.reposter.create_vehicle_listing", side_effect=ok_create),
+            patch("src.facebook.reposter.ensure_no_matching_shelf_listings", return_value=True),
+            patch("src.facebook.reposter.random_delay", side_effect=fake_delay),
+            patch.dict("os.environ", {"REPOST_DELETE_COOLDOWN_SEC": "7"}, clear=False),
+        ):
+            _repost_one(
+                page,
+                _action(),
+                store,
+                fb_config={},
+                max_photos=5,
+                removal_action="delete",
+                log_dir=Path("/tmp"),
+                result=result,
+            )
+
+        self.assertEqual(order, ["remove", "cooldown", "create"])
+        self.assertEqual(result.reposts, 1)
+
+    def test_missing_fb_url_clears_slot_then_creates(self):
+        page = MagicMock()
+        store = MagicMock()
+        store.get_fb_listing.return_value = None
+        result = MagicMock(reposts=0)
+        order: list[str] = []
+
+        def ok_create(*_a, **_k):
+            order.append("create")
+            return "https://www.facebook.com/marketplace/item/555/"
+
+        action = _action()
+        action.fb_listing_url = None
+
+        with (
+            patch("src.facebook.reposter.remove_vehicle_listing") as remove,
+            patch("src.facebook.reposter.create_vehicle_listing", side_effect=ok_create),
+            patch("src.facebook.reposter.ensure_no_matching_shelf_listings", return_value=True),
+            patch("src.facebook.reposter.random_delay"),
+        ):
+            _repost_one(
+                page,
+                action,
+                store,
+                fb_config={},
+                max_photos=5,
+                removal_action="delete",
+                log_dir=Path("/tmp"),
+                result=result,
+            )
+
+        remove.assert_not_called()
+        store.mark_fb_listing_removed.assert_called()
+        self.assertEqual(order, ["create"])
+        self.assertEqual(result.reposts, 1)
+
+    def test_mark_sold_coerced_to_delete_on_repost(self):
+        page = MagicMock()
+        store = MagicMock()
+        result = MagicMock(reposts=0)
+        seen: dict = {}
+
+        def ok_remove(*_a, **kwargs):
+            seen["removal_action"] = kwargs.get("removal_action")
+            return True
+
+        with (
+            patch("src.facebook.reposter.remove_vehicle_listing", side_effect=ok_remove),
+            patch(
+                "src.facebook.reposter.create_vehicle_listing",
+                return_value="https://www.facebook.com/marketplace/item/1/",
+            ),
+            patch("src.facebook.reposter.ensure_no_matching_shelf_listings", return_value=True),
+            patch("src.facebook.reposter.random_delay"),
+        ):
+            _repost_one(
+                page,
+                _action(),
+                store,
+                fb_config={},
+                max_photos=5,
+                removal_action="mark_sold",
+                log_dir=Path("/tmp"),
+                result=result,
+            )
+        self.assertEqual(seen["removal_action"], "delete")
 
     def test_remove_unverified_skips_create(self):
         page = MagicMock()

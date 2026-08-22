@@ -10,7 +10,8 @@ VALID_MODES = frozenset({"renew", "repost"})
 # Relist-first: both ISO weeks default to full delete+recreate.
 DEFAULT_EVEN_WEEK = "repost"
 DEFAULT_ODD_WEEK = "repost"
-DEFAULT_MIN_AGE_DAYS = 3
+DEFAULT_MIN_AGE_DAYS = 2.0
+DEFAULT_MAX_PER_ACCOUNT_PER_RUN = 25
 
 
 def resolve_weekly_bump_mode(
@@ -77,12 +78,12 @@ def weekly_bump_config(config: dict[str, Any] | None) -> dict[str, Any]:
             or renew.get("schedule")
             or ""
         ),
-        "min_age_days": int(min_age),
+        "min_age_days": float(min_age),
         "max_per_account_per_run": int(
             bump.get("max_per_account_per_run")
             if bump.get("max_per_account_per_run") is not None
             else repost.get("max_per_account_per_run")
             if repost.get("max_per_account_per_run") is not None
-            else 15
+            else DEFAULT_MAX_PER_ACCOUNT_PER_RUN
         ),
     }

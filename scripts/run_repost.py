@@ -73,7 +73,7 @@ def main() -> int:
         default=None,
         help=(
             "Min days since last post for --all-eligible "
-            "(default: 3 or config). Pass 0 to include listings posted in the last 1–7 days."
+            "(default: 2 or config; supports 1.5). Pass 0 to include fresh listings."
         ),
     )
     parser.add_argument(
@@ -82,12 +82,12 @@ def main() -> int:
         dest="max",
         type=int,
         default=None,
-        help="Max reposts per account this run (default: 15). --force does not lift this cap.",
+        help="Max reposts per account this run (default: 25). --force does not lift this cap.",
     )
     parser.add_argument(
         "--unlimited",
         action="store_true",
-        help="Ignore per-account cap (full shelf). Prefer daily --max-per-account 15.",
+        help="Ignore per-account cap (full shelf). Prefer daily --max-per-account 25.",
     )
     parser.add_argument(
         "--force",
@@ -107,7 +107,7 @@ def main() -> int:
     older_than = resolve_min_age_days(
         args.older_than,
         env_names=("REPOST_MIN_AGE_DAYS",),
-        config_default=int(repost_cfg.get("min_age_days", 3)),
+        config_default=float(repost_cfg.get("min_age_days", 2)),
         force=args.force,
     )
     max_per = resolve_max_per_account(
@@ -115,7 +115,7 @@ def main() -> int:
         older_than_days=older_than,
         force=args.force,
         env_name="REPOST_MAX_PER_ACCOUNT_PER_RUN",
-        config_default=int(repost_cfg.get("max_per_account_per_run", 15)),
+        config_default=int(repost_cfg.get("max_per_account_per_run", 25)),
         unlimited=args.unlimited,
     )
 

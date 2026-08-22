@@ -295,23 +295,17 @@ def remove_vehicle_listing(
     if _listing_already_gone(page, listing_url=listing_url, item_id=item_id):
         if must_purge and item_id:
             if _wait_until_item_gone_from_shelf(page, item_id):
-                print(
-                    f"  {autosell_id}: listing already gone and not on "
-                    f"selling shelf — treating as removed"
+                return _purge_orphan_mapping(
+                    "listing already gone and not on selling shelf"
                 )
-                return True
             print(
                 f"  {autosell_id}: detail looks gone/sold but card still on "
                 f"shelf — will delete listing (avoid FB duplicate)"
             )
         else:
-            print(f"  {autosell_id}: listing already sold/unavailable — treating as removed")
-            if require_verified and not _is_content_unavailable(page):
-                if not _verify_listing_removed(page, listing_url):
-                    if _is_content_unavailable(page) or _is_sold_or_deactivated(page):
-                        return True
-                    _assert_removed_or_raise(page, listing_url, autosell_id, log_dir)
-            return True
+            return _purge_orphan_mapping(
+                "listing already sold/unavailable on detail view"
+            )
 
     visitor_detail = _is_visitor_listing_view(page)
     owner_detail = _is_owner_listing_view(page)
@@ -350,14 +344,14 @@ def remove_vehicle_listing(
         print(f"  {autosell_id}: listing gone after detail remove")
         if must_purge and item_id:
             if _wait_until_item_gone_from_shelf(page, item_id):
-                return True
+                return _purge_orphan_mapping(
+                    "listing gone after detail remove and left selling shelf"
+                )
             print(
                 f"  {autosell_id}: still on selling shelf after detail remove"
             )
         else:
-            if require_verified and not _is_content_unavailable(page):
-                _assert_removed_or_raise(page, listing_url, autosell_id, log_dir)
-            return True
+            return _purge_orphan_mapping("listing gone after detail remove")
 
     # --- Fallback: selling shelf (scroll-loaded inventory) ---
     shelf_removed = False
@@ -388,7 +382,7 @@ def remove_vehicle_listing(
     if must_purge and item_id:
         if _wait_until_item_gone_from_shelf(page, item_id):
             print(f"  {autosell_id}: selling-shelf purge confirmed — safe to create")
-            return True
+            return _purge_orphan_mapping("verified delete — item left selling shelf")
         print(
             f"WARNING: {autosell_id}: listing still on selling shelf after delete "
             f"— SKIP_CREATE to avoid 'publicación duplicada'"
@@ -399,10 +393,7 @@ def remove_vehicle_listing(
     if _is_content_unavailable(page) or _listing_already_gone(
         page, listing_url=listing_url, item_id=item_id
     ):
-        print(f"  {autosell_id}: listing gone after selling-shelf remove")
-        if require_verified and not _is_content_unavailable(page):
-            _assert_removed_or_raise(page, listing_url, autosell_id, log_dir)
-        return True
+        return _purge_orphan_mapping("listing gone after selling-shelf remove")
 
     # Detail again after opening from selling
     try:

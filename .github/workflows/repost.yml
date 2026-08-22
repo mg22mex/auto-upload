@@ -23,7 +23,7 @@ on:
         default: false
         type: boolean
       max_per_account:
-        description: Max reposts per account (empty = 15)
+        description: Max reposts per account (empty = 25)
         required: false
         type: string
       account:
@@ -46,7 +46,7 @@ on:
 
 jobs:
   listing-bump:
-    name: Daily incremental bump (15/account, 3d+)
+    name: Daily incremental bump (25/account, 2d+)
     # Refuse any accidental non-schedule/manual dispatch (e.g. misadded push)
     if: >-
       github.event_name == 'schedule' ||
@@ -143,10 +143,10 @@ jobs:
       - name: Relist (repost) or optional renew
         env:
           AUTOSELL_BASE_URL: ${{ secrets.AUTOSELL_BASE_URL }}
-          RENEW_MIN_AGE_DAYS: ${{ secrets.RENEW_MIN_AGE_DAYS || secrets.REPOST_MIN_AGE_DAYS || '3' }}
-          REPOST_MIN_AGE_DAYS: ${{ secrets.REPOST_MIN_AGE_DAYS || secrets.RENEW_MIN_AGE_DAYS || '3' }}
-          RENEW_MAX_PER_ACCOUNT_PER_RUN: ${{ inputs.max_per_account || secrets.RENEW_MAX_PER_ACCOUNT_PER_RUN || '15' }}
-          REPOST_MAX_PER_ACCOUNT_PER_RUN: ${{ inputs.max_per_account || secrets.REPOST_MAX_PER_ACCOUNT_PER_RUN || '15' }}
+          RENEW_MIN_AGE_DAYS: ${{ secrets.RENEW_MIN_AGE_DAYS || secrets.REPOST_MIN_AGE_DAYS || '2' }}
+          REPOST_MIN_AGE_DAYS: ${{ secrets.REPOST_MIN_AGE_DAYS || secrets.RENEW_MIN_AGE_DAYS || '2' }}
+          RENEW_MAX_PER_ACCOUNT_PER_RUN: ${{ inputs.max_per_account || secrets.RENEW_MAX_PER_ACCOUNT_PER_RUN || '25' }}
+          REPOST_MAX_PER_ACCOUNT_PER_RUN: ${{ inputs.max_per_account || secrets.REPOST_MAX_PER_ACCOUNT_PER_RUN || '25' }}
           PYTHONUNBUFFERED: "1"
           FB_REPOST_BROWSER_EVERY: ${{ secrets.FB_REPOST_BROWSER_EVERY || '3' }}
           FB_RENEW_BROWSER_EVERY: ${{ secrets.FB_RENEW_BROWSER_EVERY || '10' }}
@@ -163,7 +163,7 @@ jobs:
           export PYTHONUNBUFFERED=1
           MAX_ARG="${{ inputs.max_per_account }}"
           if [ -z "$MAX_ARG" ]; then
-            MAX_ARG="${REPOST_MAX_PER_ACCOUNT_PER_RUN:-15}"
+            MAX_ARG="${REPOST_MAX_PER_ACCOUNT_PER_RUN:-25}"
           fi
 
           EXTRA=""

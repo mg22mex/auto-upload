@@ -1,4 +1,4 @@
-"""Unit tests — relist-first listing bump + 3-day age eligibility."""
+"""Unit tests — relist-first listing bump + 2-day age eligibility."""
 from __future__ import annotations
 
 import sys
@@ -15,6 +15,7 @@ from src.models import Vehicle
 from src.sync.repost import plan_repost_actions
 from src.sync.weekly_bump import (
     DEFAULT_EVEN_WEEK,
+    DEFAULT_MAX_PER_ACCOUNT_PER_RUN,
     DEFAULT_MIN_AGE_DAYS,
     DEFAULT_ODD_WEEK,
     resolve_weekly_bump_mode,
@@ -58,7 +59,8 @@ class TestResolveWeeklyBumpMode(unittest.TestCase):
     def test_defaults_are_repost_both_weeks(self):
         self.assertEqual(DEFAULT_EVEN_WEEK, "repost")
         self.assertEqual(DEFAULT_ODD_WEEK, "repost")
-        self.assertEqual(DEFAULT_MIN_AGE_DAYS, 3)
+        self.assertEqual(DEFAULT_MIN_AGE_DAYS, 2.0)
+        self.assertEqual(DEFAULT_MAX_PER_ACCOUNT_PER_RUN, 25)
 
     def test_even_iso_week_is_repost(self):
         # 2026-08-09 is Sunday of ISO week 32 (even)
@@ -112,9 +114,9 @@ class TestWeeklyBumpConfig(unittest.TestCase):
         cfg = weekly_bump_config({})
         self.assertEqual(cfg["even_week"], "repost")
         self.assertEqual(cfg["odd_week"], "repost")
-        self.assertEqual(cfg["min_age_days"], 3)
+        self.assertEqual(cfg["min_age_days"], 2.0)
         self.assertEqual(cfg["timezone"], "America/Chihuahua")
-        self.assertEqual(cfg["max_per_account_per_run"], 15)
+        self.assertEqual(cfg["max_per_account_per_run"], 25)
 
     def test_reads_nested(self):
         cfg = weekly_bump_config(
@@ -123,31 +125,31 @@ class TestWeeklyBumpConfig(unittest.TestCase):
                     "weekly_bump": {
                         "even_week": "renew",
                         "odd_week": "repost",
-                        "min_age_days": 4,
+                        "min_age_days": 1.5,
                         "timezone": "UTC",
                     }
                 }
             }
         )
         self.assertEqual(cfg["even_week"], "renew")
-        self.assertEqual(cfg["min_age_days"], 4)
+        self.assertEqual(cfg["min_age_days"], 1.5)
         self.assertEqual(cfg["timezone"], "UTC")
 
     def test_min_age_falls_back_to_repost_section(self):
-        cfg = weekly_bump_config({"sync": {"repost": {"min_age_days": 3}}})
-        self.assertEqual(cfg["min_age_days"], 3)
+        cfg = weekly_bump_config({"sync": {"repost": {"min_age_days": 2}}})
+        self.assertEqual(cfg["min_age_days"], 2.0)
 
 
 class TestPlanRepostAgeFilter(unittest.TestCase):
-    """Listings older than 3 days → repost action; fresher skipped."""
+    """Listings older than min age → repost action; fresher skipped."""
 
-    def test_eligible_at_3_days_gets_repost(self):
+    def test_eligible_at_2_days_gets_repost(self):
         now = datetime.now(timezone.utc)
         live = [
             _listing(
                 "obj_old",
                 "account_1",
-                posted_at=(now - timedelta(days=3, hours=1)).isoformat(),
+                posted_at=(now - timedelta(days=2, hours=1)).isoformat(),
             ),
             _listing(
                 "obj_new",
@@ -161,7 +163,7 @@ class TestPlanRepostAgeFilter(unittest.TestCase):
             ["account_1"],
             live,
             all_eligible=True,
-            older_than_days=3,
+            older_than_days=2,
             max_per_account=10,
             is_on_hold=lambda *_: False,
             action_name="repost",
@@ -169,15 +171,15 @@ class TestPlanRepostAgeFilter(unittest.TestCase):
         ids = {a.autosell_id for a in actions}
         self.assertEqual(ids, {"obj_old"})
         self.assertTrue(all(a.action == "repost" for a in actions))
-        self.assertTrue(any("obj_new" in line and "min 3d" in line for line in skipped))
+        self.assertTrue(any("obj_new" in line and "min 2d" in line for line in skipped))
 
-    def test_exactly_3_days_is_eligible(self):
+    def test_exactly_2_days_is_eligible(self):
         now = datetime.now(timezone.utc)
         live = [
             _listing(
                 "obj_edge",
                 "account_1",
-                posted_at=(now - timedelta(days=3)).isoformat(),
+                posted_at=(now - timedelta(days=2)).isoformat(),
             ),
         ]
         actions, skipped = plan_repost_actions(
@@ -194,13 +196,39 @@ class TestPlanRepostAgeFilter(unittest.TestCase):
         self.assertEqual(actions[0].action, "repost")
         self.assertEqual(skipped, [])
 
-    def test_default_older_than_is_3_days(self):
+    def test_one_point_five_days_floor(self):
+        now = datetime.now(timezone.utc)
+        live = [
+            _listing(
+                "obj_ok",
+                "account_1",
+                posted_at=(now - timedelta(hours=40)).isoformat(),
+            ),
+            _listing(
+                "obj_young",
+                "account_1",
+                posted_at=(now - timedelta(hours=24)).isoformat(),
+            ),
+        ]
+        actions, skipped = plan_repost_actions(
+            [_vehicle("obj_ok"), _vehicle("obj_young")],
+            ["account_1"],
+            live,
+            all_eligible=True,
+            older_than_days=1.5,
+            max_per_account=10,
+            is_on_hold=lambda *_: False,
+        )
+        self.assertEqual({a.autosell_id for a in actions}, {"obj_ok"})
+        self.assertTrue(any("obj_young" in line and "min 1.5d" in line for line in skipped))
+
+    def test_default_older_than_is_2_days(self):
         now = datetime.now(timezone.utc)
         live = [
             _listing(
                 "obj_a",
                 "account_1",
-                posted_at=(now - timedelta(days=3, minutes=5)).isoformat(),
+                posted_at=(now - timedelta(days=2, minutes=5)).isoformat(),
             ),
         ]
         actions, _ = plan_repost_actions(
@@ -228,7 +256,7 @@ class TestPlanRepostAgeFilter(unittest.TestCase):
             ["account_1"],
             live,
             all_eligible=True,
-            older_than_days=3,
+            older_than_days=2,
             max_per_account=5,
             is_on_hold=lambda aid, acct: aid == "obj_hold",
             action_name="repost",
@@ -298,7 +326,7 @@ class TestPlanRepostAgeFilter(unittest.TestCase):
             ["account_1"],
             live,
             all_eligible=True,
-            older_than_days=3,
+            older_than_days=2,
             max_per_account=2,
             is_on_hold=lambda *_: False,
         )
@@ -334,9 +362,9 @@ class TestResolveMaxPerAccount(unittest.TestCase):
                 older_than_days=0,
                 force=True,
                 env_name="REPOST_MAX_PER_ACCOUNT_PER_RUN_UNSET_XYZ",
-                config_default=15,
+                config_default=25,
             ),
-            15,
+            25,
         )
 
     def test_unlimited_flag(self):
@@ -345,10 +373,10 @@ class TestResolveMaxPerAccount(unittest.TestCase):
         self.assertEqual(
             resolve_max_per_account(
                 None,
-                older_than_days=3,
+                older_than_days=2,
                 force=False,
                 env_name="REPOST_MAX_PER_ACCOUNT_PER_RUN_UNSET_XYZ",
-                config_default=15,
+                config_default=25,
                 unlimited=True,
             ),
             UNLIMITED_PER_ACCOUNT,
@@ -360,16 +388,26 @@ class TestResolveMinAgeDays(unittest.TestCase):
         from src.sync.repost import resolve_min_age_days
 
         self.assertEqual(
-            resolve_min_age_days("0", config_default=3, force=False),
-            0,
+            resolve_min_age_days("0", config_default=2, force=False),
+            0.0,
         )
 
     def test_force_zeros_age(self):
         from src.sync.repost import resolve_min_age_days
 
         self.assertEqual(
-            resolve_min_age_days("7", config_default=3, force=True),
-            0,
+            resolve_min_age_days("7", config_default=2, force=True),
+            0.0,
+        )
+
+    def test_parses_fractional_days(self):
+        from src.sync.repost import parse_older_than_days, resolve_min_age_days
+
+        self.assertEqual(parse_older_than_days("1.5"), 1.5)
+        self.assertEqual(parse_older_than_days("1.5d"), 1.5)
+        self.assertEqual(
+            resolve_min_age_days("1.5", config_default=2, force=False),
+            1.5,
         )
 
 

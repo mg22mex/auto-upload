@@ -18,7 +18,14 @@ from src.facebook.session import (
     resolve_session_dir,
     session_health_report,
 )
-from src.facebook.util import ensure_log_dir, env_bool, env_float, env_int, env_str, random_delay
+from src.facebook.util import (
+    ensure_log_dir,
+    env_bool,
+    env_float,
+    env_int,
+    env_str,
+    random_delay,
+)
 from src.models import SyncAction
 from src.store.db import SyncStore
 
@@ -253,61 +260,84 @@ def _repost_one(
     if not old_url:
         row = store.get_fb_listing(action.autosell_id, account_id)
         old_url = row["fb_listing_url"] if row else None
-    if not old_url:
-        raise FacebookAutomationError("No fb_listing_url for repost")
+
+    # Force hard-delete on the repost path (mark_sold alone often triggers
+    # Facebook's "publicación duplicada" when re-creating the same vehicle).
+    action_norm = (removal_action or "delete").strip().lower()
+    if action_norm not in ("delete", "mark_sold"):
+        action_norm = "delete"
+    if action_norm != "delete":
+        print(
+            f"WARNING: {action.autosell_id}: repost coerced removal_action "
+            f"{action_norm!r} → delete (avoid duplicate listing flag)"
+        )
+        action_norm = "delete"
 
     print(
         f"Repost {action.autosell_id}: remove-then-create "
-        f"(action={removal_action}, old={old_url})"
+        f"(action={action_norm}, old={old_url or 'none'})"
     )
 
-    # --- Phase 1: remove (must succeed); do NOT create on failure ---
     removed = False
-    try:
-        ok = remove_vehicle_listing(
-            page,
-            old_url,
-            autosell_id=action.autosell_id,
-            removal_action=removal_action,
-            log_dir=log_dir,
-            require_verified=True,
-            store=store,
-            account_id=account_id,
+    if not old_url:
+        # Orphan / missing mapping — free the slot and proceed to create.
+        print(
+            f"WARNING: {action.autosell_id}: no fb_listing_url — treating as "
+            f"already gone; clearing sync.db slot before create"
         )
-        if not ok:
-            # Soft skip: controls not found / unverified — continue queue, no create.
-            print(
-                f"WARNING: {action.autosell_id}: remove not confirmed — "
-                f"SKIP_CREATE (soft); continuing remaining queue "
-                f"(will not post a duplicate)"
-            )
-            return
-        removed = True
-        # Clear old URL so a mid-create crash is not treated as still live.
         store.mark_fb_listing_removed(
             action.autosell_id,
             account_id,
             clear_url=True,
         )
-        print(
-            f"  {action.autosell_id}: old listing cleared in sync.db "
-            f"(status=removed, url=null)"
-        )
-        dismiss_overlays(page)
-    except Exception as exc:
-        if is_browser_dead(exc):
-            raise
-        # Explicit: never fall through to create
-        raise FacebookPostingError(
-            f"SKIP_CREATE: could not remove old listing for "
-            f"{action.autosell_id} before repost: {exc}"
-        ) from exc
+        removed = True
+    else:
+        # --- Phase 1: remove (must succeed); do NOT create on failure ---
+        try:
+            ok = remove_vehicle_listing(
+                page,
+                old_url,
+                autosell_id=action.autosell_id,
+                removal_action=action_norm,
+                log_dir=log_dir,
+                require_verified=True,
+                store=store,
+                account_id=account_id,
+            )
+            if not ok:
+                # Soft skip: controls not found / unverified — continue queue, no create.
+                print(
+                    f"WARNING: {action.autosell_id}: remove not confirmed — "
+                    f"SKIP_CREATE (soft); continuing remaining queue "
+                    f"(will not post a duplicate)"
+                )
+                return
+            removed = True
+            # Clear old URL so a mid-create crash is not treated as still live.
+            store.mark_fb_listing_removed(
+                action.autosell_id,
+                account_id,
+                clear_url=True,
+            )
+            print(
+                f"  {action.autosell_id}: old listing cleared in sync.db "
+                f"(status=removed, url=null)"
+            )
+            dismiss_overlays(page)
+        except Exception as exc:
+            if is_browser_dead(exc):
+                raise
+            # Explicit: never fall through to create
+            raise FacebookPostingError(
+                f"SKIP_CREATE: could not remove old listing for "
+                f"{action.autosell_id} before repost: {exc}"
+            ) from exc
 
     # Title/model match across all selling tabs — not only the old item id.
     if not ensure_no_matching_shelf_listings(
         page,
         action.vehicle,
-        item_id=extract_item_id(old_url),
+        item_id=extract_item_id(old_url) if old_url else None,
         autosell_id=action.autosell_id,
     ):
         print(
@@ -315,6 +345,17 @@ def _repost_one(
             f"selling shelf — SKIP_CREATE (will not post a duplicate)"
         )
         return
+
+    # Safety cooldown: let FB settle index after verified delete before create.
+    cooldown = env_float("REPOST_DELETE_COOLDOWN_SEC", 7.0)
+    if cooldown > 0:
+        low = max(5.0, cooldown * 0.85)
+        high = max(low, cooldown * 1.25)
+        print(
+            f"  {action.autosell_id}: delete→create cooldown "
+            f"{low:.1f}–{high:.1f}s (REPOST_DELETE_COOLDOWN_SEC={cooldown})"
+        )
+        random_delay(low, high)
 
     # --- Phase 2: create only after verified remove ---
     try:

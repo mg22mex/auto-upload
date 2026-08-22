@@ -10,7 +10,7 @@ Sync [autosell.mx](https://www.autosell.mx) public catalog to **Facebook Marketp
 - **Marketplace WhatsApp CTAs:** Live in description builder. Branch-mapped `wa.me` links appended to every FB listing text.
 - **Meta Messenger webhook:** `[WIP - Paused awaiting Fanpage Administrator permissions]`. Code complete; Page token / webhook subscription pending Fanpage admin.
 - **Scrape, diff & FB posting:** Live (`DRY_RUN=false`) for **account_1** and **account_2**. **account_3** excluded until old listings cleared.
-- **Listing bump:** Daily incremental **full relist/repost** for listings ≥ **3 days** old (`scripts/run_weekly_bump.py`). Native Renovar optional via `--mode renew`.
+- **Listing bump:** Daily incremental **full relist/repost** for listings ≥ **2 days** old (`scripts/run_weekly_bump.py`; 25 slots/account). Native Renovar optional via `--mode renew`.
 - **Odoo inventory sync:** Live. Catalog → upsert `product.template` (`default_code = autosell_id`); website-missing SKUs marked **sold** then soft-archived (`active=False`).
 - **CRM attribution:** Leads tagged **`MG Quote Lead`**; `medium_id` / `source_id` mapped by channel (WhatsApp Marketplace, Inbound Call, Autosell Web). Native Odoo WhatsApp templates remain **paused** (`ODOO_WA_ACCOUNT_*` unset).
 
