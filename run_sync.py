@@ -228,12 +228,22 @@ def main() -> int:
         nargs="+",
         help="Limit sync to these account ids (e.g. account_2). Default: all in config.yaml",
     )
+    parser.add_argument(
+        "--skip-odoo",
+        action="store_true",
+        help=(
+            "Fast FB debug: skip live autosell scrape when no --from-snapshot; "
+            "load data/catalog_latest.json. Odoo inventory sync is a separate step "
+            "(also skipped when SKIP_ODOO=true in workflows / weekly bump)."
+        ),
+    )
     args = parser.parse_args()
 
     load_dotenv(ROOT / ".env")
     config = load_config(ROOT / args.config)
 
     dry_run = env_bool("DRY_RUN", True) if args.dry_run is None else args.dry_run
+    skip_odoo = bool(args.skip_odoo) or env_bool("SKIP_ODOO", False)
     db_path = os.getenv("DB_PATH", "data/sync.db")
     snapshot_dir = Path(os.getenv("SNAPSHOT_DIR", "data/snapshots"))
     output_path = Path(args.output)
@@ -260,6 +270,12 @@ def main() -> int:
 
     try:
         if args.scrape_only:
+            if skip_odoo:
+                print(
+                    "SKIP_ODOO set with --scrape-only: still scraping autosell "
+                    "(Odoo sync is a separate workflow step)",
+                    flush=True,
+                )
             run_scrape(config, output_path, snapshot_dir)
             return 0
 
@@ -268,6 +284,35 @@ def main() -> int:
             if not snapshot_path.is_file():
                 print(f"Snapshot not found: {snapshot_path}", file=sys.stderr)
                 return 1
+            if skip_odoo:
+                print(
+                    f"SKIP_ODOO: using snapshot {snapshot_path} "
+                    "(no live scrape; Odoo inventory sync skipped upstream)",
+                    flush=True,
+                )
+            vehicles = load_catalog_snapshot(snapshot_path)
+            print(f"Loaded {len(vehicles)} vehicles from {snapshot_path}")
+            return run_sync_from_catalog(
+                vehicles,
+                config,
+                db_path=db_path,
+                dry_run=dry_run,
+                max_posts=max_posts,
+                account_ids=account_ids,
+            )
+
+        if skip_odoo:
+            snapshot_path = output_path if output_path.is_file() else Path("data/catalog_latest.json")
+            if not snapshot_path.is_file():
+                print(
+                    f"SKIP_ODOO: cached catalog not found: {snapshot_path}",
+                    file=sys.stderr,
+                )
+                return 1
+            print(
+                f"SKIP_ODOO: using cached catalog {snapshot_path} (no live scrape)",
+                flush=True,
+            )
             vehicles = load_catalog_snapshot(snapshot_path)
             print(f"Loaded {len(vehicles)} vehicles from {snapshot_path}")
             return run_sync_from_catalog(

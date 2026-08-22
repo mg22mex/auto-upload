@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from src.facebook.util import ensure_unbuffered_stdio
+from src.facebook.util import ensure_unbuffered_stdio, env_bool
 from src.sync.process_lock import ProcessLock
 from src.sync.weekly_bump import resolve_weekly_bump_mode, weekly_bump_config
 
@@ -30,6 +30,11 @@ def _run(cmd: list[str]) -> int:
     return int(result.returncode)
 
 
+def skip_odoo_requested(*, cli: bool = False) -> bool:
+    """True when CLI ``--skip-odoo`` or ``SKIP_ODOO`` env is set."""
+    return bool(cli) or env_bool("SKIP_ODOO", False)
+
+
 def run_catalog_sync(
     *,
     catalog: str,
@@ -37,9 +42,22 @@ def run_catalog_sync(
     dry_run: bool,
     accounts: list[str] | None,
     scrape: bool,
+    skip_odoo: bool = False,
 ) -> int:
-    """Autosell scrape → Odoo inventory → Facebook creates for missing catalog rows."""
+    """Autosell scrape → Odoo inventory → Facebook creates for missing catalog rows.
+
+    ``skip_odoo`` / ``SKIP_ODOO`` skips XML-RPC inventory sync and uses the local
+    catalog snapshot only (fast FB debug path).
+    """
     print("=== Catalog sync (before listing bump) ===", flush=True)
+    if skip_odoo:
+        print("SKIP_ODOO: bypassing Odoo inventory sync (local catalog only)", flush=True)
+        catalog_path = ROOT / catalog
+        if not catalog_path.is_file():
+            print(f"Catalog not found: {catalog_path}", file=sys.stderr, flush=True)
+            return 1
+        scrape = False
+
     if scrape:
         rc = _run(
             [
@@ -61,7 +79,7 @@ def run_catalog_sync(
         if src.is_file():
             dest.write_bytes(src.read_bytes())
 
-    if os.getenv("ODOO_URL") or os.getenv("ODOO_DB"):
+    if not skip_odoo and (os.getenv("ODOO_URL") or os.getenv("ODOO_DB")):
         odoo_rc = _run(
             [
                 sys.executable,
@@ -85,6 +103,8 @@ def run_catalog_sync(
         catalog,
         "--dry-run" if dry_run else "--no-dry-run",
     ]
+    if skip_odoo:
+        sync_cmd.append("--skip-odoo")
     if accounts:
         sync_cmd.extend(["--accounts", *accounts])
     return _run(sync_cmd)
@@ -157,6 +177,14 @@ def main() -> int:
         "--skip-scrape",
         action="store_true",
         help="With catalog sync, reuse existing catalog JSON (no autosell.mx fetch)",
+    )
+    parser.add_argument(
+        "--skip-odoo",
+        action="store_true",
+        help=(
+            "Skip Odoo XML-RPC inventory sync; use local catalog_latest.json only "
+            "(also set by SKIP_ODOO=true). Implies no autosell scrape in catalog sync."
+        ),
     )
     parser.add_argument("--dry-run", action="store_true", help="Plan only")
     parser.add_argument("--catalog", default="data/catalog_latest.json")
@@ -249,13 +277,16 @@ def _run_bump(args, config: dict, bump: dict, repost_cfg: dict) -> int:
     if do_sync is None:
         do_sync = bool(args.all_eligible)
 
+    skip_odoo = skip_odoo_requested(cli=bool(args.skip_odoo))
+
     if do_sync:
         sync_rc = run_catalog_sync(
             catalog=args.catalog,
             config_path=args.config,
             dry_run=args.dry_run,
             accounts=args.account,
-            scrape=not args.skip_scrape,
+            scrape=not args.skip_scrape and not skip_odoo,
+            skip_odoo=skip_odoo,
         )
         if sync_rc:
             print(
@@ -295,6 +326,7 @@ def _run_bump(args, config: dict, bump: dict, repost_cfg: dict) -> int:
     print("=== Listing bump (daily incremental) ===", flush=True)
     print(f"Mode:      {mode} ({'forced' if force else 'auto config'})", flush=True)
     print(f"Timezone:  {bump['timezone']}", flush=True)
+    print(f"Skip Odoo: {skip_odoo}", flush=True)
     print(f"Force:     {args.force}", flush=True)
     print(f"Max/acct:  {'unlimited' if args.unlimited else max_per}", flush=True)
     print(

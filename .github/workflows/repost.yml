@@ -43,6 +43,11 @@ on:
         description: Min days since last post (0 = include listings from the last 1–7 days). Empty = config
         required: false
         type: string
+      skip_odoo:
+        description: "Skip Odoo fetch (Use local cached catalog_latest.json)"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   listing-bump:
@@ -96,6 +101,7 @@ jobs:
           ln -s ~/auto-upload-data/sessions sessions
 
       - name: Scrape autosell.mx (fresh catalog for eligibility)
+        if: ${{ inputs.skip_odoo != true }}
         env:
           AUTOSELL_BASE_URL: ${{ secrets.AUTOSELL_BASE_URL }}
         run: |
@@ -104,7 +110,17 @@ jobs:
           mkdir -p data/snapshots
           cp -f data/catalog_latest.json data/snapshots/catalog_latest.json
 
+      - name: Use cached catalog (skip scrape + Odoo)
+        if: ${{ inputs.skip_odoo == true }}
+        run: |
+          set -eux
+          test -f data/catalog_latest.json
+          mkdir -p data/snapshots
+          cp -f data/catalog_latest.json data/snapshots/catalog_latest.json
+          echo "SKIP_ODOO: using cached catalog ($(wc -c < data/catalog_latest.json) bytes)"
+
       - name: Sync Odoo product inventory
+        if: ${{ inputs.skip_odoo != true }}
         env:
           ODOO_URL: ${{ secrets.ODOO_URL }}
           ODOO_DB: ${{ secrets.ODOO_DB }}
@@ -156,6 +172,7 @@ jobs:
           FB_HEADLESS: ${{ secrets.FB_HEADLESS || 'true' }}
           DB_PATH: data/sync.db
           WEEKLY_BUMP_MODE: ${{ inputs.mode || secrets.WEEKLY_BUMP_MODE || 'auto' }}
+          SKIP_ODOO: ${{ inputs.skip_odoo == true && 'true' || 'false' }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
@@ -189,13 +206,17 @@ jobs:
           if [ -n "${{ inputs.min_age_days }}" ]; then
             AGE_ARGS=(--min-age-days "${{ inputs.min_age_days }}")
           fi
+          SKIP_ODOO_ARGS=()
+          if [ "${{ inputs.skip_odoo }}" = "true" ]; then
+            SKIP_ODOO_ARGS=(--skip-odoo)
+          fi
           if [ -n "${{ inputs.ids }}" ]; then
             python -u scripts/run_weekly_bump.py --mode "$MODE" \
-              "${ACCOUNT_ARGS[@]}" "${FORCE_ARGS[@]}" "${AGE_ARGS[@]}" \
+              "${ACCOUNT_ARGS[@]}" "${FORCE_ARGS[@]}" "${AGE_ARGS[@]}" "${SKIP_ODOO_ARGS[@]}" \
               --max-per-account "$MAX_ARG" \
               --ids "${{ inputs.ids }}" $EXTRA
           else
             python -u scripts/run_weekly_bump.py --mode "$MODE" \
-              "${ACCOUNT_ARGS[@]}" "${FORCE_ARGS[@]}" "${AGE_ARGS[@]}" \
+              "${ACCOUNT_ARGS[@]}" "${FORCE_ARGS[@]}" "${AGE_ARGS[@]}" "${SKIP_ODOO_ARGS[@]}" \
               --all-eligible --skip-scrape --max-per-account "$MAX_ARG" $EXTRA
           fi

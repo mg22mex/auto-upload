@@ -6,6 +6,12 @@ on:
     - cron: "0 14 * * *"
     - cron: "0 18 * * *"
   workflow_dispatch:
+    inputs:
+      skip_odoo:
+        description: "Skip Odoo fetch (Use local cached catalog_latest.json)"
+        required: false
+        type: boolean
+        default: false
 
 # autosell.mx blocks or ignores GitHub-hosted runner IP ranges (connect timeout).
 # Scrape + diff + Facebook all run on the self-hosted fb-worker.
@@ -60,6 +66,7 @@ jobs:
           ln -s ~/auto-upload-data/sessions sessions
 
       - name: Scrape autosell.mx public catalog
+        if: ${{ inputs.skip_odoo != true }}
         env:
           AUTOSELL_BASE_URL: ${{ secrets.AUTOSELL_BASE_URL }}
         run: |
@@ -68,7 +75,17 @@ jobs:
           mkdir -p data/snapshots
           cp -f data/catalog_latest.json data/snapshots/catalog_latest.json
 
+      - name: Use cached catalog (skip scrape + Odoo)
+        if: ${{ inputs.skip_odoo == true }}
+        run: |
+          set -eux
+          test -f data/catalog_latest.json
+          mkdir -p data/snapshots
+          cp -f data/catalog_latest.json data/snapshots/catalog_latest.json
+          echo "SKIP_ODOO: using cached catalog ($(wc -c < data/catalog_latest.json) bytes)"
+
       - name: Sync Odoo product inventory
+        if: ${{ inputs.skip_odoo != true }}
         env:
           ODOO_URL: ${{ secrets.ODOO_URL }}
           ODOO_DB: ${{ secrets.ODOO_DB }}
@@ -83,6 +100,7 @@ jobs:
         env:
           AUTOSELL_BASE_URL: ${{ secrets.AUTOSELL_BASE_URL }}
           DRY_RUN: ${{ secrets.DRY_RUN || 'false' }}
+          SKIP_ODOO: ${{ inputs.skip_odoo == true && 'true' || 'false' }}
           MAX_POSTS_PER_ACCOUNT_PER_RUN: ${{ secrets.MAX_POSTS_PER_ACCOUNT_PER_RUN || '3' }}
           FB_ACTION_DELAY_MIN_SEC: ${{ secrets.FB_ACTION_DELAY_MIN_SEC || '60' }}
           FB_ACTION_DELAY_MAX_SEC: ${{ secrets.FB_ACTION_DELAY_MAX_SEC || '120' }}
@@ -92,7 +110,13 @@ jobs:
           SNAPSHOT_DIR: data/snapshots
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python run_sync.py --from-snapshot data/catalog_latest.json
+        run: |
+          set -eux
+          EXTRA=()
+          if [ "${{ inputs.skip_odoo }}" = "true" ]; then
+            EXTRA=(--skip-odoo)
+          fi
+          python run_sync.py --from-snapshot data/catalog_latest.json "${EXTRA[@]}"
 
       - name: Upload catalog snapshot artifact
         if: always()
