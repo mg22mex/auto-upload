@@ -305,15 +305,15 @@ def _repost_one(
                 account_id=account_id,
             )
             if not ok:
-                # Soft skip: controls not found / unverified — continue queue, no create.
+                # Hard halt: unconfirmed remove — never create, never purge mapping.
                 print(
-                    f"WARNING: {action.autosell_id}: remove not confirmed — "
-                    f"SKIP_CREATE (soft); continuing remaining queue "
-                    f"(will not post a duplicate)"
+                    f"WARNING: {action.autosell_id}: remove FAILED / UNCONFIRMED — "
+                    f"SKIP_CREATE (will not post a duplicate; sync.db URL kept)"
                 )
                 return
             removed = True
-            # Clear old URL so a mid-create crash is not treated as still live.
+            # Clear old URL only after remove_vehicle_listing returned True
+            # (DOM-confirmed delete or unavailable+thorough shelf absence).
             store.mark_fb_listing_removed(
                 action.autosell_id,
                 account_id,
@@ -339,17 +339,19 @@ def _repost_one(
         action.vehicle,
         item_id=extract_item_id(old_url) if old_url else None,
         autosell_id=action.autosell_id,
+        max_passes=2,
     ):
         print(
             f"WARNING: {action.autosell_id}: matching listing still on "
             f"selling shelf — SKIP_CREATE (will not post a duplicate)"
         )
+        # Do not leave a purged mapping if a live card is still present.
         return
 
     # Safety cooldown: let FB settle index after verified delete before create.
-    cooldown = env_float("REPOST_DELETE_COOLDOWN_SEC", 7.0)
+    cooldown = env_float("REPOST_DELETE_COOLDOWN_SEC", 3.0)
     if cooldown > 0:
-        low = max(5.0, cooldown * 0.85)
+        low = max(1.5, cooldown * 0.85)
         high = max(low, cooldown * 1.25)
         print(
             f"  {action.autosell_id}: delete→create cooldown "

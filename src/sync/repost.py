@@ -89,7 +89,7 @@ def plan_repost_actions(
     explicit_ids: set[str] | None = None,
     all_eligible: bool = False,
     older_than_days: float = DEFAULT_REPOST_MIN_AGE_DAYS,
-    max_per_account: int = 10,
+    max_per_account: int = 3,
     is_on_hold,
     force: bool = False,
     action_name: str = "repost",

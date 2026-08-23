@@ -255,6 +255,22 @@ def remove_vehicle_listing(
     )
 
     def _purge_orphan_mapping(reason: str) -> bool:
+        # Modern selling UI lists cards via "Más opciones para {title}" with
+        # zero /marketplace/item/ anchors. Absence of item_id links must NOT
+        # clear sync.db (false "already gone" → lost mappings / duplicates).
+        if must_purge:
+            try:
+                page.goto(SELLING_URL, wait_until="domcontentloaded", timeout=90_000)
+                page.wait_for_timeout(2_000)
+            except Exception:
+                pass
+            if _shelf_title_ui_without_item_links(page):
+                print(
+                    f"WARNING: {autosell_id}: refusing orphan purge ({reason}) — "
+                    f"selling shelf has title menus but no item links; "
+                    f"use title-menu delete instead of sync.db clear"
+                )
+                return False
         print(
             f"WARNING: {autosell_id}: {reason} — treating as already "
             f"deleted/unavailable; purging sync.db mapping"
@@ -282,11 +298,17 @@ def remove_vehicle_listing(
         print(f"  {autosell_id}: listing URL navigation failed ({exc}) — checking if gone")
 
     if _is_content_unavailable(page):
-        if must_purge and item_id and _item_on_any_selling_shelf(page, item_id):
-            print(
-                f"  {autosell_id}: detail unavailable but item still on "
-                f"selling shelf — will delete from shelf"
-            )
+        if must_purge and item_id:
+            if _item_on_active_selling_shelf(page, item_id):
+                print(
+                    f"  {autosell_id}: detail unavailable but item still on "
+                    f"selling shelf — will delete from shelf"
+                )
+            else:
+                return _purge_orphan_mapping(
+                    "listing content isn't available and not on selling shelf "
+                    "(already deleted/unavailable)"
+                )
         else:
             return _purge_orphan_mapping(
                 "listing content isn't available (already deleted/unavailable)"
@@ -294,7 +316,7 @@ def remove_vehicle_listing(
 
     if _listing_already_gone(page, listing_url=listing_url, item_id=item_id):
         if must_purge and item_id:
-            if _wait_until_item_gone_from_shelf(page, item_id):
+            if not _item_on_active_selling_shelf(page, item_id):
                 return _purge_orphan_mapping(
                     "listing already gone and not on selling shelf"
                 )
@@ -343,7 +365,7 @@ def remove_vehicle_listing(
     ):
         print(f"  {autosell_id}: listing gone after detail remove")
         if must_purge and item_id:
-            if _wait_until_item_gone_from_shelf(page, item_id):
+            if not _item_on_active_selling_shelf(page, item_id):
                 return _purge_orphan_mapping(
                     "listing gone after detail remove and left selling shelf"
                 )
@@ -354,40 +376,61 @@ def remove_vehicle_listing(
             return _purge_orphan_mapping("listing gone after detail remove")
 
     # --- Fallback: selling shelf (scroll-loaded inventory) ---
+    # After a failed detail delete: thorough find + delete. Never treat a
+    # shallow "not found" as success (lazy-load false negative → duplicates).
     shelf_removed = False
     if item_id:
         try:
             print(f"  {autosell_id}: trying selling-shelf removal for item {item_id}")
             if _remove_from_selling_shelf(
-                page, item_id, action=action, confirm_gone=must_purge
+                page,
+                item_id,
+                action=action,
+                confirm_gone=must_purge,
+                quick=False,
             ):
                 shelf_removed = True
-                page.wait_for_timeout(2_000)
+                page.wait_for_timeout(1_000)
             elif action == "delete" and not must_purge:
                 print(f"  {autosell_id}: selling-shelf retry with mark_sold")
-                if _remove_from_selling_shelf(page, item_id, action="mark_sold"):
+                if _remove_from_selling_shelf(
+                    page, item_id, action="mark_sold", quick=False
+                ):
                     shelf_removed = True
-                    page.wait_for_timeout(2_000)
+                    page.wait_for_timeout(1_000)
         except Exception as exc:
             last_error = exc
             print(f"  {autosell_id}: selling-shelf remove failed: {exc}")
 
-    # Visitor chrome + not on selling shelf → orphan / already-deleted URL.
+    # Visitor chrome + thorough shelf absence → orphan / already-deleted URL.
     if saw_visitor_only and item_id and not shelf_removed:
-        if not _item_on_any_selling_shelf(page, item_id):
+        if not _item_on_active_selling_shelf(page, item_id):
             return _purge_orphan_mapping(
                 "visitor/buyer detail chrome and item not found on selling shelf"
             )
 
     if must_purge and item_id:
-        if _wait_until_item_gone_from_shelf(page, item_id):
+        # Only purge sync.db after verified shelf delete, or detail dead +
+        # thorough shelf absence (never on a shallow first-paint miss).
+        if shelf_removed:
             print(f"  {autosell_id}: selling-shelf purge confirmed — safe to create")
-            return _purge_orphan_mapping("verified delete — item left selling shelf")
-        print(
-            f"WARNING: {autosell_id}: listing still on selling shelf after delete "
-            f"— SKIP_CREATE to avoid 'publicación duplicada'"
+            return _purge_orphan_mapping(
+                "verified delete — item left selling shelf"
+            )
+
+        detail_dead = _is_content_unavailable(page) or _listing_already_gone(
+            page, listing_url=listing_url, item_id=item_id
         )
-        _save_debug(page, log_dir, autosell_id, "remove_still_on_shelf")
+        if detail_dead and not _item_on_active_selling_shelf(page, item_id):
+            return _purge_orphan_mapping(
+                "detail unavailable and thorough shelf search found no card"
+            )
+
+        print(
+            f"WARNING: {autosell_id}: removal UNCONFIRMED after detail+shelf "
+            f"attempts — SKIP_CREATE to avoid 'publicación duplicada' (FAILED)"
+        )
+        _save_debug(page, log_dir, autosell_id, "remove_unconfirmed")
         return False
 
     if _is_content_unavailable(page) or _listing_already_gone(
@@ -480,9 +523,34 @@ def _item_on_any_selling_shelf(page: Page, item_id: str) -> bool:
             page.wait_for_timeout(2_000)
         except Exception:
             continue
-        if _find_item_link_scrolled(page, item_id) is not None:
+        if _find_item_link_scrolled(page, item_id, max_scrolls=12) is not None:
             return True
     return False
+
+
+def _item_on_active_selling_shelf(
+    page: Page, item_id: str, *, max_scrolls: int = 12
+) -> bool:
+    """Thorough search of *active* selling shelves with forced lazy-load scroll.
+
+    A shallow first-paint miss must NOT be treated as "already gone" — FB
+    virtualizes the selling list, so we scroll until the card appears or the
+    scroll budget is exhausted.
+    """
+    for shelf in _ACTIVE_SELLING_SHELVES:
+        try:
+            page.goto(shelf, wait_until="domcontentloaded", timeout=45_000)
+            page.wait_for_timeout(2_000)
+        except Exception:
+            continue
+        if _find_item_link_scrolled(page, item_id, max_scrolls=max_scrolls) is not None:
+            return True
+    return False
+
+
+def _item_on_selling_shelf_quick(page: Page, item_id: str) -> bool:
+    """Back-compat alias — still does a real scrolled active-shelf search."""
+    return _item_on_active_selling_shelf(page, item_id, max_scrolls=10)
 
 
 _BRAND_STOP = frozenset({"the", "and", "de", "la", "el", "del"})
@@ -533,7 +601,7 @@ def ensure_no_matching_shelf_listings(
     *,
     item_id: str | None = None,
     autosell_id: str = "",
-    max_passes: int = 4,
+    max_passes: int = 2,
 ) -> bool:
     """Delete every selling-shelf card that matches this vehicle.
 
@@ -790,34 +858,246 @@ def _click_role_name(page: Page, pattern: re.Pattern[str], *, roles: tuple[str, 
     return False
 
 
+def _shelf_title_ui_without_item_links(page: Page) -> bool:
+    """True when selling cards use title 'Más opciones' menus, not item hrefs."""
+    try:
+        item_links = page.locator('a[href*="/marketplace/item/"]').count()
+    except Exception:
+        item_links = 0
+    if isinstance(item_links, int) and item_links > 0:
+        return False
+    try:
+        titled = page.get_by_role(
+            "button",
+            name=re.compile(r"Más opciones para |More options for ", re.I),
+        ).count()
+    except Exception:
+        titled = 0
+    return bool(isinstance(titled, int) and titled > 0)
+
+
+def _sort_selling_oldest_first(page: Page) -> None:
+    """Prefer oldest cards first so age-based purge finds targets sooner."""
+    try:
+        oldest = page.get_by_text(
+            re.compile(
+                r"Fecha de publicación:\s*más antiguas|más antiguas|Oldest first",
+                re.I,
+            )
+        )
+        if oldest.count():
+            target = oldest.first
+            try:
+                if target.is_visible():
+                    target.click(timeout=3_000)
+                    page.wait_for_timeout(1_500)
+                    return
+            except Exception:
+                pass
+            try:
+                target.click(timeout=3_000, force=True)
+                page.wait_for_timeout(1_500)
+                return
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        sort_btn = page.get_by_role(
+            "button",
+            name=re.compile(
+                r"Fecha de publicación|Date listed|más recientes|Newest|Sort",
+                re.I,
+            ),
+        )
+        if sort_btn.count():
+            sort_btn.first.click(timeout=3_000)
+            page.wait_for_timeout(800)
+        oldest_item = page.get_by_role(
+            "menuitem",
+            name=re.compile(r"más antiguas|Oldest|antigu", re.I),
+        )
+        if oldest_item.count():
+            oldest_item.first.click(timeout=3_000)
+            page.wait_for_timeout(1_500)
+            return
+        oldest_txt = page.get_by_text(
+            re.compile(r"más antiguas|Oldest first", re.I)
+        )
+        if oldest_txt.count():
+            loc = oldest_txt.first
+            if loc.is_visible():
+                loc.click(timeout=3_000)
+                page.wait_for_timeout(1_500)
+    except Exception:
+        # Non-fatal — title scroll still works without sort.
+        pass
+
+
+def _title_label_matches(label: str, needle: str) -> bool:
+    lab = re.sub(r"\s+", " ", (label or "").lower()).strip()
+    ned = re.sub(r"\s+", " ", (needle or "").lower()).strip()
+    if len(ned) < 5:
+        return False
+    if ned in lab:
+        return True
+    return ned.replace(" ", "") in lab.replace(" ", "")
+
+
+def remove_from_selling_by_title(
+    page: Page,
+    title_needles: list[str],
+    *,
+    action: str = "delete",
+    max_scrolls: int = 24,
+) -> bool:
+    """Delete/mark-sold via selling-shelf ``Más opciones para {title}`` menu.
+
+    Current Marketplace selling UI often has no ``/marketplace/item/`` anchors;
+    cards expose titled more-menus instead.
+    """
+    needles = sorted(
+        {n.strip() for n in title_needles if n and len(n.strip()) >= 5},
+        key=len,
+        reverse=True,
+    )
+    if not needles:
+        return False
+
+    try:
+        page.goto(SELLING_URL, wait_until="domcontentloaded", timeout=90_000)
+        page.wait_for_timeout(2_000)
+    except Exception:
+        return False
+
+    _sort_selling_oldest_first(page)
+
+    def _find_more_btn() -> Locator | None:
+        buttons = page.get_by_role(
+            "button",
+            name=re.compile(r"Más opciones para |More options for ", re.I),
+        )
+        try:
+            count = buttons.count()
+        except Exception:
+            count = 0
+        if not isinstance(count, int):
+            count = 0
+        for i in range(min(count, 80)):
+            btn = buttons.nth(i)
+            try:
+                label = (
+                    btn.get_attribute("aria-label")
+                    or btn.inner_text(timeout=500)
+                    or ""
+                )
+            except Exception:
+                continue
+            for needle in needles:
+                if _title_label_matches(label, needle):
+                    return btn
+        return None
+
+    matched = None
+    for _ in range(max_scrolls):
+        matched = _find_more_btn()
+        if matched is not None:
+            break
+        try:
+            page.mouse.wheel(0, 2600)
+            page.wait_for_timeout(700)
+        except Exception:
+            break
+
+    if matched is None:
+        print(
+            f"  shelf title menu not found for needles={needles[:3]!r}",
+            flush=True,
+        )
+        return False
+
+    try:
+        matched.scroll_into_view_if_needed(timeout=5_000)
+    except Exception:
+        pass
+    try:
+        matched.click(timeout=8_000)
+        page.wait_for_timeout(1_200)
+    except Exception as exc:
+        print(f"  shelf title more-click failed: {exc}", flush=True)
+        return False
+
+    if not _click_menu_action(page, action=action):
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+        return False
+    _confirm_if_needed(page, prefer_delete=(action == "delete"))
+    page.wait_for_timeout(1_500)
+
+    # Confirm: titled more-button for this listing is gone (or sold UI).
+    try:
+        page.goto(SELLING_URL, wait_until="domcontentloaded", timeout=90_000)
+        page.wait_for_timeout(2_000)
+    except Exception:
+        pass
+    for _ in range(min(max_scrolls, 12)):
+        if _find_more_btn() is None:
+            return True
+        try:
+            page.mouse.wheel(0, 2600)
+            page.wait_for_timeout(600)
+        except Exception:
+            break
+    # Soft accept: menu action clicked; title may still virtualize back.
+    print(
+        f"  shelf title action={action} clicked; post-check still sees title "
+        f"(treating as unconfirmed)",
+        flush=True,
+    )
+    return False
+
+
 def _remove_from_selling_shelf(
-    page: Page, item_id: str, *, action: str, confirm_gone: bool = False
+    page: Page,
+    item_id: str,
+    *,
+    action: str,
+    confirm_gone: bool = False,
+    quick: bool = False,
 ) -> bool:
     """Locate the item card on selling dashboard and act via its ⋮ menu.
 
     Delete path: card "…" → "Delete listing" / "Eliminar publicación".
-    When ``confirm_gone`` (repost), wait until the card leaves the shelf
-    before returning True. Sold-only (Mark as available) is not enough.
+    When ``confirm_gone`` (repost), returns True **only** after a Delete click
+    and a thorough shelf-absence check. A lazy-load miss is **never** treated
+    as "already gone" (that caused Facebook duplicate-listing publishes).
     """
-    for shelf in _SELLING_SHELVES:
+    shelves = _ACTIVE_SELLING_SHELVES if (quick or confirm_gone) else _SELLING_SHELVES
+    # Deep scroll when we must confirm — FB virtualizes the selling list.
+    max_scrolls = 4 if quick and not confirm_gone else 12
+    saw_card = False
+    deleted = False
+
+    for shelf in shelves:
         try:
             page.goto(shelf, wait_until="domcontentloaded", timeout=90_000)
-            page.wait_for_timeout(3_000)
+            page.wait_for_timeout(2_000)
         except Exception:
             continue
 
-        link = _find_item_link_scrolled(page, item_id)
+        link = _find_item_link_scrolled(page, item_id, max_scrolls=max_scrolls)
         if link is None:
-            if confirm_gone:
-                print(f"  shelf item {item_id}: not found on {shelf} — already gone")
-                return True
+            # Keep searching other shelves — do NOT treat miss as deleted.
             continue
 
+        saw_card = True
         try:
             link.scroll_into_view_if_needed(timeout=5_000)
         except Exception:
             pass
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(400)
 
         card = _shelf_card_root(link)
         already_sold = _shelf_card_is_sold(card)
@@ -835,8 +1115,17 @@ def _remove_from_selling_shelf(
                 if _click_menu_action(page, action="delete"):
                     _confirm_if_needed(page, prefer_delete=True)
                     page.wait_for_timeout(1_500)
+                    deleted = True
                     if confirm_gone:
-                        return _wait_until_item_gone_from_shelf(page, item_id)
+                        if _wait_until_item_gone_from_shelf(
+                            page, item_id, thorough=True
+                        ):
+                            return True
+                        print(
+                            f"  shelf item {item_id}: Delete clicked but card "
+                            f"still on shelf — UNCONFIRMED"
+                        )
+                        return False
                     return True
                 if not confirm_gone and _click_menu_action(page, action="mark_sold"):
                     return _finish_mark_sold_flow(page) or already_sold
@@ -851,8 +1140,11 @@ def _remove_from_selling_shelf(
                     return _finish_mark_sold_flow(page)
                 if _click_menu_action(page, action="delete"):
                     _confirm_if_needed(page, prefer_delete=True)
+                    deleted = True
                     if confirm_gone:
-                        return _wait_until_item_gone_from_shelf(page, item_id)
+                        return _wait_until_item_gone_from_shelf(
+                            page, item_id, thorough=True
+                        )
                     return True
                 if already_sold and not confirm_gone:
                     return True
@@ -879,17 +1171,20 @@ def _remove_from_selling_shelf(
                 )
             else:
                 link.click(timeout=8_000)
-            page.wait_for_timeout(2_500)
+            page.wait_for_timeout(2_000)
             if _is_sold_or_deactivated(page) or _is_content_unavailable(page):
                 if confirm_gone:
-                    if _wait_until_item_gone_from_shelf(page, item_id):
+                    if _wait_until_item_gone_from_shelf(page, item_id, thorough=True):
                         return True
                     continue
                 return True
             try:
                 _perform_removal_on_current_page(page, action=action)
+                deleted = True
                 if confirm_gone:
-                    return _wait_until_item_gone_from_shelf(page, item_id)
+                    return _wait_until_item_gone_from_shelf(
+                        page, item_id, thorough=True
+                    )
                 return True
             except Exception:
                 if confirm_gone:
@@ -902,15 +1197,65 @@ def _remove_from_selling_shelf(
                     continue
         except Exception:
             continue
+
     if confirm_gone:
-        return _wait_until_item_gone_from_shelf(page, item_id)
+        # Critical: never return True just because the card was not found.
+        # Lazy-loaded shelves often hide live listings on first paint.
+        if deleted:
+            return _wait_until_item_gone_from_shelf(page, item_id, thorough=True)
+        if saw_card:
+            print(
+                f"  shelf item {item_id}: found but Delete failed — UNCONFIRMED"
+            )
+        else:
+            print(
+                f"  shelf item {item_id}: not found after thorough scroll — "
+                f"UNCONFIRMED (will not treat as already gone)"
+            )
+        return False
     return False
 
 
 def _wait_until_item_gone_from_shelf(
-    page: Page, item_id: str, *, timeout_ms: int = 40_000
+    page: Page,
+    item_id: str,
+    *,
+    timeout_ms: int = 40_000,
+    quick: bool = False,
+    thorough: bool = False,
 ) -> bool:
-    """Reload selling dashboard until the item card is gone (or timeout)."""
+    """Confirm item left the selling shelf after a delete.
+
+    Prefer ``thorough=True`` on the repost path. ``quick`` alone is insufficient
+    for must-purge decisions (lazy-load false negatives).
+    """
+    if thorough or not quick:
+        # Two thorough active-shelf passes with a short settle between.
+        for attempt in range(2):
+            if not _item_on_active_selling_shelf(page, item_id, max_scrolls=12):
+                print(
+                    f"  shelf confirm (thorough): item {item_id} gone "
+                    f"(pass {attempt + 1})"
+                )
+                return True
+            print(
+                f"  shelf confirm (thorough): item {item_id} still listed "
+                f"(pass {attempt + 1})"
+            )
+            try:
+                page.wait_for_timeout(2_000)
+            except Exception:
+                break
+        print(f"  shelf confirm: item {item_id} still on selling dashboard")
+        return False
+
+    if quick:
+        if not _item_on_active_selling_shelf(page, item_id, max_scrolls=10):
+            print(f"  shelf confirm (quick): item {item_id} gone")
+            return True
+        print(f"  shelf confirm (quick): item {item_id} still listed")
+        return False
+
     deadline = time.monotonic() + (timeout_ms / 1000)
     attempt = 0
     while time.monotonic() < deadline:
@@ -1029,19 +1374,21 @@ def _click_more_on_shelf_card(page: Page, card: Locator, anchor: Locator) -> boo
     return _click_more_near_locator(page, anchor)
 
 
-def _find_item_link_scrolled(page: Page, item_id: str) -> Locator | None:
+def _find_item_link_scrolled(
+    page: Page, item_id: str, *, max_scrolls: int = 12
+) -> Locator | None:
     """Find item link; scroll selling inventory if needed (lazy lists)."""
-    for _ in range(12):
+    for _ in range(max(1, max_scrolls)):
         link = _find_item_link(page, item_id)
         if link is not None:
             return link
         try:
             page.mouse.wheel(0, 2800)
-            page.wait_for_timeout(900)
+            page.wait_for_timeout(600)
         except Exception:
             try:
                 page.evaluate("window.scrollBy(0, 2800)")
-                page.wait_for_timeout(900)
+                page.wait_for_timeout(600)
             except Exception:
                 break
     return _find_item_link(page, item_id)
@@ -1166,9 +1513,9 @@ def _verify_listing_removed(page: Page, listing_url: str) -> bool:
     """
     item_id = extract_item_id(listing_url)
 
-    for attempt in range(4):
-        # attempt 0: 3s, then 4s / 5s / 5s — give CDN time between reloads
-        settle_ms = 3_000 if attempt == 0 else (4_000 if attempt == 1 else 5_000)
+    for attempt in range(2):
+        # attempt 0: 2s, then 3s — avoid long multi-pass CDN waits
+        settle_ms = 2_000 if attempt == 0 else 3_000
         page.wait_for_timeout(settle_ms)
         try:
             page.goto(listing_url, wait_until="domcontentloaded", timeout=60_000)

@@ -98,7 +98,7 @@ def main() -> int:
         config_default=int(
             renew_cfg.get(
                 "max_per_account_per_run",
-                repost_cfg.get("max_per_account_per_run", 25),
+                repost_cfg.get("max_per_account_per_run", 3),
             )
         ),
     )

@@ -138,7 +138,7 @@ jobs:
         env:
           AUTOSELL_BASE_URL: ${{ secrets.AUTOSELL_BASE_URL }}
           REPOST_MIN_AGE_DAYS: ${{ secrets.REPOST_MIN_AGE_DAYS || '2' }}
-          REPOST_MAX_PER_ACCOUNT_PER_RUN: ${{ secrets.REPOST_MAX_PER_ACCOUNT_PER_RUN || '25' }}
+          REPOST_MAX_PER_ACCOUNT_PER_RUN: ${{ secrets.REPOST_MAX_PER_ACCOUNT_PER_RUN || '3' }}
           PYTHONUNBUFFERED: "1"
           FB_HEADLESS: ${{ secrets.FB_HEADLESS || 'true' }}
           DB_PATH: data/sync.db

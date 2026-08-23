@@ -136,28 +136,26 @@ def click_labeled_action(
 def advance_past_photo_step(
     page: Page,
     *,
-    timeout_ms: int = 90_000,
+    timeout_ms: int = 15_000,
     photos_already_ready: bool = False,
     next_enable_polled: bool = False,
 ) -> None:
     """Click Next after photo upload.
 
-    Polls until Siguiente/Next is clickable instead of fixed multi-second sleeps.
-    FB often keeps aria-disabled=true while still accepting clicks — after a
-    short enable wait we force-click.
+    When previews are already in the DOM, force-click Siguiente quickly instead
+    of waiting for aria-disabled to clear (FB often never clears it).
     """
     if not photos_already_ready:
-        wait_for_photo_previews(page, min_count=1, timeout_ms=min(timeout_ms, 120_000))
+        wait_for_photo_previews(page, min_count=1, timeout_ms=min(timeout_ms, 15_000))
 
-    # Dynamic: return as soon as Next is enabled; do not sleep a fixed 80–100s.
+    # Short enable poll only — then force-click regardless.
     next_ready = False
     try:
-        wait_for_composer_next_enabled(page, timeout_ms=min(45_000, timeout_ms))
+        wait_for_composer_next_enabled(page, timeout_ms=min(5_000, timeout_ms))
         next_ready = True
     except FacebookPostingError:
         pass
 
-    # Reaction-time pause once Next is enabled (skip if caller already paused).
     if next_ready and not next_enable_polled:
         human_pause_before_next(page)
 
@@ -181,7 +179,7 @@ def advance_past_photo_step(
                         button.click(timeout=5_000)
                     except Exception:
                         button.click(timeout=5_000, force=True)
-                    page.wait_for_timeout(1_200)
+                    page.wait_for_timeout(800)
                     if _advanced_past_photo_step(page):
                         return
                     last_state = f"clicked {label} but still on step 1"
@@ -189,12 +187,12 @@ def advance_past_photo_step(
                     last_state = str(exc)
 
         if _js_click_next(page):
-            page.wait_for_timeout(1_200)
+            page.wait_for_timeout(800)
             if _advanced_past_photo_step(page):
                 return
             last_state = "js click did not advance"
 
-        page.wait_for_timeout(1_000)
+        page.wait_for_timeout(500)
 
     raise FacebookPostingError(f"Could not advance past photo step: {last_state}")
 
@@ -245,7 +243,8 @@ def _js_click_next(page: Page) -> bool:
     )
 
 
-def wait_for_photo_previews(page: Page, *, min_count: int = 1, timeout_ms: int = 120_000) -> None:
+def wait_for_photo_previews(page: Page, *, min_count: int = 1, timeout_ms: int = 15_000) -> None:
+    """Wait until at least ``min_count`` photo thumbnails render (default 15s)."""
     try:
         page.wait_for_function(
             """(minCount) => {
@@ -259,6 +258,21 @@ def wait_for_photo_previews(page: Page, *, min_count: int = 1, timeout_ms: int =
         )
     except Exception as exc:
         raise FacebookPostingError(f"Photo previews did not appear: {exc}") from exc
+
+
+def count_photo_previews(page: Page) -> int:
+    """How many composer photo thumbnails are currently visible in the DOM."""
+    try:
+        return int(
+            page.evaluate(
+                """() => document.querySelectorAll(
+                  'img[src^="blob:"], img[src*="fbcdn.net"], img[src*="scontent"]'
+                ).length"""
+            )
+            or 0
+        )
+    except Exception:
+        return 0
 
 
 def wait_for_enabled_labeled_button(

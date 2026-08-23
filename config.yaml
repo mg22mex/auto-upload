@@ -25,23 +25,23 @@ sync:
     even_week: repost
     odd_week: repost
     min_age_days: 2  # 1.5–2d window; use 1.5 via env if needed
-    max_per_account_per_run: 25
-    schedule: "0 15 * * *"  # daily 15:00 UTC ≈ 09:00 America/Chihuahua
+    max_per_account_per_run: 3
+    schedule: "0 */3 * * *"  # every 3h UTC — small batches (~20–30m)
   renew:
     min_age_days: 2
-    max_per_account_per_run: 25
+    max_per_account_per_run: 3
     restart_browser_every: 10  # close/reopen Chromium to limit VPS RAM flake
     max_browser_reopens: 5
-    schedule: "0 15 * * *"
+    schedule: "0 */3 * * *"
   # Full delete+recreate (primary bump path; listings ≥ min_age_days old)
   repost:
     min_age_days: 2
     # Hard delete before create — mark_sold alone often triggers FB "publicación duplicada"
     removal_action: delete
-    max_per_account_per_run: 25  # daily incremental batch (not a full-catalog dump)
+    max_per_account_per_run: 3  # ~20–30m/run; cron every 3h
     restart_browser_every: 3
     max_browser_reopens: 5
-    schedule: "0 15 * * *"
+    schedule: "0 */3 * * *"
 
 facebook:
   location_city: Chihuahua

@@ -11,7 +11,7 @@ VALID_MODES = frozenset({"renew", "repost"})
 DEFAULT_EVEN_WEEK = "repost"
 DEFAULT_ODD_WEEK = "repost"
 DEFAULT_MIN_AGE_DAYS = 2.0
-DEFAULT_MAX_PER_ACCOUNT_PER_RUN = 25
+DEFAULT_MAX_PER_ACCOUNT_PER_RUN = 3
 
 
 def resolve_weekly_bump_mode(

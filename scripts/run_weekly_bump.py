@@ -150,7 +150,7 @@ def main() -> int:
         dest="max",
         type=int,
         default=None,
-        help="Max reposts per account (default: config 25). --force does not lift this.",
+        help="Max reposts per account (default: config 3). --force does not lift this.",
     )
     parser.add_argument(
         "--unlimited",
@@ -342,7 +342,7 @@ def _run_bump(args, config: dict, bump: dict, repost_cfg: dict) -> int:
         max_per = int(
             repost_cfg.get("max_per_account_per_run")
             or bump.get("max_per_account_per_run")
-            or 25
+            or 3
         )
     cmd = build_bump_command(
         script=script,

@@ -20,5 +20,17 @@ class TestDraftSaved(unittest.TestCase):
         self.assertFalse(DRAFT_SAVED_RE.search("Publicar"))
 
 
+class TestPhotoPreviews(unittest.TestCase):
+    def test_default_preview_timeout_is_15s(self):
+        import inspect
+
+        from src.facebook import ui
+
+        sig = inspect.signature(ui.wait_for_photo_previews)
+        self.assertEqual(sig.parameters["timeout_ms"].default, 15_000)
+        sig2 = inspect.signature(ui.advance_past_photo_step)
+        self.assertEqual(sig2.parameters["timeout_ms"].default, 15_000)
+
+
 if __name__ == "__main__":
     unittest.main()

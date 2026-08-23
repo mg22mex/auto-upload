@@ -82,12 +82,12 @@ def main() -> int:
         dest="max",
         type=int,
         default=None,
-        help="Max reposts per account this run (default: 25). --force does not lift this cap.",
+        help="Max reposts per account this run (default: 3). --force does not lift this cap.",
     )
     parser.add_argument(
         "--unlimited",
         action="store_true",
-        help="Ignore per-account cap (full shelf). Prefer daily --max-per-account 25.",
+        help="Ignore per-account cap (full shelf). Prefer recurring --max-per-account 3.",
     )
     parser.add_argument(
         "--force",
@@ -115,7 +115,7 @@ def main() -> int:
         older_than_days=older_than,
         force=args.force,
         env_name="REPOST_MAX_PER_ACCOUNT_PER_RUN",
-        config_default=int(repost_cfg.get("max_per_account_per_run", 25)),
+        config_default=int(repost_cfg.get("max_per_account_per_run", 3)),
         unlimited=args.unlimited,
     )
 

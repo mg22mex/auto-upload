@@ -300,7 +300,10 @@ class TestRemoveVehicleListingFallbacks(unittest.TestCase):
 
         with (
             patch("src.facebook.remover._is_content_unavailable", return_value=True),
-            patch("src.facebook.remover._item_on_any_selling_shelf", return_value=False),
+            patch(
+                "src.facebook.remover._item_on_active_selling_shelf",
+                return_value=False,
+            ),
             patch("src.facebook.remover._assert_removed_or_raise") as assert_rm,
             patch("src.facebook.remover._delete_listing") as delete,
         ):
@@ -328,7 +331,10 @@ class TestRemoveVehicleListingFallbacks(unittest.TestCase):
             patch("src.facebook.remover._is_visitor_listing_view", return_value=True),
             patch("src.facebook.remover._is_owner_listing_view", return_value=False),
             patch("src.facebook.remover._remove_from_selling_shelf", return_value=False),
-            patch("src.facebook.remover._item_on_any_selling_shelf", return_value=False),
+            patch(
+                "src.facebook.remover._item_on_active_selling_shelf",
+                return_value=False,
+            ),
             patch("src.facebook.remover._perform_removal_on_current_page") as perform,
             patch("src.facebook.remover._save_debug"),
         ):
@@ -510,6 +516,25 @@ class TestSellingShelfCardRemove(unittest.TestCase):
             )
         self.assertFalse(ok)
 
+    def test_confirm_gone_false_when_lazy_load_misses_card(self):
+        """Shallow miss must NOT be treated as already gone (duplicate risk)."""
+        from src.facebook.remover import _remove_from_selling_shelf
+
+        page = MagicMock()
+
+        with (
+            patch("src.facebook.remover._find_item_link_scrolled", return_value=None),
+            patch(
+                "src.facebook.remover._wait_until_item_gone_from_shelf",
+                return_value=True,
+            ) as wait_gone,
+        ):
+            ok = _remove_from_selling_shelf(
+                page, "555", action="delete", confirm_gone=True
+            )
+        self.assertFalse(ok)
+        wait_gone.assert_not_called()
+
     def test_repost_delete_skips_when_still_on_shelf(self):
         page = MagicMock()
         page.url = "https://www.facebook.com/marketplace/item/1/"
@@ -526,8 +551,8 @@ class TestSellingShelfCardRemove(unittest.TestCase):
             ),
             patch("src.facebook.remover._remove_from_selling_shelf", return_value=False),
             patch(
-                "src.facebook.remover._wait_until_item_gone_from_shelf",
-                return_value=False,
+                "src.facebook.remover._item_on_active_selling_shelf",
+                return_value=True,
             ),
             patch("src.facebook.remover._save_debug"),
         ):
@@ -538,8 +563,45 @@ class TestSellingShelfCardRemove(unittest.TestCase):
                 removal_action="delete",
                 log_dir=log_dir,
                 require_verified=True,
+                store=MagicMock(),
+                account_id="account_1",
             )
         self.assertFalse(ok)
+
+    def test_unconfirmed_remove_does_not_purge_sync_db(self):
+        page = MagicMock()
+        page.url = "https://www.facebook.com/marketplace/item/1/"
+        log_dir = Path(tempfile.mkdtemp())
+        store = MagicMock()
+
+        with (
+            patch("src.facebook.remover._is_content_unavailable", return_value=False),
+            patch("src.facebook.remover._listing_already_gone", return_value=False),
+            patch("src.facebook.remover._is_visitor_listing_view", return_value=False),
+            patch("src.facebook.remover._is_owner_listing_view", return_value=True),
+            patch(
+                "src.facebook.remover._perform_removal_on_current_page",
+                side_effect=FacebookPostingError("no delete"),
+            ),
+            patch("src.facebook.remover._remove_from_selling_shelf", return_value=False),
+            patch(
+                "src.facebook.remover._item_on_active_selling_shelf",
+                return_value=False,
+            ),
+            patch("src.facebook.remover._save_debug"),
+        ):
+            ok = remove_vehicle_listing(
+                page,
+                "https://www.facebook.com/marketplace/item/999/",
+                autosell_id="obj_keep",
+                removal_action="delete",
+                log_dir=log_dir,
+                require_verified=True,
+                store=store,
+                account_id="account_1",
+            )
+        self.assertFalse(ok)
+        store.mark_fb_listing_removed.assert_not_called()
 
 
 class TestShelfVehicleMatch(unittest.TestCase):

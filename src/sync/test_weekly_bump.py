@@ -60,7 +60,7 @@ class TestResolveWeeklyBumpMode(unittest.TestCase):
         self.assertEqual(DEFAULT_EVEN_WEEK, "repost")
         self.assertEqual(DEFAULT_ODD_WEEK, "repost")
         self.assertEqual(DEFAULT_MIN_AGE_DAYS, 2.0)
-        self.assertEqual(DEFAULT_MAX_PER_ACCOUNT_PER_RUN, 25)
+        self.assertEqual(DEFAULT_MAX_PER_ACCOUNT_PER_RUN, 3)
 
     def test_even_iso_week_is_repost(self):
         # 2026-08-09 is Sunday of ISO week 32 (even)
@@ -116,7 +116,7 @@ class TestWeeklyBumpConfig(unittest.TestCase):
         self.assertEqual(cfg["odd_week"], "repost")
         self.assertEqual(cfg["min_age_days"], 2.0)
         self.assertEqual(cfg["timezone"], "America/Chihuahua")
-        self.assertEqual(cfg["max_per_account_per_run"], 25)
+        self.assertEqual(cfg["max_per_account_per_run"], 3)
 
     def test_reads_nested(self):
         cfg = weekly_bump_config(
@@ -362,9 +362,9 @@ class TestResolveMaxPerAccount(unittest.TestCase):
                 older_than_days=0,
                 force=True,
                 env_name="REPOST_MAX_PER_ACCOUNT_PER_RUN_UNSET_XYZ",
-                config_default=25,
+                config_default=10,
             ),
-            25,
+            10,
         )
 
     def test_unlimited_flag(self):
@@ -376,7 +376,7 @@ class TestResolveMaxPerAccount(unittest.TestCase):
                 older_than_days=2,
                 force=False,
                 env_name="REPOST_MAX_PER_ACCOUNT_PER_RUN_UNSET_XYZ",
-                config_default=25,
+                config_default=10,
                 unlimited=True,
             ),
             UNLIMITED_PER_ACCOUNT,

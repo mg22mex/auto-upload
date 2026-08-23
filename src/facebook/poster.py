@@ -16,6 +16,7 @@ from src.facebook.ui import (
     advance_composer_next,
     advance_past_photo_step,
     click_labeled_action,
+    count_photo_previews,
     disable_promote_listing,
     dismiss_overlays,
     log_page_state,
@@ -73,7 +74,7 @@ def create_vehicle_listing(
     from src.facebook.remover import ensure_no_matching_shelf_listings
 
     if not ensure_no_matching_shelf_listings(
-        page, vehicle, autosell_id=vehicle.autosell_id
+        page, vehicle, autosell_id=vehicle.autosell_id, max_passes=1
     ):
         raise FacebookPostingError(
             f"SKIP_CREATE: matching listing still on selling shelf for "
@@ -264,11 +265,32 @@ def _upload_photos(page: Page, photo_paths: list[Path], log_dir: Path, autosell_
 
         n = len(photo_paths)
         print(f"Uploaded {n} photo(s); waiting for previews...", flush=True)
-        preview_timeout = max(120_000, n * 8_000)
-        wait_for_photo_previews(page, min_count=n, timeout_ms=preview_timeout)
-        next_timeout = max(30_000, min(n * 5_000, 120_000))
+        # Cap at 15s. Proceed as soon as any thumbnail is in the DOM —
+        # do not wait for all N uploads or the full timeout.
+        preview_timeout = 15_000
+        try:
+            wait_for_photo_previews(page, min_count=1, timeout_ms=preview_timeout)
+            visible = count_photo_previews(page)
+            print(
+                f"  {visible}/{n} preview(s) visible — force-clicking Siguiente",
+                flush=True,
+            )
+        except FacebookPostingError:
+            visible = count_photo_previews(page)
+            if visible >= 1:
+                print(
+                    f"  {visible}/{n} preview(s) visible after {preview_timeout}ms "
+                    "— force-clicking Siguiente",
+                    flush=True,
+                )
+            else:
+                print(
+                    "  no photo previews yet — force-clicking Siguiente anyway",
+                    flush=True,
+                )
+        next_timeout = 5_000
         print(
-            f"  waiting for Siguiente after {n} photo preview(s) (up to {next_timeout}ms)",
+            f"  waiting for Siguiente after photo preview(s) (up to {next_timeout}ms)",
             flush=True,
         )
         next_ready = _wait_for_next_enabled_polling(page, timeout_ms=next_timeout)
@@ -280,7 +302,7 @@ def _upload_photos(page: Page, photo_paths: list[Path], log_dir: Path, autosell_
         try:
             advance_past_photo_step(
                 page,
-                timeout_ms=max(60_000, n * 4_000),
+                timeout_ms=15_000,
                 photos_already_ready=True,
                 next_enable_polled=next_ready,
             )
@@ -423,15 +445,12 @@ def _fill_vehicle_form(
 
     if _form_inputs_complete(page, vehicle, attrs, city):
         print("  form inputs complete — waiting for Siguiente to enable")
-        _wait_for_next_enabled_polling(
-            page,
-            timeout_ms=max(30_000, min(photo_count * 5_000, 120_000)),
-        )
+        _wait_for_next_enabled_polling(page, timeout_ms=15_000)
         print("  advancing past vehicle form")
         page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
-        page.wait_for_timeout(2_000)
+        page.wait_for_timeout(1_000)
         try:
-            click_labeled_action(page, NEXT_LABELS, timeout_ms=30_000, allow_force=True)
+            click_labeled_action(page, NEXT_LABELS, timeout_ms=15_000, allow_force=True)
         except FacebookPostingError:
             pass
         from src.facebook.ui import _js_click_next
@@ -510,7 +529,7 @@ def _fill_vehicle_form(
     return filled_names
 
 
-def _wait_for_next_enabled_polling(page: Page, *, timeout_ms: int = 120_000) -> bool:
+def _wait_for_next_enabled_polling(page: Page, *, timeout_ms: int = 15_000) -> bool:
     """Poll until composer Next/Siguiente is enabled; return early when ready."""
     deadline = time.monotonic() + (timeout_ms / 1000)
     while time.monotonic() < deadline:
