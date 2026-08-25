@@ -293,6 +293,52 @@ class TestRemoveVehicleListingFallbacks(unittest.TestCase):
             )
         self.assertFalse(ok)
 
+    def test_title_menu_delete_when_item_href_shelf_misses(self):
+        page = MagicMock()
+        page.url = "https://www.facebook.com/marketplace/item/1570658508431664/"
+        log_dir = Path(tempfile.mkdtemp())
+        store = MagicMock()
+        vehicle = _veh("obj1014")
+        vehicle.title = "Cx 30 IGT"
+        vehicle.brand = "Mazda"
+        vehicle.year = "2021"
+
+        with (
+            patch("src.facebook.remover._is_content_unavailable", return_value=False),
+            patch("src.facebook.remover._listing_already_gone", return_value=False),
+            patch("src.facebook.remover._is_visitor_listing_view", return_value=False),
+            patch("src.facebook.remover._is_owner_listing_view", return_value=True),
+            patch(
+                "src.facebook.remover._perform_removal_on_current_page",
+                side_effect=FacebookPostingError("Delete control not found"),
+            ),
+            patch("src.facebook.remover._remove_from_selling_shelf", return_value=False),
+            patch(
+                "src.facebook.remover._shelf_title_ui_without_item_links",
+                return_value=True,
+            ),
+            patch(
+                "src.facebook.remover.remove_from_selling_by_title",
+                return_value=True,
+            ) as title_rm,
+            patch("src.facebook.remover._item_on_active_selling_shelf", return_value=False),
+            patch("src.facebook.remover._save_debug"),
+        ):
+            ok = remove_vehicle_listing(
+                page,
+                "https://www.facebook.com/marketplace/item/1570658508431664/",
+                autosell_id="obj1014",
+                removal_action="delete",
+                log_dir=log_dir,
+                require_verified=True,
+                store=store,
+                account_id="account_1",
+                vehicle=vehicle,
+            )
+        self.assertTrue(ok)
+        title_rm.assert_called()
+        store.mark_fb_listing_removed.assert_called()
+
     def test_content_unavailable_returns_true_without_assert(self):
         page = MagicMock()
         page.url = "https://www.facebook.com/marketplace/item/1/"

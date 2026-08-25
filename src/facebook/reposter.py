@@ -303,6 +303,7 @@ def _repost_one(
                 require_verified=True,
                 store=store,
                 account_id=account_id,
+                vehicle=action.vehicle,
             )
             if not ok:
                 # Hard halt: unconfirmed remove — never create, never purge mapping.

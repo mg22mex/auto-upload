@@ -224,6 +224,8 @@ def remove_vehicle_listing(
     require_verified: bool = False,
     store: object | None = None,
     account_id: str | None = None,
+    vehicle: Vehicle | None = None,
+    title_needles: list[str] | None = None,
 ) -> bool:
     """Remove a Marketplace listing (delete or mark sold).
 
@@ -239,8 +241,9 @@ def remove_vehicle_listing(
     Strategies (in order):
     1. Open ``listing_url`` — treat 404 / unavailable as already removed
     2. Delete / mark-sold via listing detail menu (ES/EN + three-dot aria-labels)
-    3. Fallback: find item on ``/marketplace/you/selling`` and delete from there
-    4. Optional mark-sold if primary action was delete but only sold controls appear
+    3. Fallback: find item on ``/marketplace/you/selling`` by item id
+    4. Fallback: titled ``Más opciones para {title}`` / ``More options for`` menu
+    5. Optional mark-sold if primary action was delete but only sold controls appear
     """
     action = (removal_action or "mark_sold").strip().lower()
     if action not in ("delete", "mark_sold"):
@@ -253,6 +256,58 @@ def remove_vehicle_listing(
         f"item_id={item_id or '?'} url={listing_url}"
         f"{' (must leave selling shelf before create)' if must_purge else ''}"
     )
+
+    def _needles() -> list[str]:
+        if title_needles:
+            return list(title_needles)
+        if vehicle is not None:
+            from src.facebook.renewer import _match_needles
+
+            return _match_needles(vehicle)
+        return []
+
+    def _scrape_detail_title_needles() -> list[str]:
+        try:
+            title = page.evaluate(
+                """() => {
+                  const h = document.querySelector("h1");
+                  if (h && h.innerText) return h.innerText.trim();
+                  const t = document.title || "";
+                  return t.replace(/\\s*\\|\\s*Facebook.*/i, "")
+                          .replace(/^Marketplace\\s*-\\s*/i, "").trim();
+                }"""
+            )
+            if isinstance(title, str) and len(title.strip()) >= 5:
+                return [title.strip()]
+        except Exception:
+            pass
+        return []
+
+    def _try_title_menu_remove() -> bool:
+        needles = _needles() or _scrape_detail_title_needles()
+        if not needles:
+            print(
+                f"  {autosell_id}: no title needles for shelf title-menu delete",
+                flush=True,
+            )
+            return False
+        print(
+            f"  {autosell_id}: trying title-menu shelf removal "
+            f"needles={needles[:3]!r}",
+            flush=True,
+        )
+        if remove_from_selling_by_title(page, needles, action=action):
+            return True
+        # mark_sold-then-create often triggers FB "publicación duplicada" on
+        # the verified repost path — only use it for non-must_purge removes.
+        if action == "delete" and not must_purge:
+            print(
+                f"  {autosell_id}: title-menu delete failed — retry mark_sold",
+                flush=True,
+            )
+            if remove_from_selling_by_title(page, needles, action="mark_sold"):
+                return True
+        return False
 
     def _purge_orphan_mapping(reason: str) -> bool:
         # Modern selling UI lists cards via "Más opciones para {title}" with
@@ -268,9 +323,13 @@ def remove_vehicle_listing(
                 print(
                     f"WARNING: {autosell_id}: refusing orphan purge ({reason}) — "
                     f"selling shelf has title menus but no item links; "
-                    f"use title-menu delete instead of sync.db clear"
+                    f"attempting title-menu delete",
+                    flush=True,
                 )
-                return False
+                if _try_title_menu_remove():
+                    reason = f"verified title-menu remove after: {reason}"
+                else:
+                    return False
         print(
             f"WARNING: {autosell_id}: {reason} — treating as already "
             f"deleted/unavailable; purging sync.db mapping"
@@ -401,6 +460,14 @@ def remove_vehicle_listing(
         except Exception as exc:
             last_error = exc
             print(f"  {autosell_id}: selling-shelf remove failed: {exc}")
+
+    # Modern shelf: no /marketplace/item/ anchors — match by vehicle title.
+    if not shelf_removed and (
+        must_purge or _shelf_title_ui_without_item_links(page)
+    ):
+        if _try_title_menu_remove():
+            shelf_removed = True
+            page.wait_for_timeout(1_000)
 
     # Visitor chrome + thorough shelf absence → orphan / already-deleted URL.
     if saw_visitor_only and item_id and not shelf_removed:
@@ -975,7 +1042,10 @@ def remove_from_selling_by_title(
     def _find_more_btn() -> Locator | None:
         buttons = page.get_by_role(
             "button",
-            name=re.compile(r"Más opciones para |More options for ", re.I),
+            name=re.compile(
+                r"Más opciones para |More options for ",
+                re.I,
+            ),
         )
         try:
             count = buttons.count()
