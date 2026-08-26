@@ -309,11 +309,56 @@ def remove_vehicle_listing(
                 return True
         return False
 
-    def _purge_orphan_mapping(reason: str) -> bool:
+    def _confirm_already_removed() -> bool:
+        """Manual delete/sold: detail gone + title absent from selling shelf."""
+        try:
+            page.goto(listing_url, wait_until="domcontentloaded", timeout=60_000)
+            page.wait_for_timeout(2_000)
+        except Exception as exc:
+            print(
+                f"  {autosell_id}: ALREADY_REMOVED check nav failed ({exc})",
+                flush=True,
+            )
+        detail_gone = _detail_looks_manually_gone(page)
+        if not detail_gone:
+            print(
+                f"  {autosell_id}: not ALREADY_REMOVED — detail still looks live "
+                f"(owner Mark as sold / active chrome)",
+                flush=True,
+            )
+            return False
+
+        needles = _needles() or _scrape_detail_title_needles()
+        if needles and selling_title_present(page, needles, max_scrolls=20):
+            print(
+                f"  {autosell_id}: not ALREADY_REMOVED — title still on selling shelf",
+                flush=True,
+            )
+            return False
+
+        if not needles and not _is_content_unavailable(page):
+            # Without a title we only trust hard unavailable/404 pages.
+            print(
+                f"  {autosell_id}: not ALREADY_REMOVED — no title needles and "
+                f"detail not clearly unavailable",
+                flush=True,
+            )
+            return False
+
+        print(
+            f"  {autosell_id}: ALREADY_REMOVED — detail unavailable/sold and "
+            f"title not on selling shelf; clearing sync.db for CREATE_NEW",
+            flush=True,
+        )
+        return True
+
+    def _purge_orphan_mapping(
+        reason: str, *, allow_already_removed: bool = False
+    ) -> bool:
         # Modern selling UI lists cards via "Más opciones para {title}" with
         # zero /marketplace/item/ anchors. Absence of item_id links must NOT
         # clear sync.db (false "already gone" → lost mappings / duplicates).
-        if must_purge:
+        if must_purge and not allow_already_removed:
             try:
                 page.goto(SELLING_URL, wait_until="domcontentloaded", timeout=90_000)
                 page.wait_for_timeout(2_000)
@@ -328,6 +373,8 @@ def remove_vehicle_listing(
                 )
                 if _try_title_menu_remove():
                     reason = f"verified title-menu remove after: {reason}"
+                elif _confirm_already_removed():
+                    reason = f"ALREADY_REMOVED after: {reason}"
                 else:
                     return False
         print(
@@ -482,7 +529,8 @@ def remove_vehicle_listing(
         if shelf_removed:
             print(f"  {autosell_id}: selling-shelf purge confirmed — safe to create")
             return _purge_orphan_mapping(
-                "verified delete — item left selling shelf"
+                "verified delete — item left selling shelf",
+                allow_already_removed=True,
             )
 
         detail_dead = _is_content_unavailable(page) or _listing_already_gone(
@@ -491,6 +539,13 @@ def remove_vehicle_listing(
         if detail_dead and not _item_on_active_selling_shelf(page, item_id):
             return _purge_orphan_mapping(
                 "detail unavailable and thorough shelf search found no card"
+            )
+
+        # Manual delete/sold: detail gone + title not on shelf → clear URL, CREATE_NEW.
+        if _confirm_already_removed():
+            return _purge_orphan_mapping(
+                "ALREADY_REMOVED — listing missing/sold on Facebook",
+                allow_already_removed=True,
             )
 
         print(
@@ -1011,6 +1066,95 @@ def _title_label_matches(label: str, needle: str) -> bool:
     return ned.replace(" ", "") in lab.replace(" ", "")
 
 
+def _normalize_title_needles(title_needles: list[str]) -> list[str]:
+    return sorted(
+        {n.strip() for n in title_needles if n and len(n.strip()) >= 5},
+        key=len,
+        reverse=True,
+    )
+
+
+def _find_selling_title_more_button(
+    page: Page, needles: list[str]
+) -> Locator | None:
+    """Return the first visible ``Más opciones para`` / ``More options for`` match."""
+    if not needles:
+        return None
+    buttons = page.get_by_role(
+        "button",
+        name=re.compile(r"Más opciones para |More options for ", re.I),
+    )
+    try:
+        count = buttons.count()
+    except Exception:
+        count = 0
+    if not isinstance(count, int):
+        count = 0
+    for i in range(min(count, 80)):
+        btn = buttons.nth(i)
+        try:
+            label = (
+                btn.get_attribute("aria-label")
+                or btn.inner_text(timeout=500)
+                or ""
+            )
+        except Exception:
+            continue
+        for needle in needles:
+            if _title_label_matches(label, needle):
+                return btn
+    return None
+
+
+def selling_title_present(
+    page: Page,
+    title_needles: list[str],
+    *,
+    max_scrolls: int = 24,
+    navigate: bool = True,
+) -> bool:
+    """True when a titled more-menu for this vehicle is on the selling shelf."""
+    needles = _normalize_title_needles(title_needles)
+    if not needles:
+        return False
+    if navigate:
+        try:
+            page.goto(SELLING_URL, wait_until="domcontentloaded", timeout=90_000)
+            page.wait_for_timeout(2_000)
+        except Exception:
+            return False
+        _sort_selling_oldest_first(page)
+    for _ in range(max_scrolls):
+        if _find_selling_title_more_button(page, needles) is not None:
+            return True
+        try:
+            page.mouse.wheel(0, 2600)
+            page.wait_for_timeout(700)
+        except Exception:
+            break
+    return False
+
+
+def _detail_looks_manually_gone(page: Page) -> bool:
+    """True when detail shows unavailable/sold or non-owner chrome (no Delete/Mark sold).
+
+    Still-live owner listings (``Mark as sold`` visible) return False — Delete may
+    be missing on owner chrome while the listing remains Active.
+    """
+    if _is_content_unavailable(page):
+        return True
+    if _still_has_mark_sold_control(page):
+        return False
+    if _is_sold_or_deactivated(page):
+        return True
+    if _is_visitor_listing_view(page) and not _is_owner_listing_view(page):
+        return True
+    # Delete missing and no owner sell controls → treat as already removed.
+    if not _is_owner_listing_view(page) and not _has_live_controls(page):
+        return True
+    return False
+
+
 def remove_from_selling_by_title(
     page: Page,
     title_needles: list[str],
@@ -1023,11 +1167,7 @@ def remove_from_selling_by_title(
     Current Marketplace selling UI often has no ``/marketplace/item/`` anchors;
     cards expose titled more-menus instead.
     """
-    needles = sorted(
-        {n.strip() for n in title_needles if n and len(n.strip()) >= 5},
-        key=len,
-        reverse=True,
-    )
+    needles = _normalize_title_needles(title_needles)
     if not needles:
         return False
 
@@ -1039,38 +1179,9 @@ def remove_from_selling_by_title(
 
     _sort_selling_oldest_first(page)
 
-    def _find_more_btn() -> Locator | None:
-        buttons = page.get_by_role(
-            "button",
-            name=re.compile(
-                r"Más opciones para |More options for ",
-                re.I,
-            ),
-        )
-        try:
-            count = buttons.count()
-        except Exception:
-            count = 0
-        if not isinstance(count, int):
-            count = 0
-        for i in range(min(count, 80)):
-            btn = buttons.nth(i)
-            try:
-                label = (
-                    btn.get_attribute("aria-label")
-                    or btn.inner_text(timeout=500)
-                    or ""
-                )
-            except Exception:
-                continue
-            for needle in needles:
-                if _title_label_matches(label, needle):
-                    return btn
-        return None
-
     matched = None
     for _ in range(max_scrolls):
-        matched = _find_more_btn()
+        matched = _find_selling_title_more_button(page, needles)
         if matched is not None:
             break
         try:
@@ -1113,14 +1224,13 @@ def remove_from_selling_by_title(
     except Exception:
         pass
     for _ in range(min(max_scrolls, 12)):
-        if _find_more_btn() is None:
+        if _find_selling_title_more_button(page, needles) is None:
             return True
         try:
             page.mouse.wheel(0, 2600)
             page.wait_for_timeout(600)
         except Exception:
             break
-    # Soft accept: menu action clicked; title may still virtualize back.
     print(
         f"  shelf title action={action} clicked; post-check still sees title "
         f"(treating as unconfirmed)",

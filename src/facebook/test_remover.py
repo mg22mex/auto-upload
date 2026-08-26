@@ -339,6 +339,64 @@ class TestRemoveVehicleListingFallbacks(unittest.TestCase):
         title_rm.assert_called()
         store.mark_fb_listing_removed.assert_called()
 
+    def test_already_removed_clears_db_when_detail_gone_and_title_absent(self):
+        page = MagicMock()
+        page.url = "https://www.facebook.com/marketplace/item/999/"
+        log_dir = Path(tempfile.mkdtemp())
+        store = MagicMock()
+        vehicle = _veh("obj_manual")
+        vehicle.title = "Macan S"
+        vehicle.brand = "Porsche"
+        vehicle.year = "2018"
+
+        with (
+            patch("src.facebook.remover._is_content_unavailable", return_value=True),
+            patch("src.facebook.remover._listing_already_gone", return_value=False),
+            patch("src.facebook.remover._item_on_active_selling_shelf", return_value=False),
+            patch(
+                "src.facebook.remover._shelf_title_ui_without_item_links",
+                return_value=True,
+            ),
+            patch(
+                "src.facebook.remover.remove_from_selling_by_title",
+                return_value=False,
+            ),
+            patch(
+                "src.facebook.remover._detail_looks_manually_gone",
+                return_value=True,
+            ),
+            patch(
+                "src.facebook.remover.selling_title_present",
+                return_value=False,
+            ),
+            patch("src.facebook.remover._save_debug"),
+        ):
+            ok = remove_vehicle_listing(
+                page,
+                "https://www.facebook.com/marketplace/item/999/",
+                autosell_id="obj_manual",
+                removal_action="delete",
+                log_dir=log_dir,
+                require_verified=True,
+                store=store,
+                account_id="account_1",
+                vehicle=vehicle,
+            )
+        self.assertTrue(ok)
+        store.mark_fb_listing_removed.assert_called_with(
+            "obj_manual", "account_1", clear_url=True
+        )
+
+    def test_still_live_owner_chrome_not_already_removed(self):
+        from src.facebook.remover import _detail_looks_manually_gone
+
+        page = MagicMock()
+        with (
+            patch("src.facebook.remover._is_content_unavailable", return_value=False),
+            patch("src.facebook.remover._still_has_mark_sold_control", return_value=True),
+        ):
+            self.assertFalse(_detail_looks_manually_gone(page))
+
     def test_content_unavailable_returns_true_without_assert(self):
         page = MagicMock()
         page.url = "https://www.facebook.com/marketplace/item/1/"
