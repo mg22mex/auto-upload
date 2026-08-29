@@ -97,8 +97,11 @@ The FB planner only manages listings in **`sync.db`**. It does not scan Facebook
 | Path | Purpose |
 |------|---------|
 | `src/voice_gateway/webhook.py` | FastAPI app: voice, WhatsApp, Meta, `/voice/inbound` |
-| `src/voice_gateway/inbound_call.py` | VoIP parse, DID→branch, TwiML/JSON |
+| `src/voice_gateway/inbound_call.py` | VoIP parse, DID→branch, TwiML/JSON, rep alert after call log |
 | `src/whatsapp_worker/` | Evolution client, inbound parse, qualification FSM, branch routing |
+| `src/whatsapp_worker/webhook.py` | Standalone inbound WhatsApp receiver (own process) |
+| `src/config.py` | Branch rep rosters (`REPS_*`), `DEFAULT_REP_PHONE`, tag→branch map |
+| `src/notifications/whatsapp_rep.py` | 1-on-1 WhatsApp handoff card to the assigned rep |
 | `src/meta_gateway/` | Messenger parse, quote orchestration, Graph API reply |
 | `src/pipeline.py` | End-to-end lead: trade-in → quote → Odoo → PDF → WhatsApp |
 | `src/quote_engine/` | Local amortization + Scotiabank profile |
@@ -115,7 +118,7 @@ The FB planner only manages listings in **`sync.db`**. It does not scan Facebook
 |------|------|
 | `base.py` | Shared `OdooClient` session (`authenticate`, `execute_kw`, `ODOO_DRY_RUN`) |
 | `client.py` | `OdooCRMClient` — CRM leads (`MG Quote Lead` + UTM), inventory, calendar, activities |
-| `crm.py` | **`CRMLeadManager`** — dict upsert, phone dedupe + chatter, `ODOO_TEAM_*`, fleet location → team, channel UTM |
+| `crm.py` | **`CRMLeadManager`** — dict upsert, phone dedupe + chatter, `ODOO_TEAM_*`, fleet location → team, channel UTM. Also **`RoundRobinAssigner`** / `assign_lead_owner` |
 | `quotes.py` | **`QuotePDFManager`** — branch-branded PDF (ReportLab or fallback) + attach to lead chatter |
 | `triggers.py` | **`OdooTriggerManager`** / **`process_incoming_webhook`** — stage `quoted`/`cotizado` → PDF + WA queue; inbound forms/voice → CRM |
 | `whatsapp.py` | Native Odoo WhatsApp templates. **PAUSED:** Meta Manager pending — leave `ODOO_WA_ACCOUNT_*` unset |
@@ -124,7 +127,22 @@ The FB planner only manages listings in **`sync.db`**. It does not scan Facebook
 
 **CRM UTM map:** WhatsApp → medium `WhatsApp` / source `Facebook Marketplace`; Voice → `Phone` / `Inbound Call`; Web → `Website` / `Autosell Web`.
 
-**Tests:** `tests/test_crm_leads.py`, `tests/test_quotes.py`, `tests/test_triggers.py`, `tests/test_odoo_extensions.py`, `src/whatsapp_worker/test_*.py`, `src/voice_gateway/test_webhook.py`, `src/facebook/test_listing_cta.py`.
+### Lead routing (round-robin → rep WhatsApp)
+
+Rosters are JSON env, read fresh on every pick, so a rep change needs no restart:
+
+```bash
+REPS_PERIFERICO='[{"odoo_id": 2, "phone": "+526141234567", "name": "Ana"}]'
+REPS_SAN_FELIPE='[{"odoo_id": 5, "phone": "+526149876543"}]'
+DEFAULT_REP_PHONE='+526141234567'   # used when a branch has no rep
+REP_NOTIFY_ENABLED=true             # false mutes the rep card
+```
+
+- Branch comes from the catalog tag: `*` Periférico, `+` San Felipe, `-` consignment (Periférico desk).
+- Rotation is per branch, modulo the current roster length; fallback order is branch roster → Periférico roster → `DEFAULT_REP_PHONE` → unassigned (warned, never raises).
+- Fires on WhatsApp `HANDOFF_TO_HUMAN` (transition turn only, so follow-ups don't re-alert) and after `/voice/inbound` logs the call. A failed rep alert never breaks the customer conversation.
+
+**Webhook routes:** `/webhook/odoo` (+ `/odoo/webhook` alias) mounts `process_incoming_webhook`; `/webhook/whatsapp` exists both on the voice gateway and on the standalone worker (`uvicorn src.whatsapp_worker.webhook:app`).
 
 ```bash
 # Odoo automation dry-run (no live XML-RPC)
@@ -153,8 +171,43 @@ python -m unittest tests.test_crm_leads tests.test_quotes tests.test_triggers -q
 | `scripts/fb_login.py` | Headed login per account |
 | `scripts/fb_test_session.py` | Verify session |
 | `scripts/fb_post_test.py` | Post one vehicle (`--autosell-id obj969`) |
+| `scripts/cleanup_logs.py` | Delete debug PNGs / temp logs past retention |
 
 Facebook logic: `src/facebook/` (`poster.py`, `categorize.py`, `listing_cta.py`, bilingual EN/ES). **Max 20 photos** per listing. Descriptions include autosell.mx URL + branch WhatsApp CTA.
+
+## Operations
+
+### Catalog ingestion
+
+`run_weekly_bump.py --all-eligible` scrapes autosell.mx, pushes inventory to Odoo when `ODOO_URL` + `ODOO_DB` are set, then syncs Facebook. Each run prints the branch-tag breakdown (`* periferico=41  + san_felipe=33  - consignment=18  untagged=…`) so tag retention is visible. `--skip-scrape` / `SKIP_SCRAPE` reuses `data/catalog_latest.json`; `--skip-odoo` / `SKIP_ODOO` bypasses XML-RPC entirely.
+
+### Session health pre-check
+
+`src/facebook/health.py` runs before any Playwright loop: an offline check of the Chromium profile, then one live Marketplace load per healthy account that classifies `ok` / `logged_out` / `checkpoint`. Skipped on `--dry-run`; set `FB_SESSION_PRECHECK_LIVE=false` to keep only the offline check. A failure fixes with `python scripts/fb_login.py --account <id>` (headed, on fb-worker).
+
+### Failure alerts
+
+`src/alerts.py` fans one message out to Telegram (`TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`) and Slack (`SLACK_WEBHOOK_URL`); stdlib only, never raises, never logs tokens. `run_repost.py` alerts when the session pre-check fails and when a run ends with hard errors or expired sessions. With nothing configured it reports `no alert channel configured` and continues. `ALERTS_ENABLED=false` mutes it.
+
+### Log rotation
+
+`scripts/cleanup_logs.py` deletes `data/logs/facebook/*.png` and `/tmp/*.log` older than `LOG_RETENTION_DAYS` (default 7), skipping directories, symlinks, and files owned by other users. It runs automatically after each non-dry bump (`--no-cleanup-logs` opts out) and as an `always()` CI step.
+
+```bash
+python scripts/cleanup_logs.py --dry-run --verbose
+python scripts/cleanup_logs.py --max-age-days 3 --target data/logs/facebook:'*.png'
+```
+
+## Tests
+
+CI (`.github/workflows/test.yml`) and local runs use the stdlib runner — **`pytest` is not a dependency**, so keep new tests on `unittest.TestCase`:
+
+```bash
+python -m unittest discover -s src -p 'test_*.py'
+python -m unittest discover -s tests -p 'test_*.py'
+```
+
+Tests live beside the code in `src/**/test_*.py` (parsing, session health, alerts, cleanup, gateways) and as integration-flavored suites in `tests/` (`test_crm_leads.py`, `test_quotes.py`, `test_triggers.py`, `test_odoo_extensions.py`, `test_crm_round_robin.py`, `test_whatsapp_rep.py`). Nothing here touches live Facebook, Odoo, or WhatsApp.
 
 ## Quick start (local)
 
@@ -197,7 +250,9 @@ uvicorn src.voice_gateway.webhook:app --reload --host 0.0.0.0 --port 8080
 | `ODOO_USER` | XML-RPC login. Alias: `ODOO_USERNAME` |
 | `ODOO_PASSWORD` | API key/password. Alias: `ODOO_API_KEY` |
 
-Webhook runtime (API host `.env`, not sync.yml): `FB_VERIFY_TOKEN`, `FB_PAGE_ACCESS_TOKEN`, `WHATSAPP_*` / Evolution, `ODOO_TEAM_PERIFERICO` / `ODOO_TEAM_SAN_FELIPE`, optional `VOICE_DID_*` / `VOICE_FORWARD_*`, `META_DEFAULT_BRANCH_ID` / `VOICE_DEFAULT_BRANCH_ID`.
+Optional in `repost.yml`: `SLACK_WEBHOOK_URL` / `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` (failure alerts), `FB_SESSION_PRECHECK_LIVE`, `LOG_RETENTION_DAYS`.
+
+Webhook runtime (API host `.env`, not sync.yml): `FB_VERIFY_TOKEN`, `FB_PAGE_ACCESS_TOKEN`, `WHATSAPP_*` / Evolution, `ODOO_TEAM_PERIFERICO` / `ODOO_TEAM_SAN_FELIPE`, `REPS_PERIFERICO` / `REPS_SAN_FELIPE` / `DEFAULT_REP_PHONE`, optional `VOICE_DID_*` / `VOICE_FORWARD_*`, `META_DEFAULT_BRANCH_ID` / `VOICE_DEFAULT_BRANCH_ID`.
 
 After each scrape, CI runs `scripts/sync_odoo_inventory.py` on `data/snapshots/catalog_latest.json`.
 

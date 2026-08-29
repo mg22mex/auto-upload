@@ -1,22 +1,42 @@
 """Sales-rep WhatsApp handoff notification (message payload + hooks)."""
 from __future__ import annotations
 
-import pytest
+import os
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import patch
 
-from src.config import ENV_DEFAULT_REP_PHONE, ENV_REPS_PERIFERICO, ENV_REPS_SAN_FELIPE
-from src.notifications import whatsapp_rep
-from src.notifications.whatsapp_rep import (
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.config import (  # noqa: E402
+    ENV_DEFAULT_REP_PHONE,
+    ENV_REPS_PERIFERICO,
+    ENV_REPS_SAN_FELIPE,
+)
+from src.notifications.whatsapp_rep import (  # noqa: E402
     ENV_ENABLED,
     format_rep_notification,
     notify_rep,
     odoo_lead_url,
     payment_label,
+    rep_notifications_enabled,
 )
-from src.odoo_sync.crm import RepAssignment, reset_round_robin
-from src.whatsapp_worker.inbound import (
+from src.odoo_sync.crm import RepAssignment, reset_round_robin  # noqa: E402
+from src.whatsapp_worker.inbound import (  # noqa: E402
     QualificationSession,
     QualificationTurnResult,
     notify_rep_on_handoff,
+)
+
+_REP_ENV = (
+    ENV_REPS_PERIFERICO,
+    ENV_REPS_SAN_FELIPE,
+    ENV_DEFAULT_REP_PHONE,
+    ENV_ENABLED,
+    "ODOO_URL",
 )
 
 
@@ -32,196 +52,205 @@ class FakeWhatsApp:
         return {"ok": True}
 
 
-@pytest.fixture(autouse=True)
-def clean_env(monkeypatch):
-    for key in (
-        ENV_REPS_PERIFERICO,
-        ENV_REPS_SAN_FELIPE,
-        ENV_DEFAULT_REP_PHONE,
-        ENV_ENABLED,
-        "ODOO_URL",
-    ):
-        monkeypatch.delenv(key, raising=False)
-    reset_round_robin()
-    yield
-    reset_round_robin()
+class RepNotifyTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        patcher = patch.dict(os.environ, {}, clear=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for key in _REP_ENV:
+            os.environ.pop(key, None)
+        reset_round_robin()
+        self.addCleanup(reset_round_robin)
+        self.client = FakeWhatsApp()
 
 
-def test_message_contains_every_required_field():
-    text = format_rep_notification(
-        client_phone="+526145550000",
-        vehicle_interest="2021 Mazda CX-30",
-        payment_method="financing",
-        branch_name="San Felipe",
-        lead_url="https://odoo.example/web#id=42&model=crm.lead&view_type=form",
-    )
+class TestMessageFormat(RepNotifyTestCase):
+    def test_message_contains_every_required_field(self):
+        text = format_rep_notification(
+            client_phone="+526145550000",
+            vehicle_interest="2021 Mazda CX-30",
+            payment_method="financing",
+            branch_name="San Felipe",
+            lead_url="https://odoo.example/web#id=42&model=crm.lead&view_type=form",
+        )
 
-    assert "¡Nuevo Lead Asignado!" in text
-    assert "*Cliente:* +526145550000" in text
-    assert "*Auto:* 2021 Mazda CX-30" in text
-    assert "*Modalidad:* Financiamiento" in text
-    assert "*Sucursal:* San Felipe" in text
-    assert "id=42&model=crm.lead" in text
+        self.assertIn("¡Nuevo Lead Asignado!", text)
+        self.assertIn("*Cliente:* +526145550000", text)
+        self.assertIn("*Auto:* 2021 Mazda CX-30", text)
+        self.assertIn("*Modalidad:* Financiamiento", text)
+        self.assertIn("*Sucursal:* San Felipe", text)
+        self.assertIn("id=42&model=crm.lead", text)
 
+    def test_message_uses_placeholders_when_data_missing(self):
+        text = format_rep_notification(client_phone="")
 
-def test_message_uses_placeholders_when_data_missing():
-    text = format_rep_notification(client_phone="")
+        self.assertIn("*Cliente:* n/d", text)
+        self.assertIn("*Auto:* Por confirmar", text)
+        self.assertIn("*Modalidad:* Por definir", text)
+        self.assertIn("*Sucursal:* Periférico", text)
 
-    assert "*Cliente:* n/d" in text
-    assert "*Auto:* Por confirmar" in text
-    assert "*Modalidad:* Por definir" in text
-    assert "*Sucursal:* Periférico" in text
+    def test_payment_labels(self):
+        self.assertEqual(payment_label("cash"), "Contado")
+        self.assertEqual(payment_label("trade_in"), "Auto a cuenta")
+        self.assertEqual(payment_label(None), "Por definir")
 
+    def test_odoo_lead_url_requires_base_and_id(self):
+        self.assertEqual(odoo_lead_url(7), "")
 
-def test_payment_labels():
-    assert payment_label("cash") == "Contado"
-    assert payment_label("trade_in") == "Auto a cuenta"
-    assert payment_label(None) == "Por definir"
+        os.environ["ODOO_URL"] = "https://autosell.odoo.com/"
 
-
-def test_odoo_lead_url_requires_base_and_id(monkeypatch):
-    assert odoo_lead_url(7) == ""
-    monkeypatch.setenv("ODOO_URL", "https://autosell.odoo.com/")
-    assert odoo_lead_url(7) == "https://autosell.odoo.com/web#id=7&model=crm.lead&view_type=form"
-    assert odoo_lead_url(None) == ""
-
-
-def test_notify_rep_sends_to_rotated_rep(monkeypatch):
-    monkeypatch.setenv(
-        ENV_REPS_PERIFERICO,
-        '[{"odoo_id": 1, "phone": "+526141111111"},'
-        ' {"odoo_id": 2, "phone": "+526142222222"}]',
-    )
-    client = FakeWhatsApp()
-
-    first = notify_rep(client_phone="+526145550000", branch="periferico", whatsapp_client=client)
-    second = notify_rep(client_phone="+526145550001", branch="periferico", whatsapp_client=client)
-
-    assert first.sent and second.sent
-    assert [call["phone"] for call in client.sent] == ["+526141111111", "+526142222222"]
-    assert first.odoo_id == 1
-    assert second.odoo_id == 2
+        self.assertEqual(
+            odoo_lead_url(7),
+            "https://autosell.odoo.com/web#id=7&model=crm.lead&view_type=form",
+        )
+        self.assertEqual(odoo_lead_url(None), "")
 
 
-def test_notify_rep_uses_branch_tag(monkeypatch):
-    monkeypatch.setenv(ENV_REPS_SAN_FELIPE, '[{"odoo_id": 3, "phone": "+526143333333"}]')
-    client = FakeWhatsApp()
+class TestNotifyRep(RepNotifyTestCase):
+    def test_sends_to_rotated_rep(self):
+        os.environ[ENV_REPS_PERIFERICO] = (
+            '[{"odoo_id": 1, "phone": "+526141111111"},'
+            ' {"odoo_id": 2, "phone": "+526142222222"}]'
+        )
 
-    result = notify_rep(client_phone="+526145550000", tag="2018 Mercedes +", whatsapp_client=client)
+        first = notify_rep(
+            client_phone="+526145550000", branch="periferico", whatsapp_client=self.client
+        )
+        second = notify_rep(
+            client_phone="+526145550001", branch="periferico", whatsapp_client=self.client
+        )
 
-    assert result.branch == "san_felipe"
-    assert client.sent[0]["phone"] == "+526143333333"
-    assert "San Felipe" in client.sent[0]["text"]
+        self.assertTrue(first.sent)
+        self.assertTrue(second.sent)
+        self.assertEqual(
+            [call["phone"] for call in self.client.sent],
+            ["+526141111111", "+526142222222"],
+        )
+        self.assertEqual(first.odoo_id, 1)
+        self.assertEqual(second.odoo_id, 2)
+
+    def test_branch_tag_routes_to_san_felipe(self):
+        os.environ[ENV_REPS_SAN_FELIPE] = '[{"odoo_id": 3, "phone": "+526143333333"}]'
+
+        result = notify_rep(
+            client_phone="+526145550000",
+            tag="2018 Mercedes +",
+            whatsapp_client=self.client,
+        )
+
+        self.assertEqual(result.branch, "san_felipe")
+        self.assertEqual(self.client.sent[0]["phone"], "+526143333333")
+        self.assertIn("San Felipe", self.client.sent[0]["text"])
+
+    def test_falls_back_to_default_phone(self):
+        os.environ[ENV_DEFAULT_REP_PHONE] = "+526149999999"
+
+        result = notify_rep(
+            client_phone="+526145550000", branch="san_felipe", whatsapp_client=self.client
+        )
+
+        self.assertTrue(result.sent)
+        self.assertIsNone(result.odoo_id)
+        self.assertEqual(self.client.sent[0]["phone"], "+526149999999")
+
+    def test_skips_when_nothing_configured(self):
+        result = notify_rep(client_phone="+526145550000", whatsapp_client=self.client)
+
+        self.assertFalse(result.sent)
+        self.assertEqual(result.skipped_reason, "no rep phone configured for branch")
+        self.assertEqual(self.client.sent, [])
+
+    def test_disabled_by_env(self):
+        os.environ.update(
+            {ENV_ENABLED: "false", ENV_DEFAULT_REP_PHONE: "+526149999999"}
+        )
+
+        result = notify_rep(client_phone="+526145550000", whatsapp_client=self.client)
+
+        self.assertFalse(result.sent)
+        self.assertEqual(result.skipped_reason, f"{ENV_ENABLED}=false")
+        self.assertEqual(self.client.sent, [])
+
+    def test_swallows_transport_errors(self):
+        os.environ[ENV_DEFAULT_REP_PHONE] = "+526149999999"
+        client = FakeWhatsApp(fail=RuntimeError("evolution 502"))
+
+        result = notify_rep(client_phone="+526145550000", whatsapp_client=client)
+
+        self.assertFalse(result.sent)
+        self.assertEqual(result.error, "evolution 502")
+
+    def test_explicit_assignment_bypasses_rotation(self):
+        pick = RepAssignment(branch="san_felipe", phone="+526144444444", odoo_id=8)
+
+        result = notify_rep(
+            client_phone="+526145550000",
+            assignment=pick,
+            whatsapp_client=self.client,
+            lead_url="https://odoo.example/lead/8",
+        )
+
+        self.assertTrue(result.sent)
+        self.assertEqual(self.client.sent[0]["phone"], "+526144444444")
+        self.assertIn("https://odoo.example/lead/8", self.client.sent[0]["text"])
+
+    def test_builds_default_client_when_none_injected(self):
+        os.environ[ENV_DEFAULT_REP_PHONE] = "+526149999999"
+        created: list[str] = []
+
+        class _Client:
+            def __init__(self) -> None:
+                created.append("built")
+
+            def send_text_message(self, *args, **kwargs):
+                return {"ok": True}
+
+        with patch("src.whatsapp_worker.client.WhatsAppWorkerClient", _Client):
+            result = notify_rep(client_phone="+526145550000")
+
+        self.assertTrue(result.sent)
+        self.assertEqual(created, ["built"])
+        self.assertTrue(rep_notifications_enabled())
 
 
-def test_notify_rep_falls_back_to_default_phone(monkeypatch):
-    monkeypatch.setenv(ENV_DEFAULT_REP_PHONE, "+526149999999")
-    client = FakeWhatsApp()
+class TestHandoffHook(RepNotifyTestCase):
+    @staticmethod
+    def _turn(*, handoff: bool) -> QualificationTurnResult:
+        session = QualificationSession(
+            phone="+526145550000",
+            instance="autosell_periferico",
+            state="HANDOFF_TO_HUMAN" if handoff else "AWAITING_PAYMENT_METHOD",
+            branch="periferico",
+            initial_message="Me interesa el Mazda CX-30",
+            payment_method="cash" if handoff else "",
+            lead_id=55 if handoff else None,
+        )
+        return QualificationTurnResult(
+            session=session, reply_text="ok", odoo_handoff=handoff
+        )
 
-    result = notify_rep(client_phone="+526145550000", branch="san_felipe", whatsapp_client=client)
+    def test_handoff_turn_notifies_rep(self):
+        os.environ[ENV_REPS_PERIFERICO] = '[{"odoo_id": 1, "phone": "+526141111111"}]'
 
-    assert result.sent
-    assert result.odoo_id is None
-    assert client.sent[0]["phone"] == "+526149999999"
+        notice = notify_rep_on_handoff(
+            self._turn(handoff=True), whatsapp_client=self.client
+        )
 
+        self.assertIsNotNone(notice)
+        self.assertTrue(notice["sent"])
+        self.assertIn("Mazda CX-30", self.client.sent[0]["text"])
+        self.assertIn("*Modalidad:* Contado", self.client.sent[0]["text"])
 
-def test_notify_rep_skips_when_nothing_configured():
-    client = FakeWhatsApp()
+    def test_non_handoff_turn_does_not_notify(self):
+        os.environ[ENV_REPS_PERIFERICO] = '[{"odoo_id": 1, "phone": "+526141111111"}]'
 
-    result = notify_rep(client_phone="+526145550000", whatsapp_client=client)
+        notice = notify_rep_on_handoff(
+            self._turn(handoff=False), whatsapp_client=self.client
+        )
 
-    assert not result.sent
-    assert result.skipped_reason == "no rep phone configured for branch"
-    assert client.sent == []
-
-
-def test_notify_rep_disabled_by_env(monkeypatch):
-    monkeypatch.setenv(ENV_ENABLED, "false")
-    monkeypatch.setenv(ENV_DEFAULT_REP_PHONE, "+526149999999")
-    client = FakeWhatsApp()
-
-    result = notify_rep(client_phone="+526145550000", whatsapp_client=client)
-
-    assert not result.sent
-    assert result.skipped_reason == f"{ENV_ENABLED}=false"
-    assert client.sent == []
-
-
-def test_notify_rep_swallows_transport_errors(monkeypatch):
-    monkeypatch.setenv(ENV_DEFAULT_REP_PHONE, "+526149999999")
-    client = FakeWhatsApp(fail=RuntimeError("evolution 502"))
-
-    result = notify_rep(client_phone="+526145550000", whatsapp_client=client)
-
-    assert not result.sent
-    assert result.error == "evolution 502"
+        self.assertIsNone(notice)
+        self.assertEqual(self.client.sent, [])
 
 
-def test_explicit_assignment_bypasses_rotation():
-    client = FakeWhatsApp()
-    pick = RepAssignment(branch="san_felipe", phone="+526144444444", odoo_id=8)
-
-    result = notify_rep(
-        client_phone="+526145550000",
-        assignment=pick,
-        whatsapp_client=client,
-        lead_url="https://odoo.example/lead/8",
-    )
-
-    assert result.sent
-    assert client.sent[0]["phone"] == "+526144444444"
-    assert "https://odoo.example/lead/8" in client.sent[0]["text"]
-
-
-def _turn(*, handoff: bool) -> QualificationTurnResult:
-    session = QualificationSession(
-        phone="+526145550000",
-        instance="autosell_periferico",
-        state="HANDOFF_TO_HUMAN" if handoff else "AWAITING_PAYMENT_METHOD",
-        branch="periferico",
-        initial_message="Me interesa el Mazda CX-30",
-        payment_method="cash" if handoff else "",
-        lead_id=55 if handoff else None,
-    )
-    return QualificationTurnResult(
-        session=session, reply_text="ok", odoo_handoff=handoff
-    )
-
-
-def test_handoff_hook_notifies_rep(monkeypatch):
-    monkeypatch.setenv(ENV_REPS_PERIFERICO, '[{"odoo_id": 1, "phone": "+526141111111"}]')
-    client = FakeWhatsApp()
-
-    notice = notify_rep_on_handoff(_turn(handoff=True), whatsapp_client=client)
-
-    assert notice is not None and notice["sent"]
-    assert "Mazda CX-30" in client.sent[0]["text"]
-    assert "*Modalidad:* Contado" in client.sent[0]["text"]
-
-
-def test_non_handoff_turn_does_not_notify(monkeypatch):
-    monkeypatch.setenv(ENV_REPS_PERIFERICO, '[{"odoo_id": 1, "phone": "+526141111111"}]')
-    client = FakeWhatsApp()
-
-    assert notify_rep_on_handoff(_turn(handoff=False), whatsapp_client=client) is None
-    assert client.sent == []
-
-
-def test_notify_rep_creates_default_client_only_when_needed(monkeypatch):
-    monkeypatch.setenv(ENV_DEFAULT_REP_PHONE, "+526149999999")
-    created: list[str] = []
-
-    class _Client:
-        def __init__(self) -> None:
-            created.append("built")
-
-        def send_text_message(self, *a, **k):
-            return {"ok": True}
-
-    monkeypatch.setattr(
-        "src.whatsapp_worker.client.WhatsAppWorkerClient", _Client, raising=True
-    )
-
-    assert notify_rep(client_phone="+526145550000").sent
-    assert created == ["built"]
-    assert whatsapp_rep.rep_notifications_enabled()
+if __name__ == "__main__":
+    unittest.main()
