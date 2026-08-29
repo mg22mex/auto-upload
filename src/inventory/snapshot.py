@@ -5,6 +5,44 @@ from pathlib import Path
 
 from src.models import Vehicle
 
+# Trailing marker on autosell.mx titles; carried verbatim into Marketplace titles.
+BRANCH_TAGS = {"*": "periferico", "+": "san_felipe", "-": "consignment"}
+
+
+def branch_tag(vehicle: Vehicle) -> str | None:
+    """Return the trailing branch marker of a vehicle title, when present."""
+    title = (vehicle.marketplace_title or "").rstrip()
+    if title and title[-1] in BRANCH_TAGS:
+        return title[-1]
+    return None
+
+
+def summarize_catalog(vehicles: list[Vehicle]) -> dict[str, object]:
+    """Vehicle count plus branch-tag breakdown (``*`` / ``+`` / ``-`` / untagged)."""
+    tags = {tag: 0 for tag in BRANCH_TAGS}
+    untagged = 0
+    for vehicle in vehicles:
+        tag = branch_tag(vehicle)
+        if tag is None:
+            untagged += 1
+        else:
+            tags[tag] += 1
+    return {"count": len(vehicles), "tags": tags, "untagged": untagged}
+
+
+def format_catalog_summary(vehicles: list[Vehicle]) -> str:
+    """One-line catalog report used by the bump/sync CLIs."""
+    summary = summarize_catalog(vehicles)
+    tags = summary["tags"]
+    parts = [
+        f"{tag} {BRANCH_TAGS[tag]}={count}" for tag, count in tags.items()  # type: ignore[index]
+    ]
+    return (
+        f"Catalog: {summary['count']} vehicle(s)  |  "
+        + "  ".join(parts)
+        + f"  untagged={summary['untagged']}"
+    )
+
 
 def save_catalog_snapshot(vehicles: list[Vehicle], path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)

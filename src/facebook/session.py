@@ -95,6 +95,38 @@ def page_shows_login_form(page: Page) -> bool:
     return False
 
 
+def page_shows_checkpoint(page: Page) -> bool:
+    """True when Facebook is holding the account in a security/2FA checkpoint."""
+    url = (page.url or "").lower()
+    if "checkpoint" in url or "two_step_verification" in url or "confirm_identity" in url:
+        return True
+    indicators = [
+        page.get_by_text("We need to confirm", exact=False),
+        page.get_by_text("Confirma tu identidad", exact=False),
+        page.get_by_text("Revisa tu cuenta", exact=False),
+        page.get_by_text("Your account has been", exact=False),
+        page.get_by_text("Tu cuenta ha sido", exact=False),
+        page.get_by_text("Enter the code", exact=False),
+        page.get_by_text("Ingresa el código", exact=False),
+    ]
+    for locator in indicators:
+        try:
+            if locator.count() and locator.first.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def detect_session_state(page: Page) -> str:
+    """Classify the current page as ``ok`` | ``logged_out`` | ``checkpoint``."""
+    if page_shows_checkpoint(page):
+        return "checkpoint"
+    if page_shows_login_form(page):
+        return "logged_out"
+    return "ok"
+
+
 def is_logged_in(page: Page) -> bool:
     page.goto("https://www.facebook.com/marketplace", wait_until="domcontentloaded", timeout=60_000)
     page.wait_for_timeout(2_000)

@@ -12,9 +12,10 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from src.alerts import send_alert
 from src.facebook.executor import execute_actions
+from src.facebook.health import format_health_report, precheck_accounts, unhealthy
 from src.facebook.reposter import execute_reposts
-from src.facebook.session import format_session_login_error, resolve_session_dir, session_health_report
 from src.facebook.util import ensure_unbuffered_stdio, env_int
 from src.inventory.snapshot import load_catalog_snapshot
 from src.store.db import SyncStore
@@ -200,26 +201,29 @@ def main() -> int:
         print(f"Processing reposts for {account_id} (Facebook Profile: {label})")
     print("")
 
-    # Surface session problems early (before long Playwright loop)
-    print("Session health (Chromium profiles under sessions/):")
-    session_warns: list[str] = []
-    for account_id in account_ids:
-        sdir = resolve_session_dir(config, account_id, ROOT)
-        health = session_health_report(sdir)
-        flag = "OK" if not health["looks_empty"] else "PROBLEM"
-        print(
-            f"  [{flag}] {account_id}: exists={health['exists']} "
-            f"files={health['file_count']} cookies_file={health['has_cookies_file']} "
-            f"path={health['path']}"
-        )
-        if health["looks_empty"]:
-            session_warns.append(format_session_login_error(account_id, sdir))
+    # Surface logged-out sessions / security checkpoints before the Playwright loop.
+    health_results = precheck_accounts(
+        config,
+        account_ids,
+        ROOT,
+        live=False if args.dry_run else None,
+    )
+    print(format_health_report(health_results))
+    session_warns = [result.detail for result in unhealthy(health_results)]
     if session_warns:
         print("")
         print("WARNING: one or more accounts need a headed login before repost:", file=sys.stderr)
         for msg in session_warns:
             print(f"  {msg}", file=sys.stderr)
         print("", file=sys.stderr)
+        if not args.dry_run:
+            broken = ", ".join(
+                f"{result.account_id}={result.state}" for result in unhealthy(health_results)
+            )
+            send_alert(
+                "\n".join([f"Accounts: {broken}", "", *session_warns]),
+                subject="repost blocked — session health check failed",
+            )
     print("")
 
     if create_actions:
@@ -257,6 +261,7 @@ def main() -> int:
     rc = 0
     session_expired_n = 0
     processed_n = 0
+    hard_errors: list[str] = []
 
     def _sessionish(err: str) -> bool:
         low = err.lower()
@@ -290,6 +295,7 @@ def main() -> int:
                     hard.append(err)
             if hard:
                 rc = 1
+                hard_errors.extend(f"create: {err}" for err in hard)
 
     if actions:
         result = execute_reposts(actions, store, config, root=ROOT, account_order=account_ids)
@@ -314,6 +320,7 @@ def main() -> int:
                     hard.append(err)
             if hard:
                 rc = 1
+                hard_errors.extend(f"repost: {err}" for err in hard)
     else:
         processed_n = len(account_ids)
 
@@ -321,6 +328,21 @@ def main() -> int:
         f"Repost summary: processed={processed_n} expired={session_expired_n}",
         flush=True,
     )
+
+    if hard_errors or session_expired_n:
+        summary = [
+            f"processed={processed_n} expired={session_expired_n} "
+            f"hard_errors={len(hard_errors)}",
+        ]
+        summary.extend(f"  - {err}" for err in hard_errors[:15])
+        if len(hard_errors) > 15:
+            summary.append(f"  … and {len(hard_errors) - 15} more")
+        if session_expired_n:
+            summary.append(
+                "Sessions expired — refresh headed: python scripts/fb_login.py --account <id>"
+            )
+        send_alert("\n".join(summary), subject="repost run finished with errors")
+
     return rc
 
 

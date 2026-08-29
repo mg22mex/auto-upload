@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from src.facebook.util import ensure_unbuffered_stdio, env_bool
+from src.facebook.util import ensure_unbuffered_stdio, env_bool, env_str
 from src.sync.process_lock import ProcessLock
 from src.sync.weekly_bump import resolve_weekly_bump_mode, weekly_bump_config
 
@@ -33,6 +33,28 @@ def _run(cmd: list[str]) -> int:
 def skip_odoo_requested(*, cli: bool = False) -> bool:
     """True when CLI ``--skip-odoo`` or ``SKIP_ODOO`` env is set."""
     return bool(cli) or env_bool("SKIP_ODOO", False)
+
+
+def skip_scrape_requested(*, cli: bool = False) -> bool:
+    """True when CLI ``--skip-scrape`` or ``SKIP_SCRAPE`` env is set."""
+    return bool(cli) or env_bool("SKIP_SCRAPE", False)
+
+
+def odoo_credentials_present() -> bool:
+    """True when enough Odoo XML-RPC env is set to attempt an inventory sync."""
+    return bool(env_str("ODOO_URL", "") and env_str("ODOO_DB", ""))
+
+
+def _print_catalog_summary(catalog_path: Path) -> None:
+    """Report vehicle count + branch-tag breakdown of the snapshot in use."""
+    from src.inventory.snapshot import format_catalog_summary, load_catalog_snapshot
+
+    try:
+        vehicles = load_catalog_snapshot(catalog_path)
+    except Exception as exc:
+        print(f"WARNING: could not read catalog {catalog_path}: {exc}", flush=True)
+        return
+    print(format_catalog_summary(vehicles), flush=True)
 
 
 def run_catalog_sync(
@@ -79,20 +101,35 @@ def run_catalog_sync(
         if src.is_file():
             dest.write_bytes(src.read_bytes())
 
-    if not skip_odoo and (os.getenv("ODOO_URL") or os.getenv("ODOO_DB")):
-        odoo_rc = _run(
-            [
-                sys.executable,
-                str(ROOT / "scripts" / "sync_odoo_inventory.py"),
-                "--from-snapshot",
-                catalog,
-            ]
-        )
-        if odoo_rc:
+    if not skip_odoo:
+        if odoo_credentials_present():
             print(
-                f"WARNING: Odoo inventory sync exited {odoo_rc} — continuing bump",
+                "Odoo inventory sync: pushing catalog snapshot via XML-RPC",
                 flush=True,
             )
+            odoo_rc = _run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "sync_odoo_inventory.py"),
+                    "--from-snapshot",
+                    catalog,
+                    "--config",
+                    config_path,
+                ]
+            )
+            if odoo_rc:
+                print(
+                    f"WARNING: Odoo inventory sync exited {odoo_rc} — continuing bump",
+                    flush=True,
+                )
+        else:
+            print(
+                "WARNING: Odoo inventory sync skipped — ODOO_URL / ODOO_DB not set "
+                "(export them or pass --skip-odoo to silence)",
+                flush=True,
+            )
+
+    _print_catalog_summary(ROOT / catalog)
 
     sync_cmd = [
         sys.executable,
@@ -176,7 +213,10 @@ def main() -> int:
     parser.add_argument(
         "--skip-scrape",
         action="store_true",
-        help="With catalog sync, reuse existing catalog JSON (no autosell.mx fetch)",
+        help=(
+            "With catalog sync, reuse existing catalog JSON (no autosell.mx fetch); "
+            "also set by SKIP_SCRAPE=true"
+        ),
     )
     parser.add_argument(
         "--skip-odoo",
@@ -185,6 +225,12 @@ def main() -> int:
             "Skip Odoo XML-RPC inventory sync; use local catalog_latest.json only "
             "(also set by SKIP_ODOO=true). Implies no autosell scrape in catalog sync."
         ),
+    )
+    parser.add_argument(
+        "--cleanup-logs",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="After the bump, delete debug PNGs / temp logs older than LOG_RETENTION_DAYS (7)",
     )
     parser.add_argument("--dry-run", action="store_true", help="Plan only")
     parser.add_argument("--catalog", default="data/catalog_latest.json")
@@ -318,14 +364,21 @@ def _run_bump(args, config: dict, bump: dict, repost_cfg: dict) -> int:
         do_sync = bool(args.all_eligible)
 
     skip_odoo = skip_odoo_requested(cli=bool(args.skip_odoo))
+    skip_scrape = skip_scrape_requested(cli=bool(args.skip_scrape))
+    scrape = not skip_scrape and not skip_odoo
 
     if do_sync:
+        print(
+            f"Catalog ingestion: scrape={scrape} odoo="
+            f"{'off' if skip_odoo else ('on' if odoo_credentials_present() else 'no-creds')}",
+            flush=True,
+        )
         sync_rc = run_catalog_sync(
             catalog=args.catalog,
             config_path=args.config,
             dry_run=args.dry_run,
             accounts=args.account,
-            scrape=not args.skip_scrape and not skip_odoo,
+            scrape=scrape,
             skip_odoo=skip_odoo,
         )
         if sync_rc:
@@ -375,7 +428,25 @@ def _run_bump(args, config: dict, bump: dict, repost_cfg: dict) -> int:
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     result = subprocess.run(cmd, cwd=str(ROOT), env=env)
+
+    if args.cleanup_logs and not args.dry_run:
+        _cleanup_logs()
+
     return int(result.returncode)
+
+
+def _cleanup_logs() -> None:
+    """Post-run retention sweep for debug screenshots and temp logs."""
+    from src.facebook.util import env_float
+    from src.log_cleanup import DEFAULT_MAX_AGE_DAYS, cleanup_default_targets
+
+    max_age = env_float("LOG_RETENTION_DAYS", float(DEFAULT_MAX_AGE_DAYS))
+    try:
+        result = cleanup_default_targets(ROOT, max_age_days=max_age)
+    except Exception as exc:
+        print(f"WARNING: log cleanup failed: {exc}", flush=True)
+        return
+    print(result.summary(), flush=True)
 
 
 if __name__ == "__main__":
