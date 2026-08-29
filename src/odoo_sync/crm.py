@@ -9,8 +9,16 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from threading import Lock
 from typing import Any
 
+from src.config import (
+    ENV_DEFAULT_REP_PHONE,
+    SalesRep,
+    branch_for_tag,
+    default_rep_phone,
+    load_branch_reps,
+)
 from src.odoo_sync.base import OdooCRMError
 from src.odoo_sync.client import OdooCRMClient
 
@@ -763,9 +771,142 @@ class CRMLeadManager:
         }
 
 
+@dataclass(frozen=True)
+class RepAssignment:
+    """Result of a round-robin pick for one lead."""
+
+    branch: str
+    phone: str
+    odoo_id: int | None = None
+    rep_name: str = ""
+    fell_back: bool = False
+    rotation_index: int = 0
+
+    @property
+    def assigned(self) -> bool:
+        return bool(self.phone or self.odoo_id)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "branch": self.branch,
+            "phone": self.phone,
+            "odoo_id": self.odoo_id,
+            "rep_name": self.rep_name,
+            "fell_back": self.fell_back,
+            "rotation_index": self.rotation_index,
+        }
+
+
+class RoundRobinAssigner:
+    """Index-based rotation over each branch's rep roster.
+
+    State is a per-branch counter held in this process. Rosters are re-read on
+    every pick (unless injected) so an env change lands without a restart; the
+    counter is modulo'd by the current roster length, so adding or removing a
+    rep never breaks the rotation.
+    """
+
+    def __init__(
+        self,
+        reps: dict[str, list[SalesRep]] | None = None,
+        *,
+        default_phone: str | None = None,
+    ) -> None:
+        self._reps = reps
+        self._default_phone = default_phone
+        self._cursor: dict[str, int] = {}
+        self._lock = Lock()
+
+    def roster(self, branch: str) -> list[SalesRep]:
+        table = self._reps if self._reps is not None else load_branch_reps()
+        return list(table.get(branch) or [])
+
+    def fallback_phone(self) -> str:
+        if self._default_phone is not None:
+            return self._default_phone
+        return default_rep_phone()
+
+    def reset(self, branch: str | None = None) -> None:
+        with self._lock:
+            if branch is None:
+                self._cursor.clear()
+            else:
+                self._cursor.pop(normalize_crm_branch(branch), None)
+
+    def next_rep(
+        self,
+        branch: str | None = None,
+        *,
+        tag: str | None = None,
+    ) -> RepAssignment:
+        """Pick the next rep for ``branch`` (or the branch implied by ``tag``)."""
+        requested = normalize_crm_branch(branch_for_tag(tag) if tag else branch)
+        roster = self.roster(requested)
+        fell_back = False
+
+        if not roster and requested != PRIMARY_BRANCH:
+            primary_roster = self.roster(PRIMARY_BRANCH)
+            if primary_roster:
+                print(
+                    f"WARN CRM branch {requested!r}: no reps configured; "
+                    f"rotating {PRIMARY_BRANCH!r} roster instead"
+                )
+                requested, roster, fell_back = PRIMARY_BRANCH, primary_roster, True
+
+        if not roster:
+            phone = self.fallback_phone()
+            if not phone:
+                print(
+                    f"WARN CRM branch {requested!r}: no reps and no "
+                    f"{ENV_DEFAULT_REP_PHONE}; lead stays unassigned"
+                )
+            return RepAssignment(
+                branch=requested,
+                phone=phone,
+                odoo_id=None,
+                rep_name="",
+                fell_back=True,
+            )
+
+        with self._lock:
+            index = self._cursor.get(requested, 0) % len(roster)
+            self._cursor[requested] = index + 1
+        rep = roster[index]
+        return RepAssignment(
+            branch=requested,
+            phone=rep.phone or self.fallback_phone(),
+            odoo_id=rep.odoo_id,
+            rep_name=rep.name,
+            fell_back=fell_back,
+            rotation_index=index,
+        )
+
+
+_ASSIGNER = RoundRobinAssigner()
+
+
+def assign_lead_owner(
+    branch: str | None = None,
+    *,
+    tag: str | None = None,
+    assigner: RoundRobinAssigner | None = None,
+) -> RepAssignment:
+    """Round-robin the next rep for an incoming lead (process-wide rotation)."""
+    return (assigner or _ASSIGNER).next_rep(branch, tag=tag)
+
+
+def reset_round_robin(branch: str | None = None) -> None:
+    """Reset the shared rotation cursor (tests / operator tooling)."""
+    _ASSIGNER.reset(branch)
+
+
 __all__ = [
     "BRANCH_TEAM_ENV",
     "CRMLeadManager",
+    "RepAssignment",
+    "RoundRobinAssigner",
+    "assign_lead_owner",
+    "reset_round_robin",
     "ENV_MEDIUM_ID",
     "ENV_SOURCE_ID",
     "ENV_TEAM_PERIFERICO",

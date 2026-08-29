@@ -204,6 +204,27 @@ def branch_context_for_inbound_call(event: InboundCallEvent) -> dict[str, Any]:
     return ctx
 
 
+def notify_rep_for_inbound_call(
+    event: InboundCallEvent,
+    ctx: dict[str, Any],
+    crm_result: dict[str, Any] | None = None,
+    *,
+    whatsapp_client: Any | None = None,
+) -> dict[str, Any]:
+    """Post call-log handoff: WhatsApp the round-robin rep for this branch."""
+    from src.notifications.whatsapp_rep import notify_rep
+
+    result = notify_rep(
+        client_phone=event.caller_phone,
+        branch=str(ctx.get("branch") or PRIMARY_BRANCH),
+        vehicle_interest="Llamada entrante",
+        payment_method=None,
+        lead_id=(crm_result or {}).get("lead_id"),
+        whatsapp_client=whatsapp_client,
+    )
+    return result.as_dict()
+
+
 def wants_twiml_response(request: Request, raw: dict[str, Any]) -> bool:
     """Twilio and SIP gateways usually expect XML; JSON when explicitly requested."""
     fmt = (request.query_params.get("format") or raw.get("format") or "").strip().lower()
@@ -282,6 +303,7 @@ __all__ = [
     "build_inbound_call_response",
     "build_twiml_dial",
     "forward_number_for_branch",
+    "notify_rep_for_inbound_call",
     "parse_inbound_call_payload",
     "parse_inbound_call_request",
     "wants_twiml_response",

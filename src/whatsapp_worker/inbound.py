@@ -408,12 +408,72 @@ def process_qualification_turn(
             odoo_notes=build_qualification_notes(session),
         )
 
-    session.state = STATE_HANDOFF
+    session.state = STATE_HANDOFF_TO_HUMAN
     session.updated_at = now
     return QualificationTurnResult(
         session=session,
         reply_text=_post_handoff_message(session.physical_location),
     )
+
+
+def apply_qualification_to_odoo(
+    odoo: Any,
+    event: WhatsAppInboundEvent,
+    turn: QualificationTurnResult,
+) -> int | None:
+    """Create/update the CRM lead behind a qualification turn; returns lead id."""
+    session = turn.session
+    if not (turn.odoo_create or turn.odoo_handoff):
+        return session.lead_id
+
+    branch_id = int(session.branch_id or os.getenv("VOICE_DEFAULT_BRANCH_ID") or 1)
+    odoo.authenticate()
+    summary = (
+        turn.odoo_notes
+        if turn.odoo_handoff
+        else f"WhatsApp inbound: {session.initial_message or event.text}"
+    )
+    lead_result = odoo.create_or_update_lead(
+        session.contact_name or event.name,
+        event.phone,
+        session.initial_message or event.text,
+        branch_id,
+        quote_summary=summary,
+        stage_name="New",
+        channel=WA_CHANNEL,
+        schedule_follow_up=True,
+    )
+    session.lead_id = lead_result.lead_id
+    return lead_result.lead_id
+
+
+def notify_rep_on_handoff(
+    turn: QualificationTurnResult,
+    *,
+    whatsapp_client: Any | None = None,
+) -> dict[str, Any] | None:
+    """Alert the round-robin rep when a turn reaches ``HANDOFF_TO_HUMAN``.
+
+    Only the transition turn carries ``odoo_handoff``, so follow-up messages in
+    an already-handed-off conversation do not re-alert. Returns ``None`` when the
+    turn is not a handoff; never raises.
+    """
+    if not turn.odoo_handoff:
+        return None
+
+    from src.notifications.whatsapp_rep import notify_rep
+
+    session = turn.session
+    interest = session.initial_message or session.trade_in_vehicle or ""
+    result = notify_rep(
+        client_phone=session.phone,
+        branch=session.branch,
+        vehicle_interest=interest,
+        payment_method=session.payment_method,
+        lead_id=session.lead_id,
+        whatsapp_client=whatsapp_client,
+    )
+    return result.as_dict()
 
 
 class QualificationStore:

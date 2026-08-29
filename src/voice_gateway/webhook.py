@@ -38,15 +38,19 @@ from src.whatsapp_worker.inbound import (
     WA_CHANNEL,
     QualificationStore,
     QualificationTurnResult,
+    apply_qualification_to_odoo,
     inbound_to_voice_payload,
+    notify_rep_on_handoff,
     parse_evolution_inbound,
     process_qualification_turn,
     qualification_enabled,
 )
+from src.odoo_sync.triggers import process_incoming_webhook
 from src.pipeline import AutosellPipeline, PipelineResult
 from src.voice_gateway.inbound_call import (
     branch_context_for_inbound_call,
     build_inbound_call_response,
+    notify_rep_for_inbound_call,
     parse_inbound_call_payload,
     parse_inbound_call_request,
 )
@@ -166,37 +170,7 @@ def _apply_qualification_odoo(
     turn: QualificationTurnResult,
 ) -> int | None:
     """Create or update Odoo CRM lead for a qualification turn."""
-    session = turn.session
-    branch_id = int(session.branch_id or os.getenv("VOICE_DEFAULT_BRANCH_ID") or 1)
-    odoo.authenticate()
-    if turn.odoo_create:
-        note = f"WhatsApp inbound: {session.initial_message or event.text}"
-        lead_result = odoo.create_or_update_lead(
-            session.contact_name or event.name,
-            event.phone,
-            session.initial_message or event.text,
-            branch_id,
-            quote_summary=note,
-            stage_name="New",
-            channel=WA_CHANNEL,
-            schedule_follow_up=True,
-        )
-        session.lead_id = lead_result.lead_id
-        return lead_result.lead_id
-    if turn.odoo_handoff:
-        lead_result = odoo.create_or_update_lead(
-            session.contact_name or event.name,
-            event.phone,
-            session.initial_message or event.text,
-            branch_id,
-            quote_summary=turn.odoo_notes,
-            stage_name="New",
-            channel=WA_CHANNEL,
-            schedule_follow_up=True,
-        )
-        session.lead_id = lead_result.lead_id
-        return lead_result.lead_id
-    return session.lead_id
+    return apply_qualification_to_odoo(odoo, event, turn)
 
 
 async def _handle_whatsapp_qualification(
@@ -216,6 +190,9 @@ async def _handle_whatsapp_qualification(
         physical_location=branch_ctx["physical_location"],
     )
     lead_id = await asyncio.to_thread(_apply_qualification_odoo, odoo, event, turn)
+    rep_notice = await asyncio.to_thread(
+        notify_rep_on_handoff, turn, whatsapp_client=whatsapp
+    )
     reply_error: str | None = None
     reply_sent = False
     try:
@@ -251,6 +228,7 @@ async def _handle_whatsapp_qualification(
         "qualification_state": turn.session.state,
         "auto_reply_sent": reply_sent,
         "auto_reply_error": reply_error,
+        "rep_notification": rep_notice,
         "error": None,
     }
 
@@ -433,6 +411,14 @@ def create_app(
             call_status=event.call_status or None,
             duration_sec=event.duration_sec,
         )
+        rep_notice = await asyncio.to_thread(
+            notify_rep_for_inbound_call,
+            event,
+            ctx,
+            result,
+            whatsapp_client=_get_whatsapp_client(),
+        )
+        result = {**result, "rep_notification": rep_notice}
         logger.info(
             "Inbound call %s → %s branch=%s team=%s lead=%s activity=%s",
             event.caller_phone,
@@ -448,6 +434,42 @@ def create_app(
             crm_result=result,
             raw=raw,
         )
+
+    async def _handle_odoo_webhook(payload: dict[str, Any]) -> JSONResponse:
+        result = await asyncio.to_thread(
+            process_incoming_webhook, payload, crm=_get_crm_manager()
+        )
+        logger.info(
+            "Odoo webhook event=%s lead=%s ok=%s",
+            result.get("event"),
+            (result.get("lead") or {}).get("lead_id")
+            if isinstance(result.get("lead"), dict)
+            else None,
+            result.get("ok"),
+        )
+        return JSONResponse(status_code=200, content=result)
+
+    @app.post("/webhook/odoo")
+    async def odoo_webhook(request: Request) -> JSONResponse:
+        """Inbound lead / stage-change events from Odoo automated actions."""
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"invalid JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="payload must be a JSON object")
+        return await _handle_odoo_webhook(payload)
+
+    @app.post("/odoo/webhook")
+    async def odoo_webhook_alias(request: Request) -> JSONResponse:
+        """Alias for Odoo actions configured against /odoo/webhook."""
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"invalid JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="payload must be a JSON object")
+        return await _handle_odoo_webhook(payload)
 
     @app.get("/webhook/facebook", response_class=PlainTextResponse)
     def verify_facebook_webhook(request: Request) -> PlainTextResponse:
