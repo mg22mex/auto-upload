@@ -91,7 +91,10 @@ class TestMessageFormat(RepNotifyTestCase):
 
     def test_payment_labels(self):
         self.assertEqual(payment_label("cash"), "Contado")
-        self.assertEqual(payment_label("trade_in"), "Auto a cuenta")
+        self.assertEqual(payment_label("trade_in"), "Auto a cambio")
+        self.assertEqual(
+            payment_label("financing_trade_in"), "Financiamiento + Auto a cambio"
+        )
         self.assertEqual(payment_label(None), "Por definir")
 
     def test_odoo_lead_url_requires_base_and_id(self):

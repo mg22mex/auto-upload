@@ -9,6 +9,8 @@ from src.lead_routing import (
     AGENT_AI,
     AGENT_HUMAN,
     MG_QUOTE_LEAD_TAG,
+    PAYMENT_FINANCING_TRADE_IN,
+    PAYMENT_TRADE_IN,
     STAGE_CITA,
     STAGE_PRIMER_CONTACTO,
     advance_trade_in_qualification,
@@ -18,6 +20,7 @@ from src.lead_routing import (
     format_ai_reply,
     handoff_appointment_to_rep,
     has_mg_quote_tag,
+    parse_payment_intent,
     parse_trade_in_details,
     route_inbound_lead,
     should_defer_human_assignment,
@@ -106,24 +109,39 @@ class TestAiReply(unittest.TestCase):
     def test_permuta_reply_asks_version_km(self):
         text = format_ai_reply(
             name="Marco",
-            text="Forma de pago: Permuta (trade-in)",
+            text="Forma de pago: Auto a cambio (trade-in)",
             branch_name="San Felipe",
         )
         self.assertIn("versión", text.casefold())
         self.assertIn("kilometraje", text.casefold())
+        self.assertIn("auto a cambio", text.casefold())
 
 
 class TestTradeInQualification(unittest.TestCase):
     def test_detect_permuta(self):
-        self.assertTrue(detect_forma_pago_permuta("Forma de pago: Permuta (trade-in)"))
+        self.assertTrue(detect_forma_pago_permuta("Forma de pago: Auto a cambio (trade-in)"))
         self.assertTrue(detect_forma_pago_permuta("quiero permuta"))
+        self.assertTrue(detect_forma_pago_permuta("a cambio"))
         self.assertFalse(detect_forma_pago_permuta("contado"))
+
+    def test_combined_payment_intent(self):
+        for text in (
+            "2 y 3",
+            "financiamiento y a cambio",
+            "financiamiento con auto a cambio",
+            "3 y 2",
+        ):
+            intent = parse_payment_intent(text)
+            self.assertTrue(intent.financing, text)
+            self.assertTrue(intent.trade_in, text)
+            self.assertTrue(intent.is_combined_financing_trade_in, text)
+            self.assertEqual(intent.session_key, PAYMENT_FINANCING_TRADE_IN, text)
 
     def test_prompts_for_version_and_km(self):
         details, reply, meta = advance_trade_in_qualification(
-            "Forma de pago: Permuta (trade-in). Trade-in: Toyota Corolla 2020."
+            "Forma de pago: Auto a cambio (trade-in). Auto a cambio: Toyota Corolla 2020."
         )
-        self.assertTrue(details.is_permuta)
+        self.assertTrue(details.is_trade_in)
         self.assertEqual(details.year, 2020)
         self.assertEqual(details.make, "Toyota")
         self.assertEqual(details.model, "Corolla")
@@ -131,11 +149,40 @@ class TestTradeInQualification(unittest.TestCase):
         assert reply is not None
         self.assertIn("Versión", reply)
         self.assertIn("Kilometraje", reply)
+        self.assertIn("auto a cambio", reply.casefold())
         self.assertIsNone(meta)
+
+    def test_combined_financing_trade_in_quote(self):
+        prior = parse_trade_in_details(
+            "financiamiento y a cambio. Toyota Corolla 2020",
+        )
+        self.assertTrue(prior.wants_financing)
+        self.assertTrue(prior.is_trade_in)
+        details, reply, meta = advance_trade_in_qualification(
+            "Versión LE, Kilometraje 85000 km",
+            prior=prior,
+            lead_name="Marco Gastelum",
+            vehicle_interest="camioneta",
+            vehicle_price=450000,
+        )
+        self.assertEqual(details.version.upper(), "LE")
+        self.assertEqual(details.mileage_km, 85000)
+        self.assertTrue(details.wants_financing)
+        self.assertIsNotNone(reply)
+        assert reply is not None
+        self.assertIn(QUOTE_DISCLAIMER, reply)
+        self.assertIn("Trade-in (equity)", reply)
+        self.assertIn("enganche", reply.casefold())
+        self.assertIsNotNone(meta)
+        assert meta is not None
+        self.assertTrue(meta["disclaimer_present"])
+        self.assertTrue(meta["financing"])
+        self.assertEqual(meta["payment_method"], PAYMENT_FINANCING_TRADE_IN)
+        self.assertGreater(float(meta["valor_compra"]), 0)
 
     def test_quote_applies_valor_compra_and_disclaimer(self):
         prior = parse_trade_in_details(
-            "Forma de pago: Permuta (trade-in). Toyota Corolla 2020",
+            "Forma de pago: Auto a cambio (trade-in). Toyota Corolla 2020",
         )
         details, reply, meta = advance_trade_in_qualification(
             "Versión LE, Kilometraje 85000 km",
@@ -154,6 +201,7 @@ class TestTradeInQualification(unittest.TestCase):
         assert meta is not None
         self.assertTrue(meta["disclaimer_present"])
         self.assertGreater(float(meta["valor_compra"]), 0)
+        self.assertEqual(meta["payment_method"], PAYMENT_TRADE_IN)
 
 
 class TestAppointmentHandoff(unittest.TestCase):

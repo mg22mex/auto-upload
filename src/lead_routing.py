@@ -290,23 +290,23 @@ def format_ai_reply(
             "Puedo agendar *cita o prueba de manejo* cuando gustes."
         )
 
+    if detect_forma_pago_permuta(text or "") or detect_forma_pago_permuta(interest):
+        return (
+            f"Perfecto, {who}. Para *Forma de pago: Auto a cambio (trade-in)* necesito "
+            "los datos de tu auto a cuenta: año, marca, modelo, *versión* y "
+            "*kilometraje*. Con Autométrica calculamos el *Valor Compra* y lo "
+            "aplicamos como enganche en la cotización a financiamiento.\n\n"
+            "Ejemplo: `Toyota Corolla 2020 LE 85,000 km`"
+        )
+
     if any(token in lowered for token in ("financ", "crédito", "credito", "enganche", "mensual")):
         return (
             f"Con gusto te ayudo con el financiamiento, {who}. "
             "En Autosell cotizamos a plazos (12–60 meses) con enganche flexible "
-            "y opción de auto a cuenta.\n\n"
+            "y opción de auto a cambio.\n\n"
             f"{'Sobre tu interés: ' + interest + chr(10) + chr(10) if interest else ''}"
             "¿Quieres que te prepare una cotización estimada, o prefieres "
             "agendar una *cita / prueba de manejo* en sucursal?"
-        )
-
-    if detect_forma_pago_permuta(text or "") or detect_forma_pago_permuta(interest):
-        return (
-            f"Perfecto, {who}. Para *Forma de pago: Permuta (trade-in)* necesito "
-            "los datos de tu auto a cuenta: año, marca, modelo, *versión* y "
-            "*kilometraje*. Con Autométrica calculamos el *Valor Compra* y lo "
-            "aplicamos como enganche en la cotización.\n\n"
-            "Ejemplo: `Toyota Corolla 2020 LE 85,000 km`"
         )
 
     if interest:
@@ -329,11 +329,19 @@ def format_ai_reply(
     )
 
 
-# --- Autométrica trade-in / permuta qualification --------------------------------
+# --- Autométrica trade-in / Auto a cambio qualification --------------------------
 
-PAYMENT_LABEL_PERMUTA = "Permuta (trade-in)"
+PAYMENT_LABEL_AUTO_A_CAMBIO = "Auto a cambio (trade-in)"
+PAYMENT_LABEL_PERMUTA = PAYMENT_LABEL_AUTO_A_CAMBIO  # backward-compatible alias
 
-_PERMUTA_TOKENS = (
+PAYMENT_CASH = "cash"
+PAYMENT_FINANCING = "financing"
+PAYMENT_TRADE_IN = "trade_in"
+PAYMENT_FINANCING_TRADE_IN = "financing_trade_in"
+
+_TRADE_IN_TOKENS = (
+    "auto a cambio",
+    "a cambio",
     "permuta",
     "trade-in",
     "trade in",
@@ -343,6 +351,26 @@ _PERMUTA_TOKENS = (
     "cambio de auto",
     "entregar mi",
     "forma de pago: permuta",
+    "forma de pago: auto a cambio",
+)
+
+_FINANCING_TOKENS = (
+    "financiamiento",
+    "financiar",
+    "financiado",
+    "crédito",
+    "credito",
+    "mensualidades",
+)
+
+_COMBINED_NUM_RE = re.compile(
+    r"(?<!\d)([123])\s*(?:y|e|,|/|&|\+|con)\s*([123])(?!\d)",
+    re.IGNORECASE,
+)
+_COMBINED_WORDS_RE = re.compile(
+    r"(?:financ\w*.{0,40}(?:a\s+cambio|auto\s+a\s+cambio|permuta|trade[\s\-]?in))"
+    r"|(?:(?:a\s+cambio|auto\s+a\s+cambio|permuta|trade[\s\-]?in).{0,40}financ\w*)",
+    re.IGNORECASE,
 )
 
 _YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
@@ -369,6 +397,34 @@ _VERSION_HINTS = (
 )
 
 
+@dataclass(frozen=True)
+class PaymentIntent:
+    """Parsed forma de pago — supports financing + Auto a cambio together."""
+
+    cash: bool = False
+    financing: bool = False
+    trade_in: bool = False
+    raw: str = ""
+
+    @property
+    def is_combined_financing_trade_in(self) -> bool:
+        return self.financing and self.trade_in
+
+    @property
+    def session_key(self) -> str | None:
+        if self.cash and not self.financing and not self.trade_in:
+            return PAYMENT_CASH
+        if self.financing and self.trade_in:
+            return PAYMENT_FINANCING_TRADE_IN
+        if self.trade_in:
+            return PAYMENT_TRADE_IN
+        if self.financing:
+            return PAYMENT_FINANCING
+        if self.cash:
+            return PAYMENT_CASH
+        return None
+
+
 @dataclass
 class TradeInDetails:
     """Parsed trade-in vehicle fields for Autométrica Valor Compra."""
@@ -378,8 +434,18 @@ class TradeInDetails:
     model: str = ""
     version: str = ""
     mileage_km: int | None = None
-    is_permuta: bool = False
+    is_trade_in: bool = False
+    wants_financing: bool = False
     raw: str = ""
+
+    @property
+    def is_permuta(self) -> bool:
+        """Alias kept for older callers."""
+        return self.is_trade_in
+
+    @is_permuta.setter
+    def is_permuta(self, value: bool) -> None:
+        self.is_trade_in = bool(value)
 
     def missing_fields(self) -> list[str]:
         missing: list[str] = []
@@ -399,18 +465,115 @@ class TradeInDetails:
         bits = [str(self.year or ""), self.make, self.model, self.version]
         label = " ".join(b for b in bits if b).strip()
         if self.mileage_km is not None:
-            label = f"{label} ({self.mileage_km:,} km)".replace(",", ",")
+            label = f"{label} ({self.mileage_km:,} km)"
         return label.strip()
 
 
-def detect_forma_pago_permuta(text: str) -> bool:
-    """True when customer selected / mentioned Permuta (trade-in)."""
-    lowered = (text or "").casefold()
+def _mentions_trade_in(lowered: str) -> bool:
     if not lowered:
         return False
-    if "forma de pago" in lowered and "permuta" in lowered:
+    if "forma de pago" in lowered and (
+        "permuta" in lowered or "a cambio" in lowered or "trade" in lowered
+    ):
         return True
-    return any(token in lowered for token in _PERMUTA_TOKENS)
+    return any(token in lowered for token in _TRADE_IN_TOKENS)
+
+
+def _mentions_financing(lowered: str) -> bool:
+    if not lowered:
+        return False
+    if any(token in lowered for token in _FINANCING_TOKENS):
+        return True
+    return "financ" in lowered or "crédit" in lowered or "credit" in lowered
+
+
+def _mentions_cash(lowered: str) -> bool:
+    return any(
+        token in lowered
+        for token in ("contado", "efectivo", "de contado", "al contado", "cash")
+    )
+
+
+def parse_payment_intent(text: str) -> PaymentIntent:
+    """Detect cash / financing / Auto a cambio, including combined replies."""
+    raw = (text or "").strip()
+    lowered = raw.casefold()
+    if not lowered:
+        return PaymentIntent(raw=raw)
+
+    cash = False
+    financing = False
+    trade_in = False
+
+    # Numeric combos: "2 y 3", "3/2", "2+3"
+    for match in _COMBINED_NUM_RE.finditer(lowered):
+        nums = {match.group(1), match.group(2)}
+        if "1" in nums:
+            cash = True
+        if "2" in nums:
+            financing = True
+        if "3" in nums:
+            trade_in = True
+
+    if _COMBINED_WORDS_RE.search(raw):
+        financing = True
+        trade_in = True
+
+    # Exact / short replies
+    if lowered in {"1", "contado", "efectivo", "cash", "de contado", "al contado"}:
+        cash = True
+    if lowered in {
+        "2",
+        "financiamiento",
+        "financiar",
+        "credito",
+        "crédito",
+        "mensualidades",
+        "financiado",
+    }:
+        financing = True
+    if lowered in {
+        "3",
+        "permuta",
+        "trade",
+        "trade-in",
+        "trade in",
+        "cambio",
+        "a cambio",
+        "auto a cambio",
+        "entregar mi auto",
+        "entregar auto",
+    }:
+        trade_in = True
+
+    if not (cash or financing or trade_in):
+        if _mentions_cash(lowered):
+            cash = True
+        if _mentions_financing(lowered):
+            financing = True
+        if _mentions_trade_in(lowered):
+            trade_in = True
+
+    # Phrase-level boost for combined wording without regex hit
+    if _mentions_financing(lowered) and _mentions_trade_in(lowered):
+        financing = True
+        trade_in = True
+
+    return PaymentIntent(
+        cash=cash,
+        financing=financing,
+        trade_in=trade_in,
+        raw=raw,
+    )
+
+
+def detect_forma_pago_permuta(text: str) -> bool:
+    """True when customer selected / mentioned Auto a cambio (trade-in)."""
+    return parse_payment_intent(text).trade_in
+
+
+def detect_forma_pago_financing(text: str) -> bool:
+    return parse_payment_intent(text).financing
 
 
 def _extract_mileage_km(text: str) -> int | None:
@@ -453,7 +616,8 @@ def parse_trade_in_details(
         model=prior.model if prior else "",
         version=prior.version if prior else "",
         mileage_km=prior.mileage_km if prior else None,
-        is_permuta=bool(prior.is_permuta) if prior else False,
+        is_trade_in=bool(prior.is_trade_in) if prior else False,
+        wants_financing=bool(prior.wants_financing) if prior else False,
         raw=(prior.raw if prior else "") or "",
     )
     raw = (text or "").strip()
@@ -461,8 +625,12 @@ def parse_trade_in_details(
         return base
     combined = f"{base.raw} {raw}".strip()
     base.raw = combined
-    if detect_forma_pago_permuta(raw) or detect_forma_pago_permuta(combined):
-        base.is_permuta = True
+    intent = parse_payment_intent(raw)
+    intent_combined = parse_payment_intent(combined)
+    if intent.trade_in or intent_combined.trade_in:
+        base.is_trade_in = True
+    if intent.financing or intent_combined.financing:
+        base.wants_financing = True
 
     year_m = _YEAR_RE.search(raw)
     if year_m:
@@ -476,9 +644,9 @@ def parse_trade_in_details(
     if ver:
         base.version = ver
 
-    # Common "Make Model" after year / Trade-in:
+    # Common "Make Model" after year / Auto a cambio:
     make_model = re.search(
-        r"(?:trade[\s\-]?in|permuta|entregar(?:[ií]a)?|cambio)?\s*[:\-]?\s*"
+        r"(?:trade[\s\-]?in|permuta|auto\s+a\s+cambio|a\s+cambio|entregar(?:[ií]a)?|cambio)?\s*[:\-]?\s*"
         r"(?:\b(?:19|20)\d{2}\b\s+)?"
         r"(?P<make>toyota|nissan|mazda|volkswagen|vw|honda|ford|chevrolet|kia|hyundai|mg|bmw|mercedes|audi)\s+"
         r"(?P<model>[A-Za-z0-9][\w\-]*(?:\s+[A-Za-z0-9][\w\-]*){0,2})",
@@ -510,8 +678,7 @@ def parse_trade_in_details(
 def prompt_missing_trade_in_fields(details: TradeInDetails) -> str:
     """Ask for Versión / Kilometraje (and any other missing identity fields)."""
     missing = details.missing_fields()
-    known = details.as_label() or "tu auto a cuenta"
-    need = ", ".join(missing) if missing else "Versión y Kilometraje"
+    known = details.as_label() or "tu auto a cambio"
     focus = []
     if "Versión" in missing:
         focus.append("*Versión* (ej. Base, LE, Sense)")
@@ -520,11 +687,16 @@ def prompt_missing_trade_in_fields(details: TradeInDetails) -> str:
     for field in missing:
         if field not in {"Versión", "Kilometraje"}:
             focus.append(f"*{field}*")
-    ask = " y ".join(focus) if focus else need
+    ask = " y ".join(focus) if focus else "Versión y Kilometraje"
+    financing_note = (
+        " Lo aplicamos como *enganche* sobre el financiamiento del vehículo nuevo."
+        if details.wants_financing
+        else " Con eso calculo el *Valor Compra* y lo aplico como enganche en la cotización."
+    )
     return (
-        f"Para valuar tu permuta ({known}) con Autométrica necesito {ask}.\n\n"
+        f"Para valuar tu *auto a cambio* ({known}) con Autométrica necesito {ask}.\n\n"
         "Ejemplo: `LE 85,000 km`\n\n"
-        "Con eso calculo el *Valor Compra* y lo aplico como enganche en la cotización."
+        f"{financing_note.strip()}"
     )
 
 
@@ -582,12 +754,25 @@ def build_trade_in_quote_message(
         "financed_principal": str(quote.financed_principal),
         "estimated_monthly_payment": str(quote.estimated_monthly_payment),
         "disclaimer_present": QUOTE_DISCLAIMER in text,
+        "financing": True,
+        "trade_in": True,
+        "payment_method": (
+            PAYMENT_FINANCING_TRADE_IN
+            if details.wants_financing
+            else PAYMENT_TRADE_IN
+        ),
     }
+    enganche_note = (
+        "Ese *Valor Compra* se aplica como *enganche* en el financiamiento "
+        "(amortización francesa del saldo restante):\n\n"
+        if details.wants_financing
+        else "Ese monto se aplica como *enganche* (auto a cambio) en la amortización francesa:\n\n"
+    )
     preface = (
         f"Valuación Autométrica (*Valor Compra*): ${valuation.valor_compra:,.2f}\n"
         f"Ajuste por km: ${valuation.mileage_adjustment:,.2f} "
         f"(base {valuation.baseline_km:,} km).\n"
-        "Ese monto se aplica como *enganche* (permuta) en la amortización francesa:\n\n"
+        f"{enganche_note}"
     )
     return preface + text, meta
 
@@ -601,15 +786,24 @@ def advance_trade_in_qualification(
     vehicle_price: int | float | str | None = None,
     term_months: int = 36,
 ) -> tuple[TradeInDetails, str | None, dict[str, Any] | None]:
-    """Parse turn → ask missing Versión/km or return quote message.
+    """Parse turn → ask missing Año/Marca/Modelo/Versión/km or return quote.
 
     Returns ``(details, reply_text, quote_meta)``. ``reply_text`` is None when
     this turn is not a trade-in path.
     """
     details = parse_trade_in_details(text, prior=prior)
-    if not details.is_permuta and not (prior and prior.is_permuta):
+    intent = parse_payment_intent(text)
+    if intent.trade_in:
+        details.is_trade_in = True
+    if intent.financing:
+        details.wants_financing = True
+    if not details.is_trade_in and not (prior and prior.is_trade_in):
         return details, None, None
-    details.is_permuta = True
+    details.is_trade_in = True
+    # Combined financing + auto a cambio always runs French amortization with
+    # Valor Compra as enganche once vehicle identity is complete.
+    if details.wants_financing or (prior and prior.wants_financing):
+        details.wants_financing = True
     missing = details.missing_fields()
     if missing:
         return details, prompt_missing_trade_in_fields(details), None
@@ -729,7 +923,13 @@ __all__ = [
     "ENV_AI_MG_QUOTE",
     "LeadRoutingDecision",
     "MG_QUOTE_LEAD_TAG",
+    "PAYMENT_CASH",
+    "PAYMENT_FINANCING",
+    "PAYMENT_FINANCING_TRADE_IN",
+    "PAYMENT_LABEL_AUTO_A_CAMBIO",
     "PAYMENT_LABEL_PERMUTA",
+    "PAYMENT_TRADE_IN",
+    "PaymentIntent",
     "STAGE_CITA",
     "STAGE_PRIMER_CONTACTO",
     "TradeInDetails",
@@ -737,11 +937,13 @@ __all__ = [
     "ai_mg_quote_enabled",
     "build_trade_in_quote_message",
     "detect_appointment_intent",
+    "detect_forma_pago_financing",
     "detect_forma_pago_permuta",
     "extract_tags",
     "format_ai_reply",
     "handoff_appointment_to_rep",
     "has_mg_quote_tag",
+    "parse_payment_intent",
     "parse_trade_in_details",
     "prompt_missing_trade_in_fields",
     "route_inbound_lead",

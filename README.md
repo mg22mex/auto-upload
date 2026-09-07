@@ -273,10 +273,10 @@ Reverse-engineered from the Autométrica Android APK: Laravel backend on **`app2
 
 **Runtime quote path** (no live API required):
 
-1. WhatsApp AI detects *Forma de pago: Permuta (trade-in)*.
-2. Prompts for missing **Versión** and **Kilometraje**.
+1. WhatsApp AI detects *Forma de pago: Auto a cambio (trade-in)* (alone or combined with financiamiento, e.g. `2 y 3`).
+2. Prompts for missing **Año / Marca / Modelo / Versión / Kilometraje**.
 3. `src/quote_engine/autometrica.py` looks up `data/autometrica_valuations.json`, applies mileage adjustment → **Valor Compra**.
-4. Valor Compra is passed as `net_trade_in_equity` (enganche) into French amortization (`calculate_quote`).
+4. Valor Compra is passed as `net_trade_in_equity` (enganche) into French amortization (`calculate_quote`) for the remaining balance.
 5. WhatsApp quote text appends the credit disclaimer (`QUOTE_DISCLAIMER` in `src/whatsapp_worker/client.py`).
 
 Optional env: `AUTOMETRICA_TOKEN`, `AUTOMETRICA_USER` / `AUTOMETRICA_PASS`, `AUTOMETRICA_LOGIN_URL`, `AUTOMETRICA_VALUATIONS_PATH`, `AI_QUOTE_DEFAULT_PRICE`.

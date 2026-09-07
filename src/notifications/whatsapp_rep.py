@@ -16,7 +16,8 @@ PAYMENT_LABELS = {
     "cash": "Contado",
     "financing": "Financiamiento",
     "credit": "Financiamiento",
-    "trade_in": "Auto a cuenta",
+    "trade_in": "Auto a cambio",
+    "financing_trade_in": "Financiamiento + Auto a cambio",
 }
 
 ENV_ENABLED = "REP_NOTIFY_ENABLED"

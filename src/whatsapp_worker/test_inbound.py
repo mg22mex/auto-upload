@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from src.whatsapp_worker.inbound import (
     PAYMENT_FINANCING,
+    PAYMENT_FINANCING_TRADE_IN,
     PAYMENT_TRADE_IN,
     STATE_AI_ACTIVE,
     STATE_AWAITING_DOWN_PAYMENT,
@@ -117,6 +118,17 @@ class TestPaymentParsing(unittest.TestCase):
         self.assertEqual(parse_payment_choice("2"), PAYMENT_FINANCING)
         self.assertEqual(parse_payment_choice("financiamiento"), PAYMENT_FINANCING)
         self.assertEqual(parse_payment_choice("permuta"), PAYMENT_TRADE_IN)
+        self.assertEqual(parse_payment_choice("a cambio"), PAYMENT_TRADE_IN)
+        self.assertEqual(parse_payment_choice("3"), PAYMENT_TRADE_IN)
+        self.assertEqual(parse_payment_choice("2 y 3"), PAYMENT_FINANCING_TRADE_IN)
+        self.assertEqual(
+            parse_payment_choice("financiamiento y a cambio"),
+            PAYMENT_FINANCING_TRADE_IN,
+        )
+        self.assertEqual(
+            parse_payment_choice("financiamiento con auto a cambio"),
+            PAYMENT_FINANCING_TRADE_IN,
+        )
         self.assertIsNone(parse_payment_choice("maybe later"))
 
 
@@ -152,6 +164,19 @@ class TestQualificationFlow(unittest.TestCase):
         self.assertTrue(turn.odoo_create)
         self.assertIn("Autosell San Felipe", turn.reply_text)
         self.assertIn("financiamiento", turn.reply_text.lower())
+        self.assertIn("Auto a cambio", turn.reply_text)
+        self.assertIn("contado, financiamiento o a cambio", turn.reply_text)
+
+    def test_combined_financing_trade_in_asks_vehicle(self):
+        t1 = self._turn("Busco una Hilux")
+        self.store.save(t1.session)
+        t2 = self._turn(
+            "2 y 3",
+            self.store.get("5216141234567", "autosell_san_felipe"),
+        )
+        self.assertEqual(t2.session.payment_method, PAYMENT_FINANCING_TRADE_IN)
+        self.assertEqual(t2.session.state, STATE_AWAITING_TRADE_IN)
+        self.assertIn("a cambio", t2.reply_text.casefold())
 
     def test_financing_multi_turn_to_handoff(self):
         t1 = self._turn("Busco una Hilux")

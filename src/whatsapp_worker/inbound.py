@@ -22,11 +22,13 @@ STATE_HANDOFF_TO_HUMAN = "HANDOFF_TO_HUMAN"
 PAYMENT_CASH = "cash"
 PAYMENT_FINANCING = "financing"
 PAYMENT_TRADE_IN = "trade_in"
+PAYMENT_FINANCING_TRADE_IN = "financing_trade_in"
 
 _PAYMENT_LABELS = {
     PAYMENT_CASH: "Contado / efectivo",
     PAYMENT_FINANCING: "Financiamiento",
-    PAYMENT_TRADE_IN: "Permuta (trade-in)",
+    PAYMENT_TRADE_IN: "Auto a cambio (trade-in)",
+    PAYMENT_FINANCING_TRADE_IN: "Financiamiento + Auto a cambio",
 }
 
 _JID_SKIP = ("@g.us", "@broadcast", "@newsletter", "status@broadcast")
@@ -188,40 +190,17 @@ def inbound_to_voice_payload(event: WhatsAppInboundEvent) -> dict[str, Any]:
 
 
 def parse_payment_choice(text: str) -> str | None:
-    """Map user reply to cash / financing / trade_in."""
-    t = (text or "").strip().lower()
-    if not t:
-        return None
-    if t in {"1", "contado", "efectivo", "cash", "de contado", "al contado"}:
-        return PAYMENT_CASH
-    if t in {
-        "2",
-        "financiamiento",
-        "financiar",
-        "credito",
-        "crédito",
-        "mensualidades",
-        "financiado",
-    }:
-        return PAYMENT_FINANCING
-    if t in {
-        "3",
-        "permuta",
-        "trade",
-        "trade-in",
-        "trade in",
-        "cambio",
-        "entregar mi auto",
-        "entregar auto",
-    }:
-        return PAYMENT_TRADE_IN
-    if "contado" in t or "efectivo" in t:
-        return PAYMENT_CASH
-    if "financ" in t or "crédit" in t or "credit" in t or "mensual" in t:
-        return PAYMENT_FINANCING
-    if "permuta" in t or "trade" in t or "cambio" in t or "entregar" in t:
-        return PAYMENT_TRADE_IN
-    return None
+    """Map user reply to cash / financing / trade_in / financing+trade_in."""
+    from src.lead_routing import parse_payment_intent
+
+    return parse_payment_intent(text).session_key
+
+
+def _session_payment_for_trade_in(details: Any) -> str:
+    """Prefer combined financing + auto a cambio when both flows are active."""
+    if getattr(details, "wants_financing", False):
+        return PAYMENT_FINANCING_TRADE_IN
+    return PAYMENT_TRADE_IN
 
 
 def _welcome_message(name: str, branch_label: str, initial_message: str) -> str:
@@ -235,22 +214,24 @@ def _welcome_message(name: str, branch_label: str, initial_message: str) -> str:
         "Para ayudarte mejor, ¿cómo te gustaría adquirir tu vehículo?\n"
         "1️⃣ Contado / efectivo\n"
         "2️⃣ Financiamiento\n"
-        "3️⃣ Permuta (trade-in)\n\n"
-        "Responde con el número o escribe contado, financiamiento o permuta."
+        "3️⃣ Auto a cambio\n\n"
+        "Responde con el número o escribe contado, financiamiento o a cambio."
     )
 
 
 def _payment_retry_message() -> str:
     return (
         "No entendí tu respuesta. Por favor elige una opción:\n"
-        "1 Contado · 2 Financiamiento · 3 Permuta"
+        "1 Contado · 2 Financiamiento · 3 Auto a cambio\n"
+        "También puedes combinar: `2 y 3` o `financiamiento y a cambio`."
     )
 
 
 def _trade_in_prompt() -> str:
     return (
-        "Perfecto. ¿Qué vehículo entregarías en permuta?\n"
-        "Indica año, marca y modelo (ej. 2018 Nissan Sentra)."
+        "Perfecto. ¿Qué vehículo entregarías a cambio?\n"
+        "Indica año, marca, modelo, versión y kilometraje "
+        "(ej. 2018 Nissan Sentra Sense 90,000 km)."
     )
 
 
@@ -273,7 +254,7 @@ def build_qualification_notes(session: QualificationSession) -> str:
             f"Forma de pago: {_PAYMENT_LABELS.get(session.payment_method, session.payment_method)}"
         )
     if session.trade_in_vehicle:
-        lines.append(f"Vehículo permuta: {session.trade_in_vehicle}")
+        lines.append(f"Vehículo a cambio: {session.trade_in_vehicle}")
     if session.down_payment:
         lines.append(f"Enganche indicado: {session.down_payment}")
     lines.append(f"Sucursal: {session.physical_location}")
@@ -294,7 +275,7 @@ def _handoff_message(session: QualificationSession) -> str:
             f"• Forma de pago: {_PAYMENT_LABELS.get(session.payment_method, session.payment_method)}"
         )
     if session.trade_in_vehicle:
-        lines.append(f"• Permuta: {session.trade_in_vehicle}")
+        lines.append(f"• Auto a cambio: {session.trade_in_vehicle}")
     if session.down_payment:
         lines.append(f"• Enganche: {session.down_payment}")
     return "\n".join(lines)
@@ -411,7 +392,7 @@ def process_qualification_turn(
                 odoo_handoff=True,
                 odoo_notes=build_qualification_notes(session),
             )
-        if choice == PAYMENT_TRADE_IN:
+        if choice in {PAYMENT_TRADE_IN, PAYMENT_FINANCING_TRADE_IN}:
             session.state = STATE_AWAITING_TRADE_IN
             return QualificationTurnResult(
                 session=session,
@@ -507,7 +488,7 @@ def _process_ai_turn(
             vehicle_interest=session.vehicle_interest,
         )
         if trade_reply is not None:
-            session.payment_method = PAYMENT_TRADE_IN
+            session.payment_method = _session_payment_for_trade_in(details)
             session.trade_in_vehicle = details.as_label() or session.trade_in_vehicle
             if quote_meta and quote_meta.get("valor_compra"):
                 session.down_payment = str(quote_meta["valor_compra"])
@@ -560,20 +541,32 @@ def _process_ai_turn(
             routing=decision.as_dict(),
         )
 
-    # Autométrica permuta → Valor Compra as engache (French amortization)
+    # Autométrica auto a cambio → Valor Compra as engache (French amortization)
     from src.lead_routing import (
         TradeInDetails,
         advance_trade_in_qualification,
+        parse_payment_intent,
         parse_trade_in_details,
     )
 
+    intent = parse_payment_intent(event.text)
     prior_ti: TradeInDetails | None = None
-    if session.payment_method == PAYMENT_TRADE_IN or session.trade_in_vehicle:
+    prior_trade = session.payment_method in {
+        PAYMENT_TRADE_IN,
+        PAYMENT_FINANCING_TRADE_IN,
+    } or bool(session.trade_in_vehicle)
+    if prior_trade:
         prior_ti = parse_trade_in_details(
             session.trade_in_vehicle or "",
-            prior=TradeInDetails(is_permuta=True),
+            prior=TradeInDetails(
+                is_trade_in=True,
+                wants_financing=session.payment_method
+                in {PAYMENT_FINANCING, PAYMENT_FINANCING_TRADE_IN},
+            ),
         )
-        prior_ti.is_permuta = True
+        prior_ti.is_trade_in = True
+        if session.payment_method in {PAYMENT_FINANCING, PAYMENT_FINANCING_TRADE_IN}:
+            prior_ti.wants_financing = True
     details, trade_reply, quote_meta = advance_trade_in_qualification(
         event.text,
         prior=prior_ti,
@@ -583,7 +576,9 @@ def _process_ai_turn(
     if trade_reply is not None:
         session.state = STATE_AI_ACTIVE
         session.handling_agent = agent_ai
-        session.payment_method = PAYMENT_TRADE_IN
+        if intent.financing or (prior_ti and prior_ti.wants_financing):
+            details.wants_financing = True
+        session.payment_method = _session_payment_for_trade_in(details)
         session.trade_in_vehicle = details.as_label() or session.trade_in_vehicle
         if quote_meta and quote_meta.get("valor_compra"):
             session.down_payment = str(quote_meta["valor_compra"])
@@ -591,6 +586,14 @@ def _process_ai_turn(
         routing = decision.as_dict()
         if quote_meta:
             routing = {**routing, "trade_in_quote": quote_meta}
+        routing = {
+            **routing,
+            "payment_intent": {
+                "financing": bool(details.wants_financing),
+                "trade_in": True,
+                "combined": bool(details.wants_financing),
+            },
+        }
         return QualificationTurnResult(
             session=session,
             reply_text=trade_reply,

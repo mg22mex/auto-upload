@@ -46,7 +46,8 @@ TARGET_BRANCH = "san_felipe"
 TARGET_BRANCH_LABEL = "San Felipe"
 TARGET_INTEREST = (
     "Hola, me interesa información sobre una camioneta. "
-    "Forma de pago: Permuta (trade-in). Trade-in: Toyota Corolla 2020."
+    "Forma de pago: financiamiento y a cambio. "
+    "Auto a cambio: Toyota Corolla 2020."
 )
 TRADE_IN_DETAILS = "Versión LE, Kilometraje 85000 km"
 
@@ -175,7 +176,7 @@ def _run_handoff(*, live: bool, notify: bool) -> dict[str, Any]:
         client_phone="5216140001937",
         branch=TARGET_BRANCH,
         vehicle_interest=TARGET_INTEREST,
-        payment_method="trade_in",
+        payment_method="financing_trade_in",
         appointment=intent,
         client_name=TARGET_NAME,
         odoo=odoo,
@@ -213,9 +214,9 @@ def main() -> int:
         turns[0]["state"] == STATE_AI_ACTIVE
         and turns[0]["odoo_stage"] == STAGE_PRIMER_CONTACTO
         and not turns[0]["odoo_handoff"]
-        and turns[0]["payment_method"] == "trade_in"
+        and turns[0]["payment_method"] == "financing_trade_in"
         and ("Versión" in turns[0]["reply"] or "versión" in turns[0]["reply"].casefold())
-        and "Kilometraje" in turns[0]["reply"]
+        and ("Kilometraje" in turns[0]["reply"] or "auto a cambio" in turns[0]["reply"].casefold())
     )
     ok_quote = (
         turns[1]["state"] == STATE_AI_ACTIVE
@@ -224,6 +225,8 @@ def main() -> int:
         and QUOTE_DISCLAIMER in quote_buf
         and bool(quote_meta.get("valor_compra"))
         and bool(quote_meta.get("disclaimer_present"))
+        and quote_meta.get("financing") is True
+        and quote_meta.get("payment_method") == "financing_trade_in"
     )
     ok_handoff = (
         turns[2]["state"] == STATE_HANDOFF_TO_HUMAN
