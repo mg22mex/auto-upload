@@ -1,0 +1,750 @@
+"""AI-first routing for ``MG Quote Lead`` — human only on appointment intent.
+
+Leads tagged ``MG Quote Lead`` stay with the WhatsApp AI responder at stage
+``Primer contacto``. Round-robin assignment and the rep WhatsApp alert fire
+only when the customer asks for an in-person visit / test drive
+(``Cita/Prueba de manejo``).
+"""
+from __future__ import annotations
+
+import os
+import re
+from dataclasses import dataclass, field
+from typing import Any
+
+from src.config import branch_label
+from src.odoo_sync.client import OdooCRMClient
+from src.odoo_sync.crm import RepAssignment, assign_lead_owner, normalize_crm_branch
+
+MG_QUOTE_LEAD_TAG = "MG Quote Lead"
+STAGE_PRIMER_CONTACTO = "Primer contacto"
+STAGE_CITA = "Cita/Prueba de manejo"
+
+AGENT_AI = "ai_whatsapp"
+AGENT_HUMAN = "human_rep"
+
+ENV_AI_MG_QUOTE = "AI_MG_QUOTE_LEADS"
+
+
+@dataclass(frozen=True)
+class AppointmentIntent:
+    """Parsed appointment / test-drive request from free text."""
+
+    requested: bool
+    kind: str = "cita"  # cita | prueba_manejo | inspeccion
+    when_text: str = ""
+    raw: str = ""
+
+
+@dataclass
+class LeadRoutingDecision:
+    """How an inbound lead / turn should be handled."""
+
+    agent: str
+    stage_name: str
+    assign_human: bool
+    tags: list[str] = field(default_factory=list)
+    reason: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "agent": self.agent,
+            "stage_name": self.stage_name,
+            "assign_human": self.assign_human,
+            "tags": list(self.tags),
+            "reason": self.reason,
+        }
+
+
+@dataclass
+class AppointmentHandoffResult:
+    lead_id: int | None
+    stage_name: str
+    assignment: RepAssignment | None
+    rep_notification: dict[str, Any] | None
+    stage_updated: bool = False
+    advisor_assigned: bool = False
+    error: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "lead_id": self.lead_id,
+            "stage_name": self.stage_name,
+            "stage_updated": self.stage_updated,
+            "advisor_assigned": self.advisor_assigned,
+            "assignment": self.assignment.as_dict() if self.assignment else None,
+            "rep_notification": self.rep_notification,
+            "error": self.error,
+        }
+
+
+_APPOINTMENT_PATTERNS = (
+    r"\bcita\b",
+    r"\bagendar\b",
+    r"\bagenda\b",
+    r"\bagendemos\b",
+    r"\bvisita\b",
+    r"\bvisitar\b",
+    r"\bsucursal\b",
+    r"prueba\s+de\s+manejo",
+    r"\btest\s*drive\b",
+    r"\bmanejo\b",
+    r"\binspecci[oó]n\b",
+    r"\brevisar\s+(el\s+)?auto\b",
+    r"\bver\s+(el\s+)?auto\b",
+    r"\bpasar\s+(por|a)\b",
+    r"\bir\s+a\s+(la\s+)?sucursal\b",
+    r"\bcuando\s+(puedo|podemos)\s+(ir|pasar|visitar)\b",
+)
+
+_WHEN_RE = re.compile(
+    r"(?P<when>"
+    r"ma[nñ]ana|"
+    r"hoy|"
+    r"pasado\s+ma[nñ]ana|"
+    r"el\s+\w+|"
+    r"este\s+\w+|"
+    r"la\s+pr[oó]xima\s+semana|"
+    r"\d{1,2}[:.]\d{2}\s*(?:am|pm|hrs?|horas?)?|"
+    r"\d{1,2}\s*(?:am|pm|hrs?|horas?)|"
+    r"a\s+las\s+\d{1,2}(?::\d{2})?"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def ai_mg_quote_enabled() -> bool:
+    raw = (os.getenv(ENV_AI_MG_QUOTE) or "true").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def normalize_tag_name(value: Any) -> str:
+    if isinstance(value, (list, tuple)) and value:
+        # Odoo many2many often returns [id, name]
+        value = value[-1]
+    return str(value or "").strip()
+
+
+def extract_tags(payload: dict[str, Any] | None) -> list[str]:
+    """Collect tag display names from an Odoo lead / webhook payload."""
+    if not isinstance(payload, dict):
+        return []
+    tags: list[str] = []
+    for key in ("tag_names", "tags", "crm_tags"):
+        raw = payload.get(key)
+        if isinstance(raw, str) and raw.strip():
+            tags.extend(part.strip() for part in raw.split(",") if part.strip())
+        elif isinstance(raw, (list, tuple)):
+            for item in raw:
+                if isinstance(item, dict):
+                    name = normalize_tag_name(item.get("name") or item.get("display_name"))
+                else:
+                    name = normalize_tag_name(item)
+                if name and not name.isdigit():
+                    tags.append(name)
+    tag_ids = payload.get("tag_ids")
+    if isinstance(tag_ids, (list, tuple)):
+        for item in tag_ids:
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                name = normalize_tag_name(item[1])
+                if name and not name.isdigit():
+                    tags.append(name)
+            elif isinstance(item, dict):
+                name = normalize_tag_name(item.get("name"))
+                if name:
+                    tags.append(name)
+    # Deduplicate, preserve order
+    seen: set[str] = set()
+    out: list[str] = []
+    for tag in tags:
+        key = tag.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(tag)
+    return out
+
+
+def has_mg_quote_tag(tags: list[str] | None = None, *, payload: dict[str, Any] | None = None) -> bool:
+    names = list(tags or [])
+    if payload is not None:
+        names.extend(extract_tags(payload))
+    needle = MG_QUOTE_LEAD_TAG.casefold()
+    return any(normalize_tag_name(t).casefold() == needle for t in names)
+
+
+def should_defer_human_assignment(
+    tags: list[str] | None = None,
+    *,
+    payload: dict[str, Any] | None = None,
+) -> bool:
+    """True when MG Quote Lead AI policy owns the lead (no immediate RR)."""
+    if not ai_mg_quote_enabled():
+        return False
+    if has_mg_quote_tag(tags, payload=payload):
+        return True
+    # Soft-capture / WhatsApp quote path often tags after create; honor explicit flag.
+    if isinstance(payload, dict) and payload.get("defer_advisor"):
+        return True
+    if isinstance(payload, dict) and payload.get("handling_agent") == AGENT_AI:
+        return True
+    return False
+
+
+def route_inbound_lead(
+    payload: dict[str, Any] | None = None,
+    *,
+    tags: list[str] | None = None,
+    appointment: AppointmentIntent | None = None,
+) -> LeadRoutingDecision:
+    """Decide agent + stage for an inbound lead / turn."""
+    tag_list = list(tags or [])
+    if payload is not None:
+        tag_list = extract_tags(payload) or tag_list
+    if not tag_list and ai_mg_quote_enabled():
+        # WhatsApp / quote pipeline always stamps MG Quote Lead on create.
+        tag_list = [MG_QUOTE_LEAD_TAG]
+
+    if appointment and appointment.requested:
+        return LeadRoutingDecision(
+            agent=AGENT_HUMAN,
+            stage_name=STAGE_CITA,
+            assign_human=True,
+            tags=tag_list,
+            reason="appointment_requested",
+        )
+
+    if should_defer_human_assignment(tag_list, payload=payload):
+        return LeadRoutingDecision(
+            agent=AGENT_AI,
+            stage_name=STAGE_PRIMER_CONTACTO,
+            assign_human=False,
+            tags=tag_list,
+            reason="mg_quote_lead_ai",
+        )
+
+    return LeadRoutingDecision(
+        agent=AGENT_HUMAN,
+        stage_name=STAGE_PRIMER_CONTACTO,
+        assign_human=True,
+        tags=tag_list,
+        reason="default_human",
+    )
+
+
+def detect_appointment_intent(text: str) -> AppointmentIntent:
+    """Detect in-person visit / test-drive / inspection intent."""
+    raw = (text or "").strip()
+    if not raw:
+        return AppointmentIntent(requested=False, raw=raw)
+    lowered = raw.casefold()
+    matched = False
+    kind = "cita"
+    for pattern in _APPOINTMENT_PATTERNS:
+        if re.search(pattern, lowered, re.IGNORECASE):
+            matched = True
+            if "prueba" in pattern or "manejo" in pattern or "test" in pattern:
+                kind = "prueba_manejo"
+            elif "inspec" in pattern or "revisar" in pattern:
+                kind = "inspeccion"
+            break
+    if not matched:
+        return AppointmentIntent(requested=False, raw=raw)
+
+    when = ""
+    match = _WHEN_RE.search(raw)
+    if match:
+        when = match.group("when").strip()
+    return AppointmentIntent(requested=True, kind=kind, when_text=when, raw=raw)
+
+
+def format_ai_reply(
+    *,
+    name: str = "",
+    text: str = "",
+    vehicle_interest: str = "",
+    branch_name: str = "",
+    appointment: AppointmentIntent | None = None,
+) -> str:
+    """Rule-based WhatsApp AI reply (financing / requirements / vehicle / CTA)."""
+    who = (name or "Cliente").strip() or "Cliente"
+    branch = (branch_name or "Periférico").strip()
+    interest = (vehicle_interest or text or "").strip()
+    lowered = (text or "").casefold()
+
+    if appointment and appointment.requested:
+        when = appointment.when_text or "el horario que prefieras"
+        return (
+            f"¡Perfecto, {who}! Agendamos tu "
+            f"{'prueba de manejo' if appointment.kind == 'prueba_manejo' else 'cita'} "
+            f"en Autosell {branch} ({when}).\n\n"
+            "Un asesor de la sucursal te confirmará en breve por WhatsApp. 🙌"
+        )
+
+    if any(token in lowered for token in ("requisito", "documento", "papeles", "ine", "comprobante")):
+        return (
+            "Para financiamiento usualmente pedimos: identificación oficial (INE), "
+            "comprobante de domicilio reciente y comprobante de ingresos. "
+            "Para compra de contado basta identificación y datos de facturación.\n\n"
+            f"¿Te interesa ver un vehículo en Autosell {branch}? "
+            "Puedo agendar *cita o prueba de manejo* cuando gustes."
+        )
+
+    if any(token in lowered for token in ("financ", "crédito", "credito", "enganche", "mensual")):
+        return (
+            f"Con gusto te ayudo con el financiamiento, {who}. "
+            "En Autosell cotizamos a plazos (12–60 meses) con enganche flexible "
+            "y opción de auto a cuenta.\n\n"
+            f"{'Sobre tu interés: ' + interest + chr(10) + chr(10) if interest else ''}"
+            "¿Quieres que te prepare una cotización estimada, o prefieres "
+            "agendar una *cita / prueba de manejo* en sucursal?"
+        )
+
+    if detect_forma_pago_permuta(text or "") or detect_forma_pago_permuta(interest):
+        return (
+            f"Perfecto, {who}. Para *Forma de pago: Permuta (trade-in)* necesito "
+            "los datos de tu auto a cuenta: año, marca, modelo, *versión* y "
+            "*kilometraje*. Con Autométrica calculamos el *Valor Compra* y lo "
+            "aplicamos como enganche en la cotización.\n\n"
+            "Ejemplo: `Toyota Corolla 2020 LE 85,000 km`"
+        )
+
+    if interest:
+        return (
+            f"¡Hola {who}! Gracias por escribir a Autosell {branch}. "
+            f'Recibimos tu mensaje sobre: "{interest}".\n\n'
+            "Puedo ayudarte con:\n"
+            "• Precio y disponibilidad\n"
+            "• Financiamiento / enganche\n"
+            "• Requisitos y documentación\n"
+            "• Agendar *cita o prueba de manejo* en sucursal\n\n"
+            "¿Qué te gustaría saber primero?"
+        )
+
+    return (
+        f"¡Hola {who}! Soy el asistente de Autosell {branch}. "
+        "Puedo orientarte sobre vehículos, financiamiento y requisitos. "
+        "Cuando quieras visitar la sucursal, pide una *cita o prueba de manejo* "
+        "y te conecto con un asesor."
+    )
+
+
+# --- Autométrica trade-in / permuta qualification --------------------------------
+
+PAYMENT_LABEL_PERMUTA = "Permuta (trade-in)"
+
+_PERMUTA_TOKENS = (
+    "permuta",
+    "trade-in",
+    "trade in",
+    "tradein",
+    "auto a cuenta",
+    "a cuenta",
+    "cambio de auto",
+    "entregar mi",
+    "forma de pago: permuta",
+)
+
+_YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
+_KM_RE = re.compile(
+    r"(?P<km>\d{1,3}(?:[,\s]\d{3})*|\d+)\s*(?:km|kms|kil[oó]metros?)\b",
+    re.IGNORECASE,
+)
+_KM_BARE_RE = re.compile(r"\b(?P<km>\d{5,6})\b")
+_VERSION_HINTS = (
+    "base",
+    "le",
+    "xle",
+    "se",
+    "sense",
+    "advance",
+    "comfortline",
+    "highline",
+    "i sport",
+    "isport",
+    "touring",
+    "sport",
+    "premium",
+    "exclusive",
+)
+
+
+@dataclass
+class TradeInDetails:
+    """Parsed trade-in vehicle fields for Autométrica Valor Compra."""
+
+    year: int | None = None
+    make: str = ""
+    model: str = ""
+    version: str = ""
+    mileage_km: int | None = None
+    is_permuta: bool = False
+    raw: str = ""
+
+    def missing_fields(self) -> list[str]:
+        missing: list[str] = []
+        if not self.year:
+            missing.append("Año")
+        if not self.make:
+            missing.append("Marca")
+        if not self.model:
+            missing.append("Modelo")
+        if not (self.version or "").strip():
+            missing.append("Versión")
+        if self.mileage_km is None:
+            missing.append("Kilometraje")
+        return missing
+
+    def as_label(self) -> str:
+        bits = [str(self.year or ""), self.make, self.model, self.version]
+        label = " ".join(b for b in bits if b).strip()
+        if self.mileage_km is not None:
+            label = f"{label} ({self.mileage_km:,} km)".replace(",", ",")
+        return label.strip()
+
+
+def detect_forma_pago_permuta(text: str) -> bool:
+    """True when customer selected / mentioned Permuta (trade-in)."""
+    lowered = (text or "").casefold()
+    if not lowered:
+        return False
+    if "forma de pago" in lowered and "permuta" in lowered:
+        return True
+    return any(token in lowered for token in _PERMUTA_TOKENS)
+
+
+def _extract_mileage_km(text: str) -> int | None:
+    match = _KM_RE.search(text or "")
+    if match:
+        digits = re.sub(r"\D", "", match.group("km"))
+        return int(digits) if digits else None
+    # Bare 5–6 digit figure when version already present (e.g. "LE 85000")
+    # Skip 4-digit values — those are almost always model years.
+    bare = _KM_BARE_RE.search(text or "")
+    if bare:
+        km = int(bare.group("km"))
+        if 1900 <= km <= 2100:
+            return None
+        return km
+    return None
+
+
+def _extract_version(text: str) -> str:
+    lowered = (text or "").casefold()
+    for hint in sorted(_VERSION_HINTS, key=len, reverse=True):
+        if re.search(rf"\b{re.escape(hint)}\b", lowered):
+            return hint.upper() if len(hint) <= 3 else hint.title()
+    # Explicit "versión X" / "version X"
+    m = re.search(r"versi[oó]n\s*[:\-]?\s*([A-Za-z0-9][\w\s\-]{0,24})", text or "", re.I)
+    if m:
+        return m.group(1).strip()
+    return ""
+
+
+def parse_trade_in_details(
+    text: str,
+    *,
+    prior: TradeInDetails | None = None,
+) -> TradeInDetails:
+    """Merge free-text vehicle clues into TradeInDetails (year/make/model/ver/km)."""
+    base = TradeInDetails(
+        year=prior.year if prior else None,
+        make=prior.make if prior else "",
+        model=prior.model if prior else "",
+        version=prior.version if prior else "",
+        mileage_km=prior.mileage_km if prior else None,
+        is_permuta=bool(prior.is_permuta) if prior else False,
+        raw=(prior.raw if prior else "") or "",
+    )
+    raw = (text or "").strip()
+    if not raw:
+        return base
+    combined = f"{base.raw} {raw}".strip()
+    base.raw = combined
+    if detect_forma_pago_permuta(raw) or detect_forma_pago_permuta(combined):
+        base.is_permuta = True
+
+    year_m = _YEAR_RE.search(raw)
+    if year_m:
+        base.year = int(year_m.group(0))
+
+    km = _extract_mileage_km(raw)
+    if km is not None:
+        base.mileage_km = km
+
+    ver = _extract_version(raw)
+    if ver:
+        base.version = ver
+
+    # Common "Make Model" after year / Trade-in:
+    make_model = re.search(
+        r"(?:trade[\s\-]?in|permuta|entregar(?:[ií]a)?|cambio)?\s*[:\-]?\s*"
+        r"(?:\b(?:19|20)\d{2}\b\s+)?"
+        r"(?P<make>toyota|nissan|mazda|volkswagen|vw|honda|ford|chevrolet|kia|hyundai|mg|bmw|mercedes|audi)\s+"
+        r"(?P<model>[A-Za-z0-9][\w\-]*(?:\s+[A-Za-z0-9][\w\-]*){0,2})",
+        raw,
+        re.IGNORECASE,
+    )
+    if make_model:
+        make = make_model.group("make").strip()
+        model = make_model.group("model").strip()
+        # Strip trailing version tokens / year from model
+        model_bits = []
+        for part in model.split():
+            if _YEAR_RE.fullmatch(part):
+                if base.year is None:
+                    base.year = int(part)
+                continue
+            if part.casefold() in _VERSION_HINTS or part.casefold() in {"km", "kms"}:
+                if not base.version and part.casefold() in _VERSION_HINTS:
+                    base.version = part.upper() if len(part) <= 3 else part.title()
+                break
+            model_bits.append(part)
+        base.make = make.title() if make.casefold() != "vw" else "Volkswagen"
+        if model_bits:
+            base.model = " ".join(model_bits).title()
+
+    return base
+
+
+def prompt_missing_trade_in_fields(details: TradeInDetails) -> str:
+    """Ask for Versión / Kilometraje (and any other missing identity fields)."""
+    missing = details.missing_fields()
+    known = details.as_label() or "tu auto a cuenta"
+    need = ", ".join(missing) if missing else "Versión y Kilometraje"
+    focus = []
+    if "Versión" in missing:
+        focus.append("*Versión* (ej. Base, LE, Sense)")
+    if "Kilometraje" in missing:
+        focus.append("*Kilometraje* en km")
+    for field in missing:
+        if field not in {"Versión", "Kilometraje"}:
+            focus.append(f"*{field}*")
+    ask = " y ".join(focus) if focus else need
+    return (
+        f"Para valuar tu permuta ({known}) con Autométrica necesito {ask}.\n\n"
+        "Ejemplo: `LE 85,000 km`\n\n"
+        "Con eso calculo el *Valor Compra* y lo aplico como enganche en la cotización."
+    )
+
+
+def build_trade_in_quote_message(
+    *,
+    details: TradeInDetails,
+    lead_name: str = "",
+    vehicle_interest: str = "",
+    vehicle_price: int | float | str | None = None,
+    term_months: int = 36,
+) -> tuple[str, dict[str, Any]]:
+    """Lookup Autométrica Valor Compra → French amortization → WhatsApp quote text."""
+    from src.quote_engine.autometrica import lookup_valor_compra
+    from src.quote_engine.calculator import calculate_quote
+    from src.whatsapp_worker.client import QUOTE_DISCLAIMER, format_quote_message
+
+    if details.year is None or not details.make or not details.model:
+        raise ValueError("trade-in year/make/model required before quote")
+
+    valuation = lookup_valor_compra(
+        year=int(details.year),
+        make=details.make,
+        model=details.model,
+        version=details.version or "",
+        mileage_km=int(details.mileage_km or 0),
+    )
+    price_raw = vehicle_price
+    if price_raw is None:
+        price_raw = os.getenv("AI_QUOTE_DEFAULT_PRICE") or "450000"
+    price = int(str(price_raw).replace(",", "").split(".")[0])
+    quote = calculate_quote(
+        price,
+        int(term_months),
+        net_trade_in_equity=valuation.valor_compra,
+    )
+    interest = (vehicle_interest or "vehículo de interés").strip()
+    vehicle_name = "vehículo Autosell"
+    for token in ("camioneta", "pickup", "sedán", "sedan", "suv", "hatchback"):
+        if token in interest.casefold():
+            vehicle_name = "SUV" if token == "suv" else token.capitalize()
+            break
+    else:
+        short = interest.split(".")[0].strip()
+        if short and len(short) <= 48 and not short.casefold().startswith("hola"):
+            vehicle_name = short
+    text = format_quote_message(lead_name or "Cliente", vehicle_name, quote)
+    meta = {
+        "valor_compra": str(valuation.valor_compra),
+        "valor_venta": str(valuation.valor_venta),
+        "mileage_adjustment": str(valuation.mileage_adjustment),
+        "matched": valuation.matched,
+        "source": valuation.source,
+        "trade_in_label": details.as_label(),
+        "down_payment": str(quote.down_payment),
+        "financed_principal": str(quote.financed_principal),
+        "estimated_monthly_payment": str(quote.estimated_monthly_payment),
+        "disclaimer_present": QUOTE_DISCLAIMER in text,
+    }
+    preface = (
+        f"Valuación Autométrica (*Valor Compra*): ${valuation.valor_compra:,.2f}\n"
+        f"Ajuste por km: ${valuation.mileage_adjustment:,.2f} "
+        f"(base {valuation.baseline_km:,} km).\n"
+        "Ese monto se aplica como *enganche* (permuta) en la amortización francesa:\n\n"
+    )
+    return preface + text, meta
+
+
+def advance_trade_in_qualification(
+    text: str,
+    *,
+    prior: TradeInDetails | None = None,
+    lead_name: str = "",
+    vehicle_interest: str = "",
+    vehicle_price: int | float | str | None = None,
+    term_months: int = 36,
+) -> tuple[TradeInDetails, str | None, dict[str, Any] | None]:
+    """Parse turn → ask missing Versión/km or return quote message.
+
+    Returns ``(details, reply_text, quote_meta)``. ``reply_text`` is None when
+    this turn is not a trade-in path.
+    """
+    details = parse_trade_in_details(text, prior=prior)
+    if not details.is_permuta and not (prior and prior.is_permuta):
+        return details, None, None
+    details.is_permuta = True
+    missing = details.missing_fields()
+    if missing:
+        return details, prompt_missing_trade_in_fields(details), None
+    message, meta = build_trade_in_quote_message(
+        details=details,
+        lead_name=lead_name,
+        vehicle_interest=vehicle_interest,
+        vehicle_price=vehicle_price,
+        term_months=term_months,
+    )
+    return details, message, meta
+
+
+def update_lead_stage(
+    odoo: Any,
+    lead_id: int,
+    stage_name: str,
+) -> bool:
+    """Best-effort stage write; returns True when a stage_id was applied."""
+    stage_id = odoo._resolve_crm_stage_id(stage_name)
+    if stage_id is None:
+        print(f"WARN lead_routing: stage {stage_name!r} not found for lead {lead_id}", flush=True)
+        return False
+    odoo.execute_kw("crm.lead", "write", [[int(lead_id)], {"stage_id": int(stage_id)}])
+    return True
+
+
+def handoff_appointment_to_rep(
+    *,
+    lead_id: int | None,
+    client_phone: str,
+    branch: str | None = None,
+    vehicle_interest: str = "",
+    payment_method: str | None = None,
+    appointment: AppointmentIntent | None = None,
+    client_name: str = "",
+    odoo: Any | None = None,
+    whatsapp_client: Any | None = None,
+    assigner_assignment: RepAssignment | None = None,
+) -> AppointmentHandoffResult:
+    """Move lead to Cita stage, round-robin a rep, and WhatsApp the alert."""
+    from src.notifications.whatsapp_rep import notify_rep
+
+    branch_key = normalize_crm_branch(branch)
+    assignment = assigner_assignment or assign_lead_owner(branch_key)
+    stage_updated = False
+    advisor_assigned = False
+    error: str | None = None
+
+    client = odoo
+    if client is None and lead_id:
+        try:
+            client = OdooCRMClient()
+            client.authenticate()
+        except Exception as exc:
+            error = f"odoo init failed: {exc}"
+            client = None
+
+    if client is not None and lead_id:
+        try:
+            stage_updated = update_lead_stage(client, int(lead_id), STAGE_CITA)
+            if assignment.odoo_id:
+                try:
+                    client.assign_lead_advisor(int(lead_id), int(assignment.odoo_id))
+                    advisor_assigned = True
+                except Exception as exc:
+                    print(
+                        f"WARN lead_routing: assign advisor failed lead={lead_id}: {exc}",
+                        flush=True,
+                    )
+            note_bits = [
+                "--- AI appointment handoff ---",
+                f"Cliente: {client_name or client_phone}",
+                f"Sucursal: {branch_label(branch_key)}",
+            ]
+            if appointment and appointment.when_text:
+                note_bits.append(f"Horario solicitado: {appointment.when_text}")
+            if appointment and appointment.kind:
+                note_bits.append(f"Tipo: {appointment.kind}")
+            if vehicle_interest:
+                note_bits.append(f"Interés: {vehicle_interest}")
+            try:
+                client.post_quote_to_chatter(int(lead_id), "\n".join(note_bits))
+            except Exception:
+                pass
+        except Exception as exc:
+            error = str(exc)
+
+    when = (appointment.when_text if appointment else "") or ""
+    notice = notify_rep(
+        client_phone=client_phone,
+        branch=branch_key,
+        vehicle_interest=vehicle_interest,
+        payment_method=payment_method,
+        lead_id=lead_id,
+        assignment=assignment,
+        whatsapp_client=whatsapp_client,
+        appointment_time=when or None,
+    )
+
+    return AppointmentHandoffResult(
+        lead_id=lead_id,
+        stage_name=STAGE_CITA,
+        assignment=assignment,
+        rep_notification=notice.as_dict(),
+        stage_updated=stage_updated,
+        advisor_assigned=advisor_assigned,
+        error=error,
+    )
+
+
+__all__ = [
+    "AGENT_AI",
+    "AGENT_HUMAN",
+    "AppointmentHandoffResult",
+    "AppointmentIntent",
+    "ENV_AI_MG_QUOTE",
+    "LeadRoutingDecision",
+    "MG_QUOTE_LEAD_TAG",
+    "PAYMENT_LABEL_PERMUTA",
+    "STAGE_CITA",
+    "STAGE_PRIMER_CONTACTO",
+    "TradeInDetails",
+    "advance_trade_in_qualification",
+    "ai_mg_quote_enabled",
+    "build_trade_in_quote_message",
+    "detect_appointment_intent",
+    "detect_forma_pago_permuta",
+    "extract_tags",
+    "format_ai_reply",
+    "handoff_appointment_to_rep",
+    "has_mg_quote_tag",
+    "parse_trade_in_details",
+    "prompt_missing_trade_in_fields",
+    "route_inbound_lead",
+    "should_defer_human_assignment",
+    "update_lead_stage",
+]

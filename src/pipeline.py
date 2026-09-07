@@ -334,7 +334,10 @@ class AutosellPipeline:
                 log.append({"step": "odoo_follow_up", "status": "skipped"})
 
             advisor_id: int | None = None
-            if self.assign_advisor:
+            from src.lead_routing import should_defer_human_assignment
+
+            defer_advisor = should_defer_human_assignment(payload=lead_data)
+            if self.assign_advisor and not defer_advisor:
                 advisor_id = self.odoo.round_robin_assign_advisor(branch_id)
                 self.odoo.assign_lead_advisor(lead_id, advisor_id)
                 result.advisor_user_id = advisor_id
@@ -346,7 +349,13 @@ class AutosellPipeline:
                     }
                 )
             else:
-                log.append({"step": "odoo_assign_advisor", "status": "skipped"})
+                log.append(
+                    {
+                        "step": "odoo_assign_advisor",
+                        "status": "skipped",
+                        "reason": "mg_quote_lead_ai" if defer_advisor else "disabled",
+                    }
+                )
 
             chatter_id = self.odoo.post_quote_to_chatter(lead_id, quote_summary)
             log.append(

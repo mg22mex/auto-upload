@@ -46,6 +46,14 @@ def _money(value: Decimal | int | float | str) -> str:
     return f"{sign}${grouped}.{frac}"
 
 
+QUOTE_DISCLAIMER = (
+    "Esta cotización es una estimación aproximada basada en el esquema de "
+    "amortización previo y no representa un compromiso final de crédito. "
+    "Los términos, tasa de interés, comisiones y mensualidad definitiva se "
+    "detallarán en el contrato final tras el análisis crediticio."
+)
+
+
 def normalize_phone_number(phone_number: str, *, default_country: str = "52") -> str:
     """Digits only; prepend MX 52 when given a 10-digit local number."""
     digits = re.sub(r"\D", "", phone_number or "")
@@ -96,7 +104,8 @@ def format_quote_message(
         f"• IVA intereses (prom.): {_money(q.average_monthly_iva)}",
         f"• *Total estimado: {_money(q.estimated_monthly_payment)}*",
         "",
-        "Cotización informativa; sujeta a aprobación crediticia.",
+        QUOTE_DISCLAIMER,
+        "",
         "¿Te agendo con un asesor?",
     ]
     return "\n".join(lines)

@@ -70,18 +70,20 @@ def format_rep_notification(
     payment_method: str | None = None,
     branch_name: str = "",
     lead_url: str = "",
+    appointment_time: str | None = None,
 ) -> str:
     """Spanish handoff card sent 1-on-1 to the rep."""
-    return "\n".join(
-        [
-            "🎯 *¡Nuevo Lead Asignado!*",
-            f"👤 *Cliente:* {client_phone or 'n/d'}",
-            f"🚘 *Auto:* {vehicle_interest or 'Por confirmar'}",
-            f"💳 *Modalidad:* {payment_label(payment_method)}",
-            f"📍 *Sucursal:* {branch_name or 'Periférico'}",
-            f"🔗 *Odoo Lead:* {lead_url or 'n/d'}",
-        ]
-    )
+    lines = [
+        "🎯 *¡Nuevo Lead Asignado!*",
+        f"👤 *Cliente:* {client_phone or 'n/d'}",
+        f"🚘 *Auto:* {vehicle_interest or 'Por confirmar'}",
+        f"💳 *Modalidad:* {payment_label(payment_method)}",
+        f"📍 *Sucursal:* {branch_name or 'Periférico'}",
+    ]
+    if appointment_time:
+        lines.append(f"🗓️ *Cita solicitada:* {appointment_time}")
+    lines.append(f"🔗 *Odoo Lead:* {lead_url or 'n/d'}")
+    return "\n".join(lines)
 
 
 def notify_rep(
@@ -95,6 +97,7 @@ def notify_rep(
     lead_url: str | None = None,
     assignment: RepAssignment | None = None,
     whatsapp_client: Any | None = None,
+    appointment_time: str | None = None,
 ) -> RepNotifyResult:
     """Round-robin a rep for the branch and WhatsApp them the lead card."""
     if not rep_notifications_enabled():
@@ -116,6 +119,7 @@ def notify_rep(
         payment_method=payment_method,
         branch_name=branch_label(pick.branch),
         lead_url=lead_url if lead_url is not None else odoo_lead_url(lead_id),
+        appointment_time=appointment_time,
     )
 
     client = whatsapp_client

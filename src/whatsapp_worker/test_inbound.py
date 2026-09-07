@@ -1,16 +1,18 @@
 """Unit tests — Evolution inbound parse + qualification flow."""
 from __future__ import annotations
 
+import os
 import unittest
+from unittest.mock import patch
 
 from src.whatsapp_worker.inbound import (
     PAYMENT_FINANCING,
     PAYMENT_TRADE_IN,
+    STATE_AI_ACTIVE,
     STATE_AWAITING_DOWN_PAYMENT,
     STATE_AWAITING_PAYMENT_METHOD,
     STATE_AWAITING_TRADE_IN,
     STATE_HANDOFF_TO_HUMAN,
-    STATE_NEW_LEAD,
     WA_CHANNEL,
     QualificationStore,
     WhatsAppInboundEvent,
@@ -119,6 +121,8 @@ class TestPaymentParsing(unittest.TestCase):
 
 
 class TestQualificationFlow(unittest.TestCase):
+    """Legacy payment FSM — AI MG Quote path disabled for these cases."""
+
     def setUp(self) -> None:
         self.store = QualificationStore(":memory:")
         self.branch = {
@@ -126,6 +130,9 @@ class TestQualificationFlow(unittest.TestCase):
             "branch_id": 5,
             "physical_location": "San Felipe",
         }
+        self._ai = patch.dict(os.environ, {"AI_MG_QUOTE_LEADS": "false"})
+        self._ai.start()
+        self.addCleanup(self._ai.stop)
 
     def tearDown(self) -> None:
         self.store.close()
@@ -194,6 +201,64 @@ class TestQualificationFlow(unittest.TestCase):
         t1.session.state = STATE_HANDOFF_TO_HUMAN
         t2 = self._turn("¿y ahora?", t1.session)
         self.assertEqual(t2.session.state, STATE_HANDOFF_TO_HUMAN)
+        self.assertIn("asesor", t2.reply_text.lower())
+
+
+class TestAiMgQuoteFlow(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = QualificationStore(":memory:")
+        self._ai = patch.dict(os.environ, {"AI_MG_QUOTE_LEADS": "true"})
+        self._ai.start()
+        self.addCleanup(self._ai.stop)
+
+    def tearDown(self) -> None:
+        self.store.close()
+
+    def _turn(self, text: str, session=None):
+        return process_qualification_turn(
+            _event(text, name="Marco Gastelum"),
+            session,
+            branch="san_felipe",
+            branch_id=5,
+            physical_location="San Felipe",
+            tags=["MG Quote Lead"],
+        )
+
+    def test_new_lead_stays_with_ai_no_human_handoff(self):
+        turn = self._turn(
+            "Hola, me interesa información sobre una camioneta. Tengo Toyota Corolla 2020."
+        )
+        self.assertEqual(turn.session.state, STATE_AI_ACTIVE)
+        self.assertEqual(turn.session.handling_agent, "ai_whatsapp")
+        self.assertTrue(turn.odoo_create)
+        self.assertEqual(turn.odoo_stage, "Primer contacto")
+        self.assertFalse(turn.odoo_handoff)
+        self.assertFalse(turn.appointment_handoff)
+        self.assertIn("San Felipe", turn.reply_text)
+
+    def test_financing_question_answered_without_handoff(self):
+        t1 = self._turn("Me interesa una camioneta")
+        self.store.save(t1.session)
+        t2 = self._turn(
+            "¿Qué requisitos hay para financiamiento?",
+            self.store.get("5216141234567", "autosell_san_felipe"),
+        )
+        self.assertEqual(t2.session.state, STATE_AI_ACTIVE)
+        self.assertFalse(t2.odoo_handoff)
+        self.assertIn("INE", t2.reply_text)
+
+    def test_appointment_request_hands_off(self):
+        t1 = self._turn("Toyota Corolla 2020 a cuenta")
+        self.store.save(t1.session)
+        t2 = self._turn(
+            "Quiero agendar una prueba de manejo mañana a las 11",
+            self.store.get("5216141234567", "autosell_san_felipe"),
+        )
+        self.assertEqual(t2.session.state, STATE_HANDOFF_TO_HUMAN)
+        self.assertTrue(t2.odoo_handoff)
+        self.assertTrue(t2.appointment_handoff)
+        self.assertEqual(t2.odoo_stage, "Cita/Prueba de manejo")
+        self.assertIn("mañana", t2.session.appointment_time.lower())
         self.assertIn("asesor", t2.reply_text.lower())
 
 

@@ -23,7 +23,7 @@ Sync [autosell.mx](https://www.autosell.mx) public catalog to **Facebook Marketp
 | **AI Voice gateway** | FastAPI `POST /webhook/voice-lead`, `/voice/inbound` |
 | **WhatsApp** | Evolution multi-instance + qualification bot (2 branches) |
 | **Meta Messenger** | WIP paused — code done; awaiting Fanpage admin / Page token |
-| **Quote engine** | Local French Amortization (Scotiabank profile) |
+| **Quote engine** |  |
 | **Vehicles** | ~130–134 public catalog from `autosell.mx` |
 | **FB accounts** | 3 sessions; **2 live** (`account_1`, `account_2`) |
 | **Target FB listings** | ~268 (134 × 2 active accounts) |
@@ -104,7 +104,10 @@ The FB planner only manages listings in **`sync.db`**. It does not scan Facebook
 | `src/notifications/whatsapp_rep.py` | 1-on-1 WhatsApp handoff card to the assigned rep |
 | `src/meta_gateway/` | Messenger parse, quote orchestration, Graph API reply |
 | `src/pipeline.py` | End-to-end lead: trade-in → quote → Odoo → PDF → WhatsApp |
-| `src/quote_engine/` | Local amortization + Scotiabank profile |
+| `src/quote_engine/` | Local amortization + Scotiabank profile + Autométrica trade-in |
+| `src/quote_engine/autometrica.py` | Valor Compra lookup (`data/autometrica_valuations.json`) + optional Laravel login |
+| `data/autometrica_valuations.json` | Offline Autométrica guide rows (mileage → Valor Compra) |
+| `.github/workflows/get_token.yml` | Manual workflow: POST `/api/user/login` → session token |
 | `src/odoo_sync/` | Modular Odoo XML-RPC (see below) |
 | `src/facebook/listing_cta.py` | Branch `wa.me` CTAs in Marketplace descriptions |
 | `src/pdf_engine/` | ReportLab quote / vehicle spec PDF (+ optional Odoo `ir.attachment`) |
@@ -253,6 +256,30 @@ uvicorn src.voice_gateway.webhook:app --reload --host 0.0.0.0 --port 8080
 Optional in `repost.yml`: `SLACK_WEBHOOK_URL` / `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` (failure alerts), `FB_SESSION_PRECHECK_LIVE`, `LOG_RETENTION_DAYS`.
 
 Webhook runtime (API host `.env`, not sync.yml): `FB_VERIFY_TOKEN`, `FB_PAGE_ACCESS_TOKEN`, `WHATSAPP_*` / Evolution, `ODOO_TEAM_PERIFERICO` / `ODOO_TEAM_SAN_FELIPE`, `REPS_PERIFERICO` / `REPS_SAN_FELIPE` / `DEFAULT_REP_PHONE`, optional `VOICE_DID_*` / `VOICE_FORWARD_*`, `META_DEFAULT_BRANCH_ID` / `VOICE_DEFAULT_BRANCH_ID`.
+
+### Autométrica trade-in (Valor Compra → enganche)
+
+Reverse-engineered from the Autométrica Android APK: Laravel backend on **`app240.autometrica.mx`** (also referenced as **`appclient.autometrica.mx`**). Auth matches Laravel JSON login:
+
+| Item | Value |
+|------|--------|
+| Route | `POST /api/user/login` |
+| Host | `https://app240.autometrica.mx` |
+| Body | `{"username":"…","password":"…"}` |
+| Headers | `Content-Type: application/json`, `Accept: application/json` |
+| Token | Response `.token` / `.access_token` / `.data.token` |
+
+**GitHub Actions:** [`.github/workflows/get_token.yml`](.github/workflows/get_token.yml) (`workflow_dispatch`) POSTs the same payload using secrets **`AUTOMETRICA_USER`** and **`AUTOMETRICA_PASS`**, masks the token, and prints a success step for operators / downstream jobs.
+
+**Runtime quote path** (no live API required):
+
+1. WhatsApp AI detects *Forma de pago: Permuta (trade-in)*.
+2. Prompts for missing **Versión** and **Kilometraje**.
+3. `src/quote_engine/autometrica.py` looks up `data/autometrica_valuations.json`, applies mileage adjustment → **Valor Compra**.
+4. Valor Compra is passed as `net_trade_in_equity` (enganche) into French amortization (`calculate_quote`).
+5. WhatsApp quote text appends the credit disclaimer (`QUOTE_DISCLAIMER` in `src/whatsapp_worker/client.py`).
+
+Optional env: `AUTOMETRICA_TOKEN`, `AUTOMETRICA_USER` / `AUTOMETRICA_PASS`, `AUTOMETRICA_LOGIN_URL`, `AUTOMETRICA_VALUATIONS_PATH`, `AI_QUOTE_DEFAULT_PRICE`.
 
 After each scrape, CI runs `scripts/sync_odoo_inventory.py` on `data/snapshots/catalog_latest.json`.
 

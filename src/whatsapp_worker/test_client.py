@@ -60,6 +60,8 @@ class TestFormatQuote(unittest.TestCase):
         self.assertIn("$10,726.90", text)
         self.assertIn("Seguro auto", text)
         self.assertIn("IVA intereses", text)
+        self.assertIn("estimación aproximada", text)
+        self.assertIn("análisis crediticio", text)
 
     def test_client_classmethod(self):
         text = WhatsAppWorkerClient.format_quote_message("Luis", "Vento", _FakeQuote())

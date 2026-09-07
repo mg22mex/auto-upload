@@ -5,6 +5,7 @@ Messaging worker — isolated from Playwright scraping sessions under sessions/.
 from src.whatsapp_worker.client import (
     WhatsAppWorkerClient,
     WhatsAppWorkerError,
+    QUOTE_DISCLAIMER,
     format_quote_message,
     normalize_phone_number,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "WhatsAppInboundEvent",
     "WhatsAppWorkerClient",
     "WhatsAppWorkerError",
+    "QUOTE_DISCLAIMER",
     "apply_whatsapp_branch_context",
     "branch_context_for_instance",
     "format_quote_message",

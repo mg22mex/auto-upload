@@ -342,17 +342,16 @@ class TestVoiceWebhookHTTP(unittest.TestCase):
             self.skipTest("fastapi not installed")
 
         from src.odoo_sync.client import QuoteLeadResult
-        from src.whatsapp_worker.inbound import (
-            QualificationStore,
-            STATE_AWAITING_DOWN_PAYMENT,
-            STATE_AWAITING_PAYMENT_METHOD,
-        )
+        from src.whatsapp_worker.inbound import QualificationStore
 
         odoo = MagicMock()
         odoo.authenticate.return_value = 1
         odoo.create_or_update_lead.return_value = QuoteLeadResult(
             lead_id=501, activity_id=None, tag_ids=()
         )
+        odoo._resolve_crm_stage_id.return_value = 20
+        odoo.assign_lead_advisor.return_value = True
+        odoo.post_quote_to_chatter.return_value = 1
         whatsapp = MagicMock()
         whatsapp.send_text_message.return_value = {"ok": True}
         store = QualificationStore(":memory:")
@@ -363,6 +362,10 @@ class TestVoiceWebhookHTTP(unittest.TestCase):
                 "WHATSAPP_QUALIFICATION": "true",
                 "WHATSAPP_INSTANCE_SAN_FELIPE": "autosell_san_felipe",
                 "ODOO_TEAM_SAN_FELIPE": "5",
+                "AI_MG_QUOTE_LEADS": "true",
+                "REPS_SAN_FELIPE": (
+                    '[{"odoo_id": 21, "phone": "+526142417711", "name": "Francisco"}]'
+                ),
             },
             clear=False,
         ):
@@ -392,9 +395,14 @@ class TestVoiceWebhookHTTP(unittest.TestCase):
             )
             self.assertEqual(r1.status_code, 200)
             body1 = r1.json()["results"][0]
-            self.assertEqual(body1["qualification_state"], STATE_AWAITING_PAYMENT_METHOD)
+            self.assertEqual(body1["qualification_state"], "AI_ACTIVE")
             self.assertTrue(body1["auto_reply_sent"])
+            self.assertIsNone(body1["rep_notification"])
             odoo.create_or_update_lead.assert_called_once()
+            self.assertEqual(
+                odoo.create_or_update_lead.call_args.kwargs.get("stage_name"),
+                "Primer contacto",
+            )
 
             r2 = client.post(
                 "/webhook/whatsapp",
@@ -413,8 +421,33 @@ class TestVoiceWebhookHTTP(unittest.TestCase):
                 },
             )
             body2 = r2.json()["results"][0]
-            self.assertEqual(body2["qualification_state"], STATE_AWAITING_DOWN_PAYMENT)
+            self.assertEqual(body2["qualification_state"], "AI_ACTIVE")
             self.assertEqual(body2["branch_id"], 5)
+            self.assertIsNone(body2["rep_notification"])
+            self.assertIn("financiamiento", whatsapp.send_text_message.call_args.args[1].lower())
+
+            r3 = client.post(
+                "/webhook/whatsapp",
+                json={
+                    "event": "messages.upsert",
+                    "instance": "autosell_san_felipe",
+                    "data": {
+                        "key": {
+                            "remoteJid": "5216149998888@s.whatsapp.net",
+                            "fromMe": False,
+                            "id": "Q3",
+                        },
+                        "pushName": "Luis",
+                        "message": {
+                            "conversation": "Quiero agendar una prueba de manejo mañana"
+                        },
+                    },
+                },
+            )
+            body3 = r3.json()["results"][0]
+            self.assertEqual(body3["qualification_state"], "HANDOFF_TO_HUMAN")
+            self.assertTrue(body3["rep_notification"]["sent"])
+            self.assertTrue(body3["rep_notification"]["appointment_handoff"])
 
         store.close()
 

@@ -16,6 +16,7 @@ STATE_NEW_LEAD = "NEW_LEAD"
 STATE_AWAITING_PAYMENT_METHOD = "AWAITING_PAYMENT_METHOD"
 STATE_AWAITING_TRADE_IN = "AWAITING_TRADE_IN"
 STATE_AWAITING_DOWN_PAYMENT = "AWAITING_DOWN_PAYMENT"
+STATE_AI_ACTIVE = "AI_ACTIVE"
 STATE_HANDOFF_TO_HUMAN = "HANDOFF_TO_HUMAN"
 
 PAYMENT_CASH = "cash"
@@ -54,6 +55,9 @@ class QualificationSession:
     payment_method: str = ""
     trade_in_vehicle: str = ""
     down_payment: str = ""
+    handling_agent: str = ""
+    appointment_time: str = ""
+    vehicle_interest: str = ""
     updated_at: str = ""
 
 
@@ -64,6 +68,10 @@ class QualificationTurnResult:
     odoo_create: bool = False
     odoo_handoff: bool = False
     odoo_notes: str = ""
+    appointment_handoff: bool = False
+    odoo_stage: str = ""
+    routing: dict[str, Any] | None = None
+    handoff_result: dict[str, Any] | None = None
 
 
 def _utc_now() -> str:
@@ -306,8 +314,23 @@ def process_qualification_turn(
     branch: str = "periferico",
     branch_id: int | None = None,
     physical_location: str = "Periférico",
+    tags: list[str] | None = None,
 ) -> QualificationTurnResult:
-    """Advance one inbound message through the qualification state machine."""
+    """Advance one inbound message through the qualification state machine.
+
+    When ``AI_MG_QUOTE_LEADS`` is on (default), MG Quote Lead conversations stay
+    with the AI until an appointment / test-drive request triggers human handoff.
+    """
+    from src.lead_routing import (
+        AGENT_AI,
+        STAGE_CITA,
+        STAGE_PRIMER_CONTACTO,
+        ai_mg_quote_enabled,
+        detect_appointment_intent,
+        format_ai_reply,
+        route_inbound_lead,
+    )
+
     now = _utc_now()
     if session is None:
         session = QualificationSession(
@@ -319,7 +342,34 @@ def process_qualification_turn(
             branch_id=branch_id,
             physical_location=physical_location,
             initial_message=event.text.strip(),
+            vehicle_interest=event.text.strip(),
             updated_at=now,
+        )
+
+    use_ai = False
+    if ai_mg_quote_enabled():
+        if session.handling_agent == AGENT_AI or session.state == STATE_AI_ACTIVE:
+            use_ai = True
+        elif session.state == STATE_NEW_LEAD:
+            # Fresh WhatsApp quote leads are stamped MG Quote Lead → AI first.
+            use_ai = True
+        elif tags:
+            from src.lead_routing import has_mg_quote_tag
+
+            use_ai = has_mg_quote_tag(tags)
+
+    if use_ai and session.state != STATE_HANDOFF_TO_HUMAN:
+        return _process_ai_turn(
+            event,
+            session,
+            now=now,
+            tags=tags,
+            detect_appointment_intent=detect_appointment_intent,
+            format_ai_reply=format_ai_reply,
+            route_inbound_lead=route_inbound_lead,
+            stage_primer=STAGE_PRIMER_CONTACTO,
+            stage_cita=STAGE_CITA,
+            agent_ai=AGENT_AI,
         )
 
     if session.state == STATE_HANDOFF_TO_HUMAN:
@@ -340,6 +390,7 @@ def process_qualification_turn(
                 session.initial_message,
             ),
             odoo_create=True,
+            odoo_stage="New",
         )
 
     if session.state == STATE_AWAITING_PAYMENT_METHOD:
@@ -416,6 +467,154 @@ def process_qualification_turn(
     )
 
 
+def _process_ai_turn(
+    event: WhatsAppInboundEvent,
+    session: QualificationSession,
+    *,
+    now: str,
+    tags: list[str] | None,
+    detect_appointment_intent: Any,
+    format_ai_reply: Any,
+    route_inbound_lead: Any,
+    stage_primer: str,
+    stage_cita: str,
+    agent_ai: str,
+) -> QualificationTurnResult:
+    """MG Quote Lead AI loop — handoff only on appointment / test-drive intent."""
+    appointment = detect_appointment_intent(event.text)
+    decision = route_inbound_lead(
+        {"tags": tags or ["MG Quote Lead"], "handling_agent": agent_ai},
+        tags=tags,
+        appointment=appointment,
+    )
+
+    if session.state == STATE_NEW_LEAD:
+        session.state = STATE_AI_ACTIVE
+        session.handling_agent = agent_ai
+        if not session.vehicle_interest:
+            session.vehicle_interest = session.initial_message or event.text.strip()
+        session.updated_at = now
+
+        from src.lead_routing import (
+            TradeInDetails,
+            advance_trade_in_qualification,
+        )
+
+        details, trade_reply, quote_meta = advance_trade_in_qualification(
+            event.text,
+            prior=None,
+            lead_name=session.contact_name or event.name,
+            vehicle_interest=session.vehicle_interest,
+        )
+        if trade_reply is not None:
+            session.payment_method = PAYMENT_TRADE_IN
+            session.trade_in_vehicle = details.as_label() or session.trade_in_vehicle
+            if quote_meta and quote_meta.get("valor_compra"):
+                session.down_payment = str(quote_meta["valor_compra"])
+            routing = decision.as_dict()
+            if quote_meta:
+                routing = {**routing, "trade_in_quote": quote_meta}
+            return QualificationTurnResult(
+                session=session,
+                reply_text=trade_reply,
+                odoo_create=True,
+                odoo_stage=stage_primer,
+                routing=routing,
+            )
+
+        reply = format_ai_reply(
+            name=session.contact_name or event.name,
+            text=event.text,
+            vehicle_interest=session.vehicle_interest,
+            branch_name=session.physical_location,
+        )
+        return QualificationTurnResult(
+            session=session,
+            reply_text=reply,
+            odoo_create=True,
+            odoo_stage=stage_primer,
+            routing=decision.as_dict(),
+        )
+
+    if appointment.requested:
+        session.state = STATE_HANDOFF_TO_HUMAN
+        session.handling_agent = "human_rep"
+        session.appointment_time = appointment.when_text or appointment.raw
+        session.updated_at = now
+        notes = build_qualification_notes(session)
+        notes += f"\nCita solicitada: {session.appointment_time or 'sin horario'}"
+        reply = format_ai_reply(
+            name=session.contact_name or event.name,
+            text=event.text,
+            vehicle_interest=session.vehicle_interest or session.initial_message,
+            branch_name=session.physical_location,
+            appointment=appointment,
+        )
+        return QualificationTurnResult(
+            session=session,
+            reply_text=reply,
+            odoo_handoff=True,
+            appointment_handoff=True,
+            odoo_notes=notes,
+            odoo_stage=stage_cita,
+            routing=decision.as_dict(),
+        )
+
+    # Autométrica permuta → Valor Compra as engache (French amortization)
+    from src.lead_routing import (
+        TradeInDetails,
+        advance_trade_in_qualification,
+        parse_trade_in_details,
+    )
+
+    prior_ti: TradeInDetails | None = None
+    if session.payment_method == PAYMENT_TRADE_IN or session.trade_in_vehicle:
+        prior_ti = parse_trade_in_details(
+            session.trade_in_vehicle or "",
+            prior=TradeInDetails(is_permuta=True),
+        )
+        prior_ti.is_permuta = True
+    details, trade_reply, quote_meta = advance_trade_in_qualification(
+        event.text,
+        prior=prior_ti,
+        lead_name=session.contact_name or event.name,
+        vehicle_interest=session.vehicle_interest or session.initial_message,
+    )
+    if trade_reply is not None:
+        session.state = STATE_AI_ACTIVE
+        session.handling_agent = agent_ai
+        session.payment_method = PAYMENT_TRADE_IN
+        session.trade_in_vehicle = details.as_label() or session.trade_in_vehicle
+        if quote_meta and quote_meta.get("valor_compra"):
+            session.down_payment = str(quote_meta["valor_compra"])
+        session.updated_at = now
+        routing = decision.as_dict()
+        if quote_meta:
+            routing = {**routing, "trade_in_quote": quote_meta}
+        return QualificationTurnResult(
+            session=session,
+            reply_text=trade_reply,
+            odoo_stage=stage_primer,
+            routing=routing,
+        )
+
+    session.state = STATE_AI_ACTIVE
+    session.handling_agent = agent_ai
+    session.updated_at = now
+    reply = format_ai_reply(
+        name=session.contact_name or event.name,
+        text=event.text,
+        vehicle_interest=session.vehicle_interest or session.initial_message,
+        branch_name=session.physical_location,
+    )
+    return QualificationTurnResult(
+        session=session,
+        reply_text=reply,
+        odoo_stage=stage_primer,
+        routing=decision.as_dict(),
+    )
+
+
 def apply_qualification_to_odoo(
     odoo: Any,
     event: WhatsAppInboundEvent,
@@ -426,6 +625,8 @@ def apply_qualification_to_odoo(
     if not (turn.odoo_create or turn.odoo_handoff):
         return session.lead_id
 
+    from src.lead_routing import STAGE_PRIMER_CONTACTO
+
     branch_id = int(session.branch_id or os.getenv("VOICE_DEFAULT_BRANCH_ID") or 1)
     odoo.authenticate()
     summary = (
@@ -433,15 +634,19 @@ def apply_qualification_to_odoo(
         if turn.odoo_handoff
         else f"WhatsApp inbound: {session.initial_message or event.text}"
     )
+    stage_name = turn.odoo_stage or (
+        STAGE_PRIMER_CONTACTO if turn.odoo_create else "New"
+    )
     lead_result = odoo.create_or_update_lead(
         session.contact_name or event.name,
         event.phone,
-        session.initial_message or event.text,
+        session.vehicle_interest or session.initial_message or event.text,
         branch_id,
         quote_summary=summary,
-        stage_name="New",
+        stage_name=stage_name,
         channel=WA_CHANNEL,
         schedule_follow_up=True,
+        user_id=None,
     )
     session.lead_id = lead_result.lead_id
     return lead_result.lead_id
@@ -451,20 +656,68 @@ def notify_rep_on_handoff(
     turn: QualificationTurnResult,
     *,
     whatsapp_client: Any | None = None,
+    odoo: Any | None = None,
 ) -> dict[str, Any] | None:
     """Alert the round-robin rep when a turn reaches ``HANDOFF_TO_HUMAN``.
 
-    Only the transition turn carries ``odoo_handoff``, so follow-up messages in
-    an already-handed-off conversation do not re-alert. Returns ``None`` when the
-    turn is not a handoff; never raises.
+    Appointment handoffs also move the Odoo stage to ``Cita/Prueba de manejo``
+    and assign the chosen rep. Non-appointment legacy handoffs only WhatsApp
+    the rep. Returns ``None`` when the turn is not a handoff; never raises.
     """
     if not turn.odoo_handoff:
         return None
 
+    session = turn.session
+    interest = (
+        session.vehicle_interest
+        or session.initial_message
+        or session.trade_in_vehicle
+        or ""
+    )
+
+    if turn.appointment_handoff:
+        from src.lead_routing import detect_appointment_intent, handoff_appointment_to_rep
+
+        appointment = detect_appointment_intent(
+            session.appointment_time or interest
+        )
+        if session.appointment_time and not appointment.when_text:
+            from src.lead_routing import AppointmentIntent
+
+            appointment = AppointmentIntent(
+                requested=True,
+                kind="cita",
+                when_text=session.appointment_time,
+                raw=session.appointment_time,
+            )
+        result = handoff_appointment_to_rep(
+            lead_id=session.lead_id,
+            client_phone=session.phone,
+            branch=session.branch,
+            vehicle_interest=interest,
+            payment_method=session.payment_method or None,
+            appointment=appointment,
+            client_name=session.contact_name,
+            odoo=odoo,
+            whatsapp_client=whatsapp_client,
+        )
+        payload = result.as_dict()
+        turn.handoff_result = payload
+        notice = dict(payload.get("rep_notification") or {})
+        notice.update(
+            {
+                "appointment_handoff": True,
+                "stage_name": payload.get("stage_name"),
+                "stage_updated": payload.get("stage_updated"),
+                "advisor_assigned": payload.get("advisor_assigned"),
+                "assignment": payload.get("assignment"),
+                "error": payload.get("error"),
+            }
+        )
+        return notice
+
     from src.notifications.whatsapp_rep import notify_rep
 
-    session = turn.session
-    interest = session.initial_message or session.trade_in_vehicle or ""
     result = notify_rep(
         client_phone=session.phone,
         branch=session.branch,
@@ -472,6 +725,7 @@ def notify_rep_on_handoff(
         payment_method=session.payment_method,
         lead_id=session.lead_id,
         whatsapp_client=whatsapp_client,
+        appointment_time=session.appointment_time or None,
     )
     return result.as_dict()
 
@@ -493,10 +747,19 @@ class QualificationStore:
         payment_method TEXT NOT NULL DEFAULT '',
         trade_in_vehicle TEXT NOT NULL DEFAULT '',
         down_payment TEXT NOT NULL DEFAULT '',
+        handling_agent TEXT NOT NULL DEFAULT '',
+        appointment_time TEXT NOT NULL DEFAULT '',
+        vehicle_interest TEXT NOT NULL DEFAULT '',
         updated_at TEXT NOT NULL,
         PRIMARY KEY (phone, instance)
     );
     """
+
+    _EXTRA_COLUMNS = (
+        ("handling_agent", "TEXT NOT NULL DEFAULT ''"),
+        ("appointment_time", "TEXT NOT NULL DEFAULT ''"),
+        ("vehicle_interest", "TEXT NOT NULL DEFAULT ''"),
+    )
 
     def __init__(self, db_path: str | Path | None = None) -> None:
         if db_path is None:
@@ -507,7 +770,19 @@ class QualificationStore:
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute(self._SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        existing = {
+            row[1]
+            for row in self._conn.execute("PRAGMA table_info(wa_qualification)").fetchall()
+        }
+        for name, decl in self._EXTRA_COLUMNS:
+            if name not in existing:
+                self._conn.execute(
+                    f"ALTER TABLE wa_qualification ADD COLUMN {name} {decl}"
+                )
 
     def close(self) -> None:
         self._conn.close()
@@ -517,7 +792,8 @@ class QualificationStore:
             """
             SELECT phone, instance, state, contact_name, branch, branch_id,
                    physical_location, lead_id, initial_message, payment_method,
-                   trade_in_vehicle, down_payment, updated_at
+                   trade_in_vehicle, down_payment, handling_agent,
+                   appointment_time, vehicle_interest, updated_at
             FROM wa_qualification
             WHERE phone = ? AND instance = ?
             """,
@@ -525,6 +801,7 @@ class QualificationStore:
         ).fetchone()
         if row is None:
             return None
+        keys = set(row.keys())
         return QualificationSession(
             phone=str(row["phone"]),
             instance=str(row["instance"]),
@@ -538,6 +815,9 @@ class QualificationStore:
             payment_method=str(row["payment_method"] or ""),
             trade_in_vehicle=str(row["trade_in_vehicle"] or ""),
             down_payment=str(row["down_payment"] or ""),
+            handling_agent=str(row["handling_agent"] or "") if "handling_agent" in keys else "",
+            appointment_time=str(row["appointment_time"] or "") if "appointment_time" in keys else "",
+            vehicle_interest=str(row["vehicle_interest"] or "") if "vehicle_interest" in keys else "",
             updated_at=str(row["updated_at"] or ""),
         )
 
@@ -547,8 +827,9 @@ class QualificationStore:
             INSERT INTO wa_qualification (
                 phone, instance, state, contact_name, branch, branch_id,
                 physical_location, lead_id, initial_message, payment_method,
-                trade_in_vehicle, down_payment, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                trade_in_vehicle, down_payment, handling_agent,
+                appointment_time, vehicle_interest, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(phone, instance) DO UPDATE SET
                 state = excluded.state,
                 contact_name = excluded.contact_name,
@@ -560,6 +841,9 @@ class QualificationStore:
                 payment_method = excluded.payment_method,
                 trade_in_vehicle = excluded.trade_in_vehicle,
                 down_payment = excluded.down_payment,
+                handling_agent = excluded.handling_agent,
+                appointment_time = excluded.appointment_time,
+                vehicle_interest = excluded.vehicle_interest,
                 updated_at = excluded.updated_at
             """,
             (
@@ -575,6 +859,9 @@ class QualificationStore:
                 session.payment_method,
                 session.trade_in_vehicle,
                 session.down_payment,
+                session.handling_agent,
+                session.appointment_time,
+                session.vehicle_interest,
                 session.updated_at or _utc_now(),
             ),
         )

@@ -191,7 +191,7 @@ async def _handle_whatsapp_qualification(
     )
     lead_id = await asyncio.to_thread(_apply_qualification_odoo, odoo, event, turn)
     rep_notice = await asyncio.to_thread(
-        notify_rep_on_handoff, turn, whatsapp_client=whatsapp
+        notify_rep_on_handoff, turn, whatsapp_client=whatsapp, odoo=odoo
     )
     reply_error: str | None = None
     reply_sent = False

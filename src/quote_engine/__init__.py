@@ -26,12 +26,17 @@ from src.quote_engine.trade_in import (
     TradeInVehicle,
     ValuationSource,
 )
+from src.quote_engine.autometrica import (
+    AutometricaValuation,
+    lookup_valor_compra,
+)
 
 __all__ = [
     "DEFAULT_ANNUAL_RATE",
     "DEFAULT_ORIGINATION_FEE_RATE",
     "IVA_RATE",
     "MIN_DOWN_PAYMENT_RATE",
+    "AutometricaValuation",
     "CalibratedQuoteEngine",
     "QuoteResult",
     "SCOTIABANK_PROFILE",
@@ -44,6 +49,7 @@ __all__ = [
     "calculate_quote",
     "calculate_quote_scotiabank",
     "french_payment",
+    "lookup_valor_compra",
     "quote_matrix",
     "resolve_down_with_trade_in",
 ]

@@ -1,0 +1,52 @@
+{
+  "source": "autometrica_fallback",
+  "updated_at": "2026-09-07",
+  "mileage_adjustment_per_10000_km": -3500,
+  "vehicles": [
+    {
+      "year": 2020,
+      "make": "Toyota",
+      "model": "Corolla",
+      "version": "Base",
+      "valor_compra": 185000,
+      "valor_venta": 215000,
+      "baseline_km": 80000
+    },
+    {
+      "year": 2020,
+      "make": "Toyota",
+      "model": "Corolla",
+      "version": "LE",
+      "valor_compra": 198000,
+      "valor_venta": 228000,
+      "baseline_km": 75000
+    },
+    {
+      "year": 2018,
+      "make": "Nissan",
+      "model": "Sentra",
+      "version": "Sense",
+      "valor_compra": 145000,
+      "valor_venta": 168000,
+      "baseline_km": 90000
+    },
+    {
+      "year": 2021,
+      "make": "Mazda",
+      "model": "CX-5",
+      "version": "i Sport",
+      "valor_compra": 320000,
+      "valor_venta": 365000,
+      "baseline_km": 55000
+    },
+    {
+      "year": 2019,
+      "make": "Volkswagen",
+      "model": "Jetta",
+      "version": "Comfortline",
+      "valor_compra": 210000,
+      "valor_venta": 245000,
+      "baseline_km": 70000
+    }
+  ]
+}

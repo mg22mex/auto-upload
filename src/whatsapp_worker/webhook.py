@@ -58,7 +58,7 @@ def handle_inbound_event(
     )
 
     lead_id = apply_qualification_to_odoo(odoo, event, turn)
-    rep_notice = notify_rep_on_handoff(turn, whatsapp_client=whatsapp)
+    rep_notice = notify_rep_on_handoff(turn, whatsapp_client=whatsapp, odoo=odoo)
 
     reply_sent = False
     reply_error: str | None = None

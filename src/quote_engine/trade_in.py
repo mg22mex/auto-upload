@@ -25,6 +25,7 @@ def _d(value: Decimal | int | float | str) -> Decimal:
 class ValuationSource(str, Enum):
     AUTOTECNICA = "autotecnica"
     LIBRO_AZUL = "libro_azul"
+    AUTOMETRICA = "autometrica"
     MANUAL = "manual"
 
 
@@ -52,16 +53,17 @@ class TradeInValuation:
 
 
 class TradeInEngine:
-    """Placeholder Autotécnica / Libro Azul appraiser → net equity.
+    """Trade-in appraiser → net equity (Autométrica Valor Compra preferred).
 
-    Real guide clients replace `_fetch_guide_value`. Until then, pass
-    `manual_guide_value` or rely on conservative stub estimates.
+    Lookup order: ``manual_guide_value`` → Autométrica fallback table → stub.
     """
 
     # Conservative haircut on stub guide values (not live market data)
     STUB_GUIDE_HAIRCUT = Decimal("0.92")
 
-    def __init__(self, *, preferred_source: ValuationSource = ValuationSource.LIBRO_AZUL):
+    def __init__(
+        self, *, preferred_source: ValuationSource = ValuationSource.AUTOMETRICA
+    ):
         self.preferred_source = preferred_source
 
     def value(
@@ -81,15 +83,20 @@ class TradeInEngine:
             guide = _q(_d(manual_guide_value))
             notes = "manual guide override"
             raw: dict[str, Any] = {"mode": "manual"}
+            used = ValuationSource.MANUAL
+        elif src == ValuationSource.AUTOMETRICA:
+            guide, notes, raw = self._fetch_autometrica(vehicle)
+            used = ValuationSource.AUTOMETRICA
         else:
             guide, notes, raw = self._fetch_guide_value(vehicle, src)
+            used = src
 
         net = _q(guide + adj - lien)
         if net < 0:
             net = Decimal("0.00")
 
         return TradeInValuation(
-            source=src if manual_guide_value is None else ValuationSource.MANUAL,
+            source=used,
             guide_value=guide,
             outstanding_lien=lien,
             adjustments=adj,
@@ -105,6 +112,35 @@ class TradeInEngine:
     ) -> Decimal:
         """Convenience: equity ready for `calculate_quote(..., net_trade_in_equity=...)`."""
         return self.value(vehicle, **kwargs).net_equity
+
+    def _fetch_autometrica(
+        self, vehicle: TradeInVehicle
+    ) -> tuple[Decimal, str, dict[str, Any]]:
+        from src.quote_engine.autometrica import lookup_valor_compra
+
+        val = lookup_valor_compra(
+            year=int(vehicle.year),
+            make=vehicle.make,
+            model=vehicle.model,
+            version=vehicle.version,
+            mileage_km=int(vehicle.mileage_km or 0),
+        )
+        notes = (
+            f"Autométrica Valor Compra={val.valor_compra} "
+            f"(mileage_adj={val.mileage_adjustment}, matched={val.matched})"
+        )
+        raw = {
+            "mode": "autometrica",
+            "source": val.source,
+            "valor_compra": str(val.valor_compra),
+            "valor_venta": str(val.valor_venta),
+            "baseline_km": val.baseline_km,
+            "mileage_km": val.mileage_km,
+            "mileage_adjustment": str(val.mileage_adjustment),
+            "matched": val.matched,
+            "notes": val.notes,
+        }
+        return val.valor_compra, notes, raw
 
     def _fetch_guide_value(
         self,
@@ -123,7 +159,7 @@ class TradeInEngine:
         guide = _q(base * self.STUB_GUIDE_HAIRCUT)
         notes = (
             f"PLACEHOLDER {source.value}: stub estimate only — "
-            "wire Autotécnica/Libro Azul; drop Scotiabank PDFs in docs/scotiabank_samples/"
+            "prefer Autométrica; drop Scotiabank PDFs in docs/scotiabank_samples/"
         )
         raw = {
             "mode": "placeholder",

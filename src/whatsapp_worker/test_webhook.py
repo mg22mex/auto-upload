@@ -18,13 +18,27 @@ class _LeadResult:
 class _FakeOdoo:
     def __init__(self) -> None:
         self.leads: list[tuple] = []
+        self.writes: list[tuple] = []
 
     def authenticate(self) -> int:
         return 1
 
     def create_or_update_lead(self, name, phone, message, branch_id, **kwargs):
-        self.leads.append((name, phone, message, branch_id))
+        self.leads.append((name, phone, message, branch_id, kwargs.get("stage_name")))
         return _LeadResult(101)
+
+    def _resolve_crm_stage_id(self, stage_name: str):
+        return 20 if stage_name else None
+
+    def assign_lead_advisor(self, lead_id, user_id):
+        return True
+
+    def post_quote_to_chatter(self, lead_id, body):
+        return 1
+
+    def execute_kw(self, model, method, args, kwargs=None):
+        self.writes.append((model, method, args))
+        return True
 
 
 class _FakeWhatsApp:
@@ -79,15 +93,19 @@ class TestWhatsAppWorkerWebhook(unittest.TestCase):
         self.assertEqual(result["lead_id"], 101)
         self.assertTrue(result["auto_reply_sent"])
         self.assertIsNone(result["rep_notification"])
+        self.assertEqual(result["qualification_state"], "AI_ACTIVE")
         self.assertEqual(len(self.whatsapp.sent), 1)
 
-    def test_cash_choice_hands_off_and_alerts_rep(self):
+    def test_appointment_request_hands_off_and_alerts_rep(self):
         self.client.post("/webhook/whatsapp", json=_payload("Hola, el CX-30"))
         with patch.dict(
             "os.environ",
             {"REPS_PERIFERICO": '[{"odoo_id": 1, "phone": "+526141111111"}]'},
         ):
-            response = self.client.post("/webhook/whatsapp", json=_payload("contado"))
+            response = self.client.post(
+                "/webhook/whatsapp",
+                json=_payload("Quiero agendar una prueba de manejo mañana"),
+            )
 
         result = response.json()["results"][0]
         self.assertEqual(result["qualification_state"], "HANDOFF_TO_HUMAN")
@@ -95,6 +113,7 @@ class TestWhatsAppWorkerWebhook(unittest.TestCase):
         rep_messages = [m for m in self.whatsapp.sent if "Nuevo Lead Asignado" in m["text"]]
         self.assertEqual(len(rep_messages), 1)
         self.assertEqual(rep_messages[0]["phone"], "+526141111111")
+        self.assertIn("Cita solicitada", rep_messages[0]["text"])
 
     def test_non_message_payload_is_ignored(self):
         response = self.client.post("/webhook/whatsapp", json={"event": "connection.update"})
