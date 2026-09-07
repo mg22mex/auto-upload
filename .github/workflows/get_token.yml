@@ -1,0 +1,26 @@
+name: Get Autometrica Token
+
+on:
+  workflow_dispatch: # Allows manual trigger from GitHub UI
+
+jobs:
+  fetch-token:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Login Request
+        id: login
+        run: |
+          RESPONSE=$(curl -s -X POST "https://app240.autometrica.mx/api/user/login" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -d "{\"username\": \"${{ secrets.AUTOMETRICA_USER }}\", \"password\": \"${{ secrets.AUTOMETRICA_PASS }}\"}")
+          
+          echo "Response received."
+          # Extract and print token output (adjust jq path if payload structure differs)
+          TOKEN=$(echo $RESPONSE | jq -r '.token // .access_token // .data.token')
+          echo "::add-mask::$TOKEN" # Masks token in public logs
+          echo "TOKEN_RESULT=$TOKEN" >> $GITHUB_ENV
+
+      - name: Display Token
+        run: |
+          echo "Login successful. Use your token in subsequent automated steps."
