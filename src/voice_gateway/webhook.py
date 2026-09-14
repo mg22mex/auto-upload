@@ -290,6 +290,137 @@ def create_app(
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.post("/api/v1/voice/outbound-call")
+    async def voice_outbound_call(request: Request) -> JSONResponse:
+        """Queue / place outbound AI voice after WhatsApp quote delivery."""
+        from src.lead_routing import handle_outbound_voice_request
+        from src.voice_gateway.config import voice_outbound_dry_run
+        from src.voice_gateway.dialer import place_vapi_outbound_call
+
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"invalid JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="payload must be a JSON object")
+        try:
+            body = handle_outbound_voice_request(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        # Live dial when dry-run is off (Vapi POST /call/phone).
+        force_dry = payload.get("dry_run")
+        dry = voice_outbound_dry_run() if force_dry is None else bool(force_dry)
+        dial = place_vapi_outbound_call(
+            customer_phone=str(body.get("phone") or payload.get("phone") or ""),
+            lead_id=body.get("lead_id"),
+            vehicle_of_interest=str(body.get("vehicle_of_interest") or ""),
+            valuation_amount=str(body.get("valuation_amount") or ""),
+            monthly_payment=str(body.get("monthly_payment") or ""),
+            branch=str(payload.get("branch") or ""),
+            client_name=str(payload.get("client_name") or payload.get("name") or ""),
+            payment_method=str(payload.get("payment_method") or ""),
+            agent_script=str(body.get("agent_script") or ""),
+            dry_run=dry,
+        )
+        body["vapi"] = dial
+        body["provider"] = "vapi"
+        body["dry_run"] = dial.get("dry_run")
+        if dial.get("ok"):
+            body["status"] = "queued" if dial.get("dry_run") else "dialing"
+            body["call_id"] = dial.get("call_id")
+        else:
+            body["status"] = "dial_failed"
+            body["error"] = dial.get("error")
+        return JSONResponse(status_code=200, content=body)
+
+    @app.post("/api/v1/voice/call-status")
+    async def voice_call_status(request: Request) -> JSONResponse:
+        """Vapi end-of-call webhook → sync.db + appointment-result handoff."""
+        from src.voice_gateway.dialer import handle_vapi_call_status
+
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"invalid JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="payload must be a JSON object")
+        try:
+            result = handle_vapi_call_status(
+                payload,
+                odoo=_get_odoo_client(),
+                whatsapp_client=_get_whatsapp_client(),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return JSONResponse(status_code=200, content=result)
+
+    @app.post("/api/v1/voice/appointment-result")
+    async def voice_appointment_result(request: Request) -> JSONResponse:
+        """Voice agent confirmed appointment (or asked for human) → advisor handoff."""
+        from src.lead_routing import complete_voice_appointment_handoff
+
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"invalid JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="payload must be a JSON object")
+
+        confirmed = bool(payload.get("appointment_confirmed") or payload.get("confirmed"))
+        request_human = bool(payload.get("request_human") or payload.get("handoff_to_advisor"))
+        when = str(
+            payload.get("appointment_time")
+            or payload.get("when_text")
+            or payload.get("preferred_datetime")
+            or ""
+        ).strip()
+        if not (confirmed or request_human or when):
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "status": "ignored",
+                    "handoff_to_advisor": False,
+                    "reason": "no appointment confirmation or human request",
+                },
+            )
+        phone = str(payload.get("phone") or payload.get("client_phone") or "").strip()
+        if not phone:
+            raise HTTPException(status_code=422, detail="phone is required")
+        try:
+            handoff = complete_voice_appointment_handoff(
+                lead_id=int(payload["lead_id"])
+                if payload.get("lead_id") not in (None, "")
+                else None,
+                client_phone=phone,
+                appointment_time=when,
+                vehicle_of_interest=str(
+                    payload.get("vehicle_of_interest")
+                    or payload.get("vehicle_interest")
+                    or ""
+                ),
+                valuation_amount=str(
+                    payload.get("valuation_amount") or payload.get("valor_compra") or ""
+                ),
+                monthly_payment=str(
+                    payload.get("monthly_payment")
+                    or payload.get("estimated_monthly_payment")
+                    or ""
+                ),
+                payment_method=str(payload.get("payment_method") or "") or None,
+                branch=str(payload.get("branch") or "") or None,
+                client_name=str(payload.get("client_name") or payload.get("name") or ""),
+                odoo=_get_odoo_client(),
+                whatsapp_client=_get_whatsapp_client(),
+                handoff_to_advisor=True,
+                request_human=request_human and not confirmed,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        body = handoff.as_dict()
+        body["status"] = "handoff_complete"
+        return JSONResponse(status_code=200, content=body)
+
     async def _handle_voice(payload: dict[str, Any]) -> JSONResponse:
         intent = parse_voice_intent(payload)
 

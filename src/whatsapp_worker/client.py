@@ -263,6 +263,10 @@ class WhatsAppWorkerClient:
     ) -> str:
         return format_quote_message(lead_name, vehicle_name, quote_result)
 
+    @staticmethod
+    def trigger_outbound_voice_after_quote(**kwargs: Any) -> dict[str, Any]:
+        return trigger_outbound_voice_after_quote(**kwargs)
+
     def send_text_message(
         self,
         phone_number: str,
@@ -354,3 +358,42 @@ class WhatsAppWorkerClient:
             "file",
             path,
         )
+
+
+def trigger_outbound_voice_after_quote(
+    *,
+    phone_number: str,
+    lead_id: int | None,
+    vehicle_of_interest: str,
+    valuation_amount: str,
+    monthly_payment: str,
+    branch: str = "",
+    client_name: str = "",
+    payment_method: str = "",
+    trade_in_label: str = "",
+    dry_run: bool | None = None,
+) -> dict[str, Any]:
+    """After WhatsApp quote delivery, queue ``/api/v1/voice/outbound-call``.
+
+    Passes lead/quote context so the voice agent can open with the WhatsApp
+    quote script and capture an appointment. Never raises.
+    """
+    from src.lead_routing import QuoteVoiceContext, queue_outbound_voice_call
+
+    try:
+        phone = normalize_phone_number(phone_number)
+    except WhatsAppWorkerError as exc:
+        return {"queued": False, "error": str(exc)}
+
+    context = QuoteVoiceContext(
+        lead_id=lead_id,
+        phone=phone,
+        vehicle_of_interest=(vehicle_of_interest or "").strip(),
+        valuation_amount=str(valuation_amount or "").strip(),
+        monthly_payment=str(monthly_payment or "").strip(),
+        branch=(branch or "").strip(),
+        client_name=(client_name or "").strip(),
+        payment_method=(payment_method or "").strip(),
+        trade_in_label=(trade_in_label or "").strip(),
+    )
+    return queue_outbound_voice_call(context, dry_run=dry_run)

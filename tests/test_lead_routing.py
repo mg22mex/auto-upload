@@ -180,6 +180,38 @@ class TestTradeInQualification(unittest.TestCase):
         self.assertEqual(meta["payment_method"], PAYMENT_FINANCING_TRADE_IN)
         self.assertGreater(float(meta["valor_compra"]), 0)
 
+    def test_voice_outbound_script_and_queue(self):
+        from src.lead_routing import (
+            QuoteVoiceContext,
+            build_voice_agent_script,
+            handle_outbound_voice_request,
+            queue_outbound_voice_call,
+        )
+
+        ctx = QuoteVoiceContext(
+            lead_id=1937,
+            phone="5216140001937",
+            vehicle_of_interest="Camioneta",
+            valuation_amount="194500.00",
+            monthly_payment="9212.13",
+        )
+        script = build_voice_agent_script(ctx)
+        self.assertIn("Camioneta", script)
+        self.assertIn("WhatsApp", script)
+        self.assertIn("auto a cambio", script.casefold())
+        with patch.dict(
+            os.environ,
+            {"VOICE_OUTBOUND_ENABLED": "true", "VOICE_OUTBOUND_DRY_RUN": "true"},
+        ):
+            queued = queue_outbound_voice_call(ctx)
+        self.assertTrue(queued["queued"])
+        self.assertTrue(queued["dry_run"])
+        self.assertEqual(queued["payload"]["lead_id"], 1937)
+        self.assertEqual(queued["payload"]["valuation_amount"], "194500.00")
+        body = handle_outbound_voice_request(ctx.as_dict())
+        self.assertEqual(body["status"], "queued")
+        self.assertEqual(body["monthly_payment"], "9212.13")
+
     def test_quote_applies_valor_compra_and_disclaimer(self):
         prior = parse_trade_in_details(
             "Forma de pago: Auto a cambio (trade-in). Toyota Corolla 2020",
@@ -202,6 +234,54 @@ class TestTradeInQualification(unittest.TestCase):
         self.assertTrue(meta["disclaimer_present"])
         self.assertGreater(float(meta["valor_compra"]), 0)
         self.assertEqual(meta["payment_method"], PAYMENT_TRADE_IN)
+
+    def test_complete_voice_appointment_sets_handoff_flag(self):
+        from src.lead_routing import complete_voice_appointment_handoff
+        from src.odoo_sync.crm import RepAssignment, reset_round_robin
+
+        reset_round_robin()
+        self.addCleanup(reset_round_robin)
+        odoo = MagicMock()
+        odoo._resolve_crm_stage_id.return_value = 20
+        odoo.assign_lead_advisor.return_value = True
+        odoo.post_quote_to_chatter.return_value = 1
+        wa = MagicMock()
+        wa.send_text_message.return_value = {"ok": True}
+        with patch.dict(
+            os.environ,
+            {
+                "REPS_SAN_FELIPE": (
+                    '[{"odoo_id": 21, "phone": "+526142417711", "name": "Francisco"}]'
+                ),
+                "REP_NOTIFY_ENABLED": "true",
+            },
+            clear=False,
+        ), patch("src.alerts.send_alert") as send_alert:
+            send_alert.return_value = MagicMock(
+                sent=["slack"], failed=[], skipped_reason=None
+            )
+            result = complete_voice_appointment_handoff(
+                lead_id=1937,
+                client_phone="5216140001937",
+                appointment_time="hoy a las 16",
+                vehicle_of_interest="Camioneta",
+                valuation_amount="194500.00",
+                monthly_payment="9212.13",
+                payment_method="financing_trade_in",
+                branch="san_felipe",
+                client_name="Marco",
+                odoo=odoo,
+                whatsapp_client=wa,
+            )
+        self.assertTrue(result.handoff_to_advisor)
+        self.assertEqual(result.stage_name, STAGE_CITA)
+        summary = (result.channel_alerts or {}).get("summary") or ""
+        self.assertIn("Valor auto a cambio", summary)
+        self.assertIn("Mensualidad", summary)
+        self.assertIn("hoy a las 16", summary)
+        sent_text = wa.send_text_message.call_args.args[1]
+        self.assertIn("194500.00", sent_text)
+        self.assertIn("9212.13", sent_text)
 
 
 class TestAppointmentHandoff(unittest.TestCase):

@@ -7,6 +7,7 @@ only when the customer asks for an in-person visit / test drive
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -64,6 +65,8 @@ class AppointmentHandoffResult:
     rep_notification: dict[str, Any] | None
     stage_updated: bool = False
     advisor_assigned: bool = False
+    handoff_to_advisor: bool = True
+    channel_alerts: dict[str, Any] | None = None
     error: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
@@ -72,8 +75,10 @@ class AppointmentHandoffResult:
             "stage_name": self.stage_name,
             "stage_updated": self.stage_updated,
             "advisor_assigned": self.advisor_assigned,
+            "handoff_to_advisor": self.handoff_to_advisor,
             "assignment": self.assignment.as_dict() if self.assignment else None,
             "rep_notification": self.rep_notification,
+            "channel_alerts": self.channel_alerts,
             "error": self.error,
         }
 
@@ -750,6 +755,9 @@ def build_trade_in_quote_message(
         "matched": valuation.matched,
         "source": valuation.source,
         "trade_in_label": details.as_label(),
+        "vehicle_of_interest": vehicle_name,
+        "valuation_amount": str(valuation.valor_compra),
+        "monthly_payment": str(quote.estimated_monthly_payment),
         "down_payment": str(quote.down_payment),
         "financed_principal": str(quote.financed_principal),
         "estimated_monthly_payment": str(quote.estimated_monthly_payment),
@@ -831,6 +839,340 @@ def update_lead_stage(
     return True
 
 
+# --- WhatsApp quote → outbound AI voice → advisor handoff ----------------------
+
+ENV_VOICE_OUTBOUND = "VOICE_OUTBOUND_ENABLED"
+ENV_VOICE_OUTBOUND_URL = "VOICE_OUTBOUND_URL"
+ENV_VOICE_OUTBOUND_DRY = "VOICE_OUTBOUND_DRY_RUN"
+DEFAULT_VOICE_OUTBOUND_PATH = "/api/v1/voice/outbound-call"
+
+
+@dataclass(frozen=True)
+class QuoteVoiceContext:
+    """Context passed to the outbound voice agent after a WhatsApp quote."""
+
+    lead_id: int | None
+    phone: str
+    vehicle_of_interest: str
+    valuation_amount: str
+    monthly_payment: str
+    branch: str = ""
+    client_name: str = ""
+    payment_method: str = ""
+    trade_in_label: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "lead_id": self.lead_id,
+            "phone": self.phone,
+            "vehicle_of_interest": self.vehicle_of_interest,
+            "valuation_amount": self.valuation_amount,
+            "monthly_payment": self.monthly_payment,
+            "branch": self.branch,
+            "client_name": self.client_name,
+            "payment_method": self.payment_method,
+            "trade_in_label": self.trade_in_label,
+        }
+
+
+def voice_outbound_enabled() -> bool:
+    raw = (os.getenv(ENV_VOICE_OUTBOUND) or "true").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def voice_outbound_dry_run() -> bool:
+    raw = (os.getenv(ENV_VOICE_OUTBOUND_DRY) or "true").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def build_voice_agent_script(context: QuoteVoiceContext) -> str:
+    """Opening script for the outbound AI voice agent after WhatsApp quote."""
+    vehicle = (context.vehicle_of_interest or "vehículo").strip()
+    return (
+        f"Hola! Te acabamos de enviar la cotización de tu {vehicle} por WhatsApp. "
+        "¿Te gustaría agendar una cita hoy o mañana para ver el auto y hacer "
+        "la valuación física de tu auto a cambio?"
+    )
+
+
+def build_advisor_handoff_summary(
+    *,
+    client_name: str = "",
+    client_phone: str = "",
+    vehicle_of_interest: str = "",
+    valuation_amount: str = "",
+    monthly_payment: str = "",
+    appointment_time: str = "",
+    branch_name: str = "",
+    payment_method: str = "",
+    lead_id: int | None = None,
+) -> str:
+    """Compiled summary for WhatsApp / Slack / Telegram advisor channels."""
+    from src.notifications.whatsapp_rep import odoo_lead_url, payment_label
+
+    lines = [
+        "🎯 *Handoff a asesor — paquete completo*",
+        f"👤 *Cliente:* {client_name or client_phone or 'n/d'}",
+        f"📞 *Tel:* {client_phone or 'n/d'}",
+        f"🚘 *Vehículo objetivo:* {vehicle_of_interest or 'Por confirmar'}",
+        f"💵 *Valor auto a cambio:* {valuation_amount or 'n/d'}",
+        f"📅 *Mensualidad estimada:* {monthly_payment or 'n/d'}",
+        f"💳 *Modalidad:* {payment_label(payment_method)}",
+        f"📍 *Sucursal:* {branch_name or 'Periférico'}",
+    ]
+    if appointment_time:
+        lines.append(f"🗓️ *Cita:* {appointment_time}")
+    lines.append(f"🔗 *Odoo Lead:* {odoo_lead_url(lead_id) or 'n/d'}")
+    lines.append("handoff_to_advisor=True")
+    return "\n".join(lines)
+
+
+def queue_outbound_voice_call(
+    context: QuoteVoiceContext,
+    *,
+    dry_run: bool | None = None,
+    http_post: Any | None = None,
+) -> dict[str, Any]:
+    """Queue POST ``/api/v1/voice/outbound-call`` with quote context.
+
+    Best-effort: never raises. Dry-run (default) returns the payload without
+    dialing so local tests and CI stay offline-safe.
+    """
+    script = build_voice_agent_script(context)
+    payload = {
+        **context.as_dict(),
+        "agent_script": script,
+        "goal": "capture_appointment_datetime",
+        "instructions": (
+            "Referencia la cotización recién enviada por WhatsApp. "
+            "Captura día/hora preferidos para cita y valuación física del auto a cambio. "
+            "Si el cliente pide un humano o confirma la cita, marca handoff_to_advisor."
+        ),
+    }
+    if not voice_outbound_enabled():
+        return {
+            "queued": False,
+            "skipped_reason": f"{ENV_VOICE_OUTBOUND}=false",
+            "payload": payload,
+            "agent_script": script,
+        }
+
+    use_dry = voice_outbound_dry_run() if dry_run is None else bool(dry_run)
+    if use_dry:
+        return {
+            "queued": True,
+            "dry_run": True,
+            "endpoint": DEFAULT_VOICE_OUTBOUND_PATH,
+            "payload": payload,
+            "agent_script": script,
+        }
+
+    url = (os.getenv(ENV_VOICE_OUTBOUND_URL) or "").strip()
+    if not url:
+        base = (os.getenv("VOICE_GATEWAY_BASE_URL") or "http://127.0.0.1:8080").rstrip("/")
+        url = f"{base}{DEFAULT_VOICE_OUTBOUND_PATH}"
+
+    post = http_post
+    if post is None:
+        import urllib.request
+
+        def post(target: str, body: dict[str, Any]) -> dict[str, Any]:
+            req = urllib.request.Request(
+                target,
+                data=json.dumps(body).encode("utf-8"),
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                raw = resp.read().decode("utf-8")
+            try:
+                parsed = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                parsed = {"raw": raw}
+            return parsed if isinstance(parsed, dict) else {"ok": True, "data": parsed}
+
+    try:
+        response = post(url, payload)
+        return {
+            "queued": True,
+            "dry_run": False,
+            "endpoint": url,
+            "payload": payload,
+            "agent_script": script,
+            "provider_response": response,
+        }
+    except Exception as exc:
+        print(f"WARN voice outbound queue failed: {type(exc).__name__}: {exc}", flush=True)
+        return {
+            "queued": False,
+            "dry_run": False,
+            "endpoint": url,
+            "payload": payload,
+            "agent_script": script,
+            "error": str(exc),
+        }
+
+
+def handle_outbound_voice_request(payload: dict[str, Any]) -> dict[str, Any]:
+    """Server-side handler for ``POST /api/v1/voice/outbound-call``."""
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be a JSON object")
+    ctx = QuoteVoiceContext(
+        lead_id=int(payload["lead_id"]) if payload.get("lead_id") not in (None, "") else None,
+        phone=str(payload.get("phone") or "").strip(),
+        vehicle_of_interest=str(
+            payload.get("vehicle_of_interest") or payload.get("vehicle_interest") or ""
+        ).strip(),
+        valuation_amount=str(
+            payload.get("valuation_amount") or payload.get("valor_compra") or ""
+        ).strip(),
+        monthly_payment=str(
+            payload.get("monthly_payment") or payload.get("estimated_monthly_payment") or ""
+        ).strip(),
+        branch=str(payload.get("branch") or "").strip(),
+        client_name=str(payload.get("client_name") or payload.get("name") or "").strip(),
+        payment_method=str(payload.get("payment_method") or "").strip(),
+        trade_in_label=str(payload.get("trade_in_label") or "").strip(),
+    )
+    if not ctx.phone:
+        raise ValueError("phone is required")
+    script = payload.get("agent_script") or build_voice_agent_script(ctx)
+    return {
+        "status": "queued",
+        "handoff_to_advisor": False,
+        "lead_id": ctx.lead_id,
+        "phone": ctx.phone,
+        "vehicle_of_interest": ctx.vehicle_of_interest,
+        "valuation_amount": ctx.valuation_amount,
+        "monthly_payment": ctx.monthly_payment,
+        "agent_script": script,
+        "context": ctx.as_dict(),
+    }
+
+
+def complete_voice_appointment_handoff(
+    *,
+    lead_id: int | None,
+    client_phone: str,
+    appointment_time: str = "",
+    vehicle_of_interest: str = "",
+    valuation_amount: str = "",
+    monthly_payment: str = "",
+    payment_method: str | None = None,
+    branch: str | None = None,
+    client_name: str = "",
+    odoo: Any | None = None,
+    whatsapp_client: Any | None = None,
+    handoff_to_advisor: bool = True,
+    request_human: bool = False,
+) -> AppointmentHandoffResult:
+    """Lock appointment from voice (or human request) and notify advisor channels."""
+    when = (appointment_time or "").strip()
+    if request_human and not when:
+        when = "cliente solicitó asesor"
+    intent = AppointmentIntent(
+        requested=True,
+        kind="cita",
+        when_text=when,
+        raw=when or "voice_appointment",
+    )
+    interest = vehicle_of_interest
+    if valuation_amount:
+        interest = f"{interest} | Auto a cambio valuado: {valuation_amount}".strip(" |")
+    if monthly_payment:
+        interest = f"{interest} | Mensualidad: {monthly_payment}".strip(" |")
+
+    result = handoff_appointment_to_rep(
+        lead_id=lead_id,
+        client_phone=client_phone,
+        branch=branch,
+        vehicle_interest=interest,
+        payment_method=payment_method,
+        appointment=intent,
+        client_name=client_name,
+        odoo=odoo,
+        whatsapp_client=whatsapp_client,
+        valuation_amount=valuation_amount,
+        monthly_payment=monthly_payment,
+        vehicle_of_interest=vehicle_of_interest,
+    )
+    result.handoff_to_advisor = bool(handoff_to_advisor)
+
+    summary = build_advisor_handoff_summary(
+        client_name=client_name,
+        client_phone=client_phone,
+        vehicle_of_interest=vehicle_of_interest or interest,
+        valuation_amount=valuation_amount,
+        monthly_payment=monthly_payment,
+        appointment_time=when,
+        branch_name=branch_label(normalize_crm_branch(branch)),
+        payment_method=payment_method or "",
+        lead_id=lead_id,
+    )
+    channel_alerts: dict[str, Any] = {"summary": summary}
+    try:
+        from src.alerts import send_alert
+
+        alert = send_alert(summary, subject="Handoff asesor — cita confirmada")
+        channel_alerts["alerts"] = {
+            "sent": alert.sent,
+            "failed": alert.failed,
+            "skipped_reason": alert.skipped_reason,
+        }
+    except Exception as exc:
+        channel_alerts["alerts"] = {"error": str(exc)}
+    result.channel_alerts = channel_alerts
+    if result.rep_notification is not None:
+        result.rep_notification = {
+            **result.rep_notification,
+            "handoff_to_advisor": True,
+            "summary": summary,
+        }
+    return result
+
+
+def handle_voice_appointment_result(payload: dict[str, Any]) -> dict[str, Any]:
+    """Server-side handler for voice appointment confirmation / human request."""
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be a JSON object")
+    confirmed = bool(payload.get("appointment_confirmed") or payload.get("confirmed"))
+    request_human = bool(payload.get("request_human") or payload.get("handoff_to_advisor"))
+    when = str(
+        payload.get("appointment_time")
+        or payload.get("when_text")
+        or payload.get("preferred_datetime")
+        or ""
+    ).strip()
+    if not (confirmed or request_human or when):
+        return {
+            "status": "ignored",
+            "handoff_to_advisor": False,
+            "reason": "no appointment confirmation or human request",
+        }
+    result = complete_voice_appointment_handoff(
+        lead_id=int(payload["lead_id"]) if payload.get("lead_id") not in (None, "") else None,
+        client_phone=str(payload.get("phone") or payload.get("client_phone") or ""),
+        appointment_time=when,
+        vehicle_of_interest=str(
+            payload.get("vehicle_of_interest") or payload.get("vehicle_interest") or ""
+        ),
+        valuation_amount=str(
+            payload.get("valuation_amount") or payload.get("valor_compra") or ""
+        ),
+        monthly_payment=str(
+            payload.get("monthly_payment") or payload.get("estimated_monthly_payment") or ""
+        ),
+        payment_method=str(payload.get("payment_method") or "") or None,
+        branch=str(payload.get("branch") or "") or None,
+        client_name=str(payload.get("client_name") or payload.get("name") or ""),
+        handoff_to_advisor=True,
+        request_human=request_human and not confirmed,
+    )
+    body = result.as_dict()
+    body["status"] = "handoff_complete" if result.handoff_to_advisor else "ok"
+    return body
+
+
 def handoff_appointment_to_rep(
     *,
     lead_id: int | None,
@@ -843,6 +1185,9 @@ def handoff_appointment_to_rep(
     odoo: Any | None = None,
     whatsapp_client: Any | None = None,
     assigner_assignment: RepAssignment | None = None,
+    valuation_amount: str = "",
+    monthly_payment: str = "",
+    vehicle_of_interest: str = "",
 ) -> AppointmentHandoffResult:
     """Move lead to Cita stage, round-robin a rep, and WhatsApp the alert."""
     from src.notifications.whatsapp_rep import notify_rep
@@ -878,13 +1223,20 @@ def handoff_appointment_to_rep(
                 "--- AI appointment handoff ---",
                 f"Cliente: {client_name or client_phone}",
                 f"Sucursal: {branch_label(branch_key)}",
+                "handoff_to_advisor=True",
             ]
             if appointment and appointment.when_text:
                 note_bits.append(f"Horario solicitado: {appointment.when_text}")
             if appointment and appointment.kind:
                 note_bits.append(f"Tipo: {appointment.kind}")
-            if vehicle_interest:
-                note_bits.append(f"Interés: {vehicle_interest}")
+            if vehicle_of_interest or vehicle_interest:
+                note_bits.append(
+                    f"Interés: {vehicle_of_interest or vehicle_interest}"
+                )
+            if valuation_amount:
+                note_bits.append(f"Valor auto a cambio: {valuation_amount}")
+            if monthly_payment:
+                note_bits.append(f"Mensualidad estimada: {monthly_payment}")
             try:
                 client.post_quote_to_chatter(int(lead_id), "\n".join(note_bits))
             except Exception:
@@ -896,12 +1248,14 @@ def handoff_appointment_to_rep(
     notice = notify_rep(
         client_phone=client_phone,
         branch=branch_key,
-        vehicle_interest=vehicle_interest,
+        vehicle_interest=vehicle_of_interest or vehicle_interest,
         payment_method=payment_method,
         lead_id=lead_id,
         assignment=assignment,
         whatsapp_client=whatsapp_client,
         appointment_time=when or None,
+        valuation_amount=valuation_amount or None,
+        monthly_payment=monthly_payment or None,
     )
 
     return AppointmentHandoffResult(
@@ -911,6 +1265,7 @@ def handoff_appointment_to_rep(
         rep_notification=notice.as_dict(),
         stage_updated=stage_updated,
         advisor_assigned=advisor_assigned,
+        handoff_to_advisor=True,
         error=error,
     )
 
@@ -920,7 +1275,11 @@ __all__ = [
     "AGENT_HUMAN",
     "AppointmentHandoffResult",
     "AppointmentIntent",
+    "DEFAULT_VOICE_OUTBOUND_PATH",
     "ENV_AI_MG_QUOTE",
+    "ENV_VOICE_OUTBOUND",
+    "ENV_VOICE_OUTBOUND_DRY",
+    "ENV_VOICE_OUTBOUND_URL",
     "LeadRoutingDecision",
     "MG_QUOTE_LEAD_TAG",
     "PAYMENT_CASH",
@@ -930,23 +1289,32 @@ __all__ = [
     "PAYMENT_LABEL_PERMUTA",
     "PAYMENT_TRADE_IN",
     "PaymentIntent",
+    "QuoteVoiceContext",
     "STAGE_CITA",
     "STAGE_PRIMER_CONTACTO",
     "TradeInDetails",
     "advance_trade_in_qualification",
     "ai_mg_quote_enabled",
+    "build_advisor_handoff_summary",
     "build_trade_in_quote_message",
+    "build_voice_agent_script",
+    "complete_voice_appointment_handoff",
     "detect_appointment_intent",
     "detect_forma_pago_financing",
     "detect_forma_pago_permuta",
     "extract_tags",
     "format_ai_reply",
+    "handle_outbound_voice_request",
+    "handle_voice_appointment_result",
     "handoff_appointment_to_rep",
     "has_mg_quote_tag",
     "parse_payment_intent",
     "parse_trade_in_details",
     "prompt_missing_trade_in_fields",
+    "queue_outbound_voice_call",
     "route_inbound_lead",
     "should_defer_human_assignment",
     "update_lead_stage",
+    "voice_outbound_dry_run",
+    "voice_outbound_enabled",
 ]

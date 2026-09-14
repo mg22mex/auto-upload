@@ -278,6 +278,7 @@ Reverse-engineered from the Autométrica Android APK: Laravel backend on **`app2
 3. `src/quote_engine/autometrica.py` looks up `data/autometrica_valuations.json`, applies mileage adjustment → **Valor Compra**.
 4. Valor Compra is passed as `net_trade_in_equity` (enganche) into French amortization (`calculate_quote`) for the remaining balance.
 5. WhatsApp quote text appends the credit disclaimer (`QUOTE_DISCLAIMER` in `src/whatsapp_worker/client.py`).
+6. On quote delivery, `trigger_outbound_voice_after_quote` queues `POST /api/v1/voice/outbound-call`. When `VOICE_OUTBOUND_DRY_RUN=false`, `src/voice_gateway/dialer.py` places a Vapi `POST /call/phone` using `VAPI_PHONE_NUMBER_ID` (caller **+52 614 227 4381**). End-of-call webhooks hit `POST /api/v1/voice/call-status` → `sync.db` + advisor handoff.
 
 Optional env: `AUTOMETRICA_TOKEN`, `AUTOMETRICA_USER` / `AUTOMETRICA_PASS`, `AUTOMETRICA_LOGIN_URL`, `AUTOMETRICA_VALUATIONS_PATH`, `AI_QUOTE_DEFAULT_PRICE`.
 

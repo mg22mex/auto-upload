@@ -8,6 +8,7 @@ from src.whatsapp_worker.client import (
     QUOTE_DISCLAIMER,
     format_quote_message,
     normalize_phone_number,
+    trigger_outbound_voice_after_quote,
 )
 from src.whatsapp_worker.inbound import (
     WA_CHANNEL,
@@ -42,4 +43,5 @@ __all__ = [
     "process_qualification_turn",
     "qualification_enabled",
     "resolve_instance_for_branch",
+    "trigger_outbound_voice_after_quote",
 ]

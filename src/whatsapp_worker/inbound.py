@@ -288,6 +288,48 @@ def _post_handoff_message(branch_label: str) -> str:
     )
 
 
+def _maybe_queue_voice_after_quote(
+    *,
+    session: QualificationSession,
+    event: WhatsAppInboundEvent,
+    quote_meta: dict[str, Any],
+    routing: dict[str, Any],
+) -> dict[str, Any]:
+    """Queue outbound AI voice call once a French amortization quote is ready."""
+    if not quote_meta.get("estimated_monthly_payment") and not quote_meta.get(
+        "monthly_payment"
+    ):
+        return routing
+    if not quote_meta.get("valor_compra") and not quote_meta.get("valuation_amount"):
+        return routing
+    from src.whatsapp_worker.client import trigger_outbound_voice_after_quote
+
+    voice = trigger_outbound_voice_after_quote(
+        phone_number=session.phone or event.phone,
+        lead_id=session.lead_id,
+        vehicle_of_interest=str(
+            quote_meta.get("vehicle_of_interest")
+            or session.vehicle_interest
+            or session.initial_message
+            or ""
+        ),
+        valuation_amount=str(
+            quote_meta.get("valuation_amount") or quote_meta.get("valor_compra") or ""
+        ),
+        monthly_payment=str(
+            quote_meta.get("monthly_payment")
+            or quote_meta.get("estimated_monthly_payment")
+            or ""
+        ),
+        branch=session.branch,
+        client_name=session.contact_name or event.name,
+        payment_method=session.payment_method
+        or str(quote_meta.get("payment_method") or ""),
+        trade_in_label=str(quote_meta.get("trade_in_label") or session.trade_in_vehicle),
+    )
+    return {**routing, "voice_outbound": voice}
+
+
 def process_qualification_turn(
     event: WhatsAppInboundEvent,
     session: QualificationSession | None,
@@ -495,6 +537,12 @@ def _process_ai_turn(
             routing = decision.as_dict()
             if quote_meta:
                 routing = {**routing, "trade_in_quote": quote_meta}
+                routing = _maybe_queue_voice_after_quote(
+                    session=session,
+                    event=event,
+                    quote_meta=quote_meta,
+                    routing=routing,
+                )
             return QualificationTurnResult(
                 session=session,
                 reply_text=trade_reply,
@@ -594,6 +642,13 @@ def _process_ai_turn(
                 "combined": bool(details.wants_financing),
             },
         }
+        if quote_meta:
+            routing = _maybe_queue_voice_after_quote(
+                session=session,
+                event=event,
+                quote_meta=quote_meta,
+                routing=routing,
+            )
         return QualificationTurnResult(
             session=session,
             reply_text=trade_reply,
