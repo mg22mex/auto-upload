@@ -89,12 +89,29 @@ See also: [CI/CD flowchart](./docs/PROJECT_GUIDE.md#end-to-end-sync-flow) · [FB
 |--------|---------|---------|
 | `AUTOSELL_BASE_URL` | `https://www.autosell.mx` | sync job |
 | `DRY_RUN` | `false` (live) | sync job — set `true` to plan only |
-| `MAX_POSTS_PER_ACCOUNT_PER_RUN` | `10` | sync job |
+| `MAX_POSTS_PER_ACCOUNT_PER_RUN` | `15` (secret override; config default 15) | sync job create/FIFO budget |
 | `SYNC_ACCOUNTS` | optional `account_1,account_2` | overrides `config.yaml` `active_accounts` |
 | `TELEGRAM_BOT_TOKEN` | optional | sync job |
 | `TELEGRAM_CHAT_ID` | optional | sync job |
 
 **Account scoping:** By default, only accounts listed in **`config.yaml`** → `sync.active_accounts` are synced. Currently `account_1` and `account_2`. Do not add `account_3` until old FB listings are cleared on that account.
+
+**Slot allocator** (`config.yaml` → `sync`):
+
+| Key | Value | Meaning |
+|-----|-------|---------|
+| `max_listings_per_account` | `40` | Max tracked live listings per FB profile |
+| `slot_allocator.enforce_overflow_removals` | `true` | Remove duplicate / over-cap / FIFO-yielded live rows |
+| `slot_allocator.fifo_rotation` | `true` | When waitlist is blocked by a full cap, yield oldest sticky |
+| `slot_allocator.max_rotations_per_account` | `15` | Max sticky yields per account per plan |
+
+Dry-run plan check:
+
+```bash
+python run_sync.py --dry-run --from-snapshot data/catalog_latest.json
+# Expect non-zero creates when Free slots or FIFO rotations exist;
+# removals when overflow / FIFO yields are present in sync.db (fb-worker DB).
+```
 
 Local dev: `cp .env.example .env`
 

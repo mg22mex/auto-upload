@@ -9,8 +9,8 @@ Sync [autosell.mx](https://www.autosell.mx) public catalog to **Facebook Marketp
 - **WhatsApp (Evolution):** Live. Dual instances `autosell_periferico` / `autosell_san_felipe` → qualification state machine → Odoo handoff (`HANDOFF_TO_HUMAN`) + branch auto-reply.
 - **Marketplace WhatsApp CTAs:** Live in description builder. Branch-mapped `wa.me` links appended to every FB listing text.
 - **Meta Messenger webhook:** `[WIP - Paused awaiting Fanpage Administrator permissions]`. Code complete; Page token / webhook subscription pending Fanpage admin.
-- **Scrape, diff & FB posting:** Live (`DRY_RUN=false`) for **account_1** and **account_2**. **account_3** excluded until old listings cleared.
-- **Listing bump:** Daily incremental **full relist/repost** for listings ≥ **2 days** old (`scripts/run_weekly_bump.py`; 25 slots/account). Native Renovar optional via `--mode renew`.
+- **Scrape, diff & FB posting:** Live (`DRY_RUN=false`) for **account_1** and **account_2**. **account_3** excluded until old listings cleared. Slot allocator: **40 listings/account**, overflow removals on, **FIFO waitlist rotation** (oldest sticky yields when full).
+- **Listing bump:** Daily incremental **full relist/repost** for listings ≥ **2 days** old (`scripts/run_weekly_bump.py`; 40 slots/account). Native Renovar optional via `--mode renew`.
 - **Odoo inventory sync:** Live. Catalog → upsert `product.template` (`default_code = autosell_id`); website-missing SKUs marked **sold** then soft-archived (`active=False`).
 - **CRM attribution:** Leads tagged **`MG Quote Lead`**; `medium_id` / `source_id` mapped by channel (WhatsApp Marketplace, Inbound Call, Autosell Web). Native Odoo WhatsApp templates remain **paused** (`ODOO_WA_ACCOUNT_*` unset).
 
@@ -26,9 +26,9 @@ Sync [autosell.mx](https://www.autosell.mx) public catalog to **Facebook Marketp
 | **Quote engine** |  |
 | **Vehicles** | ~130–134 public catalog from `autosell.mx` |
 | **FB accounts** | 3 sessions; **2 live** (`account_1`, `account_2`) |
-| **Target FB listings** | ~268 (134 × 2 active accounts) |
+| **Target FB listings** | ≤ **80** live tracked (`40` × 2); waitlist rotates via FIFO |
 | **Odoo CRM** | `MG Quote Lead` tag + UTM medium/source; branch teams |
-| **Schedule** | 2× daily scrape + Odoo sync + FB sync; daily relist (≥3d age) |
+| **Schedule** | 2× daily scrape + Odoo sync + FB sync; daily relist (≥2d age) |
 
 ## System overview
 

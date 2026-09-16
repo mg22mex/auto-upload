@@ -1,6 +1,6 @@
 # Autosell Auto-upload — Status & Roadmap
 
-Last updated: **2026-08-21**
+Last updated: **2026-09-16**
 
 Companion to [README.md](./README.md) and [docs/PROJECT_GUIDE.md](./docs/PROJECT_GUIDE.md).
 
@@ -10,9 +10,10 @@ Companion to [README.md](./README.md) and [docs/PROJECT_GUIDE.md](./docs/PROJECT
 
 | Area | State | Notes |
 |------|-------|-------|
-| FB Marketplace sync | **Live** | `account_1` + `account_2`; Playwright sessions on `fb-worker` |
+| FB Marketplace sync | **Live** | `account_1` + `account_2`; Playwright on `fb-worker`; create URL `/marketplace/create/vehicle` |
+| Slot allocator | **Live** | `max_listings_per_account: 40`; `enforce_overflow_removals: true`; **FIFO waitlist rotation** (≤15 yields/account/run) |
 | Catalog scrape + Odoo inventory | **Live** | GitHub Actions `sync.yml` (2× daily) |
-| Listing bump / relist | **Live** | Daily incremental, ≥3d age |
+| Listing bump / relist | **Live** | Daily incremental, ≥2d age |
 | Voice quote webhook | **Live** | `/webhook/voice-lead`, `/voice/webhook`, `/voice/stream` |
 | WhatsApp Evolution | **Live** | `autosell_periferico` + `autosell_san_felipe` |
 | WhatsApp qualification bot | **Live** | FSM → `HANDOFF_TO_HUMAN` + Odoo |
@@ -76,12 +77,16 @@ Companion to [README.md](./README.md) and [docs/PROJECT_GUIDE.md](./docs/PROJECT
 - Enable `account_3` after clearing old Marketplace inventory.
 - Optional: native Odoo WhatsApp Cloud API once Meta Manager credentials exist.
 - Catalog `Sucursal` field on autosell.mx (improves Marketplace CTA branch accuracy beyond default Periférico).
+- Monitor FIFO rotation after Sep 2026 unlock (waitlist was stuck at 25/25 Free=0).
 
 ---
 
 ## Quick verification commands
 
 ```bash
+# Slot allocator / FIFO unit tests
+python -m unittest src.sync.test_allocator -q
+
 # CRM attribution / tag unit tests
 python -m unittest tests.test_crm_leads src.odoo_sync.test_client.TestCreateOrUpdateLead -q
 
@@ -90,6 +95,9 @@ python -m unittest src.whatsapp_worker.test_inbound src.voice_gateway.test_webho
 
 # Marketplace CTA encoding
 python -m unittest src.facebook.test_listing_cta -q
+
+# Plan-only sync (no FB)
+python run_sync.py --dry-run --from-snapshot data/catalog_latest.json
 
 # FB sessions (on fb-worker)
 python scripts/fb_test_session.py --account account_1

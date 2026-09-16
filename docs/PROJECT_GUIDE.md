@@ -201,14 +201,28 @@ timeline
 
 ## How sync decides stay / go / add / update
 
-Each run compares **autosell.mx** (scrape) to **`fb_listings` in `sync.db`** (what the app already posted), **per account**.
+Each run compares **autosell.mx** (scrape) to **`fb_listings` in `sync.db`** (what the app already posted), **per account**, after **slot allocation** (`src/sync/allocator.py`).
 
 | Situation | Action |
 |-----------|--------|
-| On website, not in DB for that account | **create** (capped per run) |
-| On website and in DB, same `content_hash` | **stay** (no action) |
-| On website and in DB, hash changed | **update** |
-| In DB as live, gone from public catalog | **remove** (`mark_sold` by default) |
+| Assigned slot, on website, not live in DB | **create** (capped per run by `max_posts_per_account_per_run`) |
+| Assigned slot, live, same `content_hash` | **stay** |
+| Assigned slot, live, hash changed | **update** |
+| Live in DB, gone from public catalog | **remove** (`mark_sold` by default) |
+| Live but **overflow** (duplicate account, over-cap, or **FIFO yield**) | **remove** when `enforce_overflow_removals: true` |
+| On website but not assigned (waitlist) | **no create** until a free slot or FIFO rotation |
+
+### Slot allocator (`config.yaml` → `sync`)
+
+| Key | Current | Role |
+|-----|---------|------|
+| `max_listings_per_account` | **40** | Hard live cap per FB profile |
+| `slot_allocator.enforce_overflow_removals` | **true** | Execute removes for overflow / FIFO-yielded pairs |
+| `slot_allocator.fifo_rotation` | **true** | When waitlist &gt; 0 and accounts are full, yield oldest live sticky (`posted_at`) |
+| `slot_allocator.max_rotations_per_account` | **15** | Max sticky yields per account per plan (aligned with create budget) |
+| `max_posts_per_account_per_run` | **15** | Create execution cap per sync run |
+
+Composer opens **`/marketplace/create/vehicle`** (never `/create/item`). `ui.accept_vehicle_category_suggestion()` dismisses FB’s “¿Querías publicar en Vehículos?” modal.
 
 **Important limits:**
 
@@ -217,15 +231,18 @@ Each run compares **autosell.mx** (scrape) to **`fb_listings` in `sync.db`** (wh
 - **`update` today** only edits **price** and **description** on the existing listing (not full re-post of photos/make/model). Price changes are fully supported once live.
 - With **`DRY_RUN=true`**, actions are planned and logged only.
 - Only accounts in **`sync.active_accounts`** (or `--accounts` / `SYNC_ACCOUNTS`) are processed. account_3 is configured but excluded until go-live there.
+- Production `sync.db` lives on **fb-worker** (`~/auto-upload-data/data/sync.db`), not the laptop checkout.
 
 ```mermaid
 flowchart TD
-    AS[autosell.mx scrape] --> PLAN[plan_sync_actions]
-    DB[(fb_listings in sync.db)] --> PLAN
+    AS[autosell.mx scrape] --> ALLOC[allocate_slots]
+    DB[(fb_listings in sync.db)] --> ALLOC
+    ALLOC --> PLAN[plan_sync_actions]
     PLAN --> C[create]
     PLAN --> U[update price/description]
-    PLAN --> R[remove mark_sold]
+    PLAN --> R[remove mark_sold / FIFO yield]
     PLAN --> S[stay]
+    ALLOC --> W[waitlist]
 ```
 
 ---
@@ -268,6 +285,7 @@ flowchart TD
 | Shelby / exotic makes | Done | Shelby → Ford in Marca; model `Shelby Cobra` |
 | Live sync account_1 + account_2 | Done | Jul 2026; `DRY_RUN=false` |
 | Account scoping (`active_accounts`) | Done | config.yaml + `--accounts` + `SYNC_ACCOUNTS` |
+| Slot cap + FIFO waitlist rotation | Done | Sep 2026; cap 40, overflow removals, FIFO yields |
 
 ---
 
@@ -441,8 +459,9 @@ mindmap
 | FB checkpoint / session expiry | Headed re-login; Telegram alert (optional) |
 | Wrong listing URL returned | Dashboard match + strict `_verify_listing_url` |
 | Form UI changes | Debug PNGs; labeled button helpers in `ui.py` |
-| Rate limits / spam flags | Delays between actions; 10 posts/account/run cap |
+| Rate limits / spam flags | Delays between actions; create/rotation caps per account per run |
 | Duplicate listings at go-live | Clear old FB inventory before adding account to `active_accounts` |
+| Waitlist stuck at full slots | Cap 40 + `enforce_overflow_removals` + FIFO rotation of oldest sticky |
 | account_3 not in sync | Intentional until operator clears old listings |
 | Mass-delete on Facebook | Not reliable via API; mark sold / delete manually |
 
@@ -457,6 +476,10 @@ mindmap
 | **active_accounts** | Subset of `config.yaml` accounts included in scheduled sync |
 | **autosell_id** | Internal id e.g. `obj969` |
 | **content_hash** | Detects catalog changes (price, photos, title, …) for update actions |
+| **slot allocator** | Sticky partition of catalog across accounts (`max_listings_per_account`) |
+| **waitlist** | Catalog vehicles not assigned a live slot this plan |
+| **overflow** | Live DB pairs outside the partition (dupes, over-cap, FIFO yields) |
+| **FIFO rotation** | Yield oldest live sticky slots so waitlisted cars can create |
 | **Being reviewed** / **Se está revisando** | FB moderation for new listings — normal short-term |
 | **Lean session** | Session copy without browser Cache/GPUCache (few MB vs 100MB+) |
 

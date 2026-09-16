@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-from src.facebook.poster import PHOTO_ADD_RE
-from src.facebook.ui import DRAFT_SAVED_RE
+from src.facebook.poster import PHOTO_ADD_RE, VEHICLE_CREATE_URL, _resolve_vehicle_create_url
+from src.facebook.ui import (
+    DRAFT_SAVED_RE,
+    VEHICLE_CATEGORY_SUGGESTION_RE,
+)
 
 
 class TestPhotoAddLabels(unittest.TestCase):
@@ -18,6 +21,33 @@ class TestDraftSaved(unittest.TestCase):
         self.assertTrue(DRAFT_SAVED_RE.search("Borrador guardado"))
         self.assertTrue(DRAFT_SAVED_RE.search("Draft saved"))
         self.assertFalse(DRAFT_SAVED_RE.search("Publicar"))
+
+
+class TestVehicleCategorySuggestion(unittest.TestCase):
+    def test_es_suggestion_copy(self):
+        text = "Sugerencia: ¿Querías publicar en 'Vehículos'?"
+        self.assertTrue(VEHICLE_CATEGORY_SUGGESTION_RE.search(text))
+
+    def test_en_suggestion_copy(self):
+        self.assertTrue(VEHICLE_CATEGORY_SUGGESTION_RE.search("Did you mean to list in Vehicles?"))
+        self.assertTrue(VEHICLE_CATEGORY_SUGGESTION_RE.search("List in Vehicles"))
+
+
+class TestResolveVehicleCreateUrl(unittest.TestCase):
+    def test_defaults_to_vehicle(self):
+        self.assertEqual(_resolve_vehicle_create_url({}), VEHICLE_CREATE_URL)
+
+    def test_rewrites_item_to_vehicle(self):
+        self.assertEqual(
+            _resolve_vehicle_create_url(
+                {"create_url": "https://www.facebook.com/marketplace/create/item"}
+            ),
+            VEHICLE_CREATE_URL,
+        )
+
+    def test_keeps_vehicle_url(self):
+        url = "https://www.facebook.com/marketplace/create/vehicle"
+        self.assertEqual(_resolve_vehicle_create_url({"create_url": url}), url)
 
 
 class TestPhotoPreviews(unittest.TestCase):

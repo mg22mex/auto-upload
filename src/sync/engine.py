@@ -37,7 +37,7 @@ def plan_sync_actions(
             and (autosell_id, account_id) in overflow_keys
         ):
             drop = True
-            reason = "Over slot cap / duplicate account occupancy"
+            reason = "Over slot cap, duplicate occupancy, or FIFO waitlist rotation"
         else:
             reason = "Vehicle no longer on public autosell.mx catalog"
         if not drop:

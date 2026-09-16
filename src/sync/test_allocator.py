@@ -37,21 +37,15 @@ class TestAllocateSlots(unittest.TestCase):
     def test_default_cap_is_25(self):
         self.assertEqual(DEFAULT_MAX_LISTINGS_PER_ACCOUNT, 25)
 
-    def test_empty_live_fills_round_robin_up_to_cap(self):
-        vehicles = [_v(f"obj{i}") for i in range(10)]
-        alloc = allocate_slots(
-            vehicles, ["account_1", "account_2"], [], max_per_account=3
-        )
-        self.assertEqual(len(alloc.by_account["account_1"]), 3)
-        self.assertEqual(len(alloc.by_account["account_2"]), 3)
-        self.assertEqual(len(alloc.waitlist), 4)
-        self.assertEqual(len(alloc.creates), 6)
-
     def test_sold_frees_slot(self):
         vehicles = [_v("a"), _v("b"), _v("c")]
         live = [_live("a", "account_1")]
         alloc = allocate_slots(
-            vehicles, ["account_1"], live, max_per_account=2
+            vehicles,
+            ["account_1"],
+            live,
+            max_per_account=2,
+            fifo_rotation=False,
         )
         self.assertEqual(alloc.by_account["account_1"], ["a", "b"])
         self.assertEqual(alloc.creates, [("b", "account_1")])
@@ -78,7 +72,11 @@ class TestAllocateSlots(unittest.TestCase):
             _live("z", "account_1", "2026-03-01T00:00:00+00:00"),
         ]
         alloc = allocate_slots(
-            vehicles, ["account_1"], live, max_per_account=2
+            vehicles,
+            ["account_1"],
+            live,
+            max_per_account=2,
+            fifo_rotation=False,
         )
         self.assertEqual(alloc.by_account["account_1"], ["x", "y"])
         self.assertEqual(alloc.overflow, [("z", "account_1")])
@@ -92,7 +90,11 @@ class TestAllocateSlots(unittest.TestCase):
             _live("c", "account_1", "2026-03-01T00:00:00+00:00"),
         ]
         alloc = allocate_slots(
-            vehicles, ["account_1", "account_2"], live, max_per_account=2
+            vehicles,
+            ["account_1", "account_2"],
+            live,
+            max_per_account=2,
+            fifo_rotation=False,
         )
         self.assertEqual(alloc.by_account["account_1"], ["a", "b"])
         self.assertEqual(alloc.overflow, [("c", "account_1")])
@@ -103,6 +105,19 @@ class TestAllocateSlots(unittest.TestCase):
         )
         self.assertEqual(alloc.waitlist, [])
 
+    def test_empty_live_fills_round_robin_up_to_cap(self):
+        vehicles = [_v(f"obj{i}") for i in range(10)]
+        alloc = allocate_slots(
+            vehicles,
+            ["account_1", "account_2"],
+            [],
+            max_per_account=3,
+            fifo_rotation=False,
+        )
+        self.assertEqual(len(alloc.by_account["account_1"]), 3)
+        self.assertEqual(len(alloc.by_account["account_2"]), 3)
+        self.assertEqual(len(alloc.waitlist), 4)
+        self.assertEqual(len(alloc.creates), 6)
     def test_sync_creates_only_assigned_slots(self):
         vehicles = [_v(f"obj{i}") for i in range(5)]
         alloc = allocate_slots(
@@ -118,6 +133,57 @@ class TestAllocateSlots(unittest.TestCase):
         creates = [a for a in actions if a.action == "create"]
         self.assertEqual(len(creates), 2)
         self.assertEqual({a.autosell_id for a in creates}, set(alloc.by_account["account_1"]))
+
+    def test_fifo_rotation_yields_oldest_when_full(self):
+        """Full sticky slots + waitlist → yield oldest live, create waitlisted ids."""
+        vehicles = [_v("old_a"), _v("old_b"), _v("new_1"), _v("new_2")]
+        live = [
+            _live("old_a", "account_1", "2025-01-01T00:00:00+00:00"),
+            _live("old_b", "account_1", "2025-06-01T00:00:00+00:00"),
+        ]
+        alloc = allocate_slots(
+            vehicles,
+            ["account_1"],
+            live,
+            max_per_account=2,
+            fifo_rotation=True,
+            max_rotations_per_account=1,
+        )
+        self.assertEqual(alloc.rotations, [("old_a", "account_1")])
+        self.assertIn(("old_a", "account_1"), alloc.overflow)
+        self.assertEqual(alloc.creates, [("new_1", "account_1")])
+        self.assertEqual(alloc.by_account["account_1"], ["old_b", "new_1"])
+        self.assertEqual(alloc.waitlist, ["new_2"])
+
+        actions = plan_sync_actions(
+            vehicles,
+            ["account_1"],
+            live,
+            max_creates_per_account=10,
+            allocation=alloc,
+            enforce_overflow_removals=True,
+        )
+        removes = [a for a in actions if a.action == "remove"]
+        creates = [a for a in actions if a.action == "create"]
+        self.assertEqual({(a.autosell_id, a.account_id) for a in removes}, {("old_a", "account_1")})
+        self.assertEqual({(a.autosell_id, a.account_id) for a in creates}, {("new_1", "account_1")})
+
+    def test_fifo_rotation_disabled_leaves_waitlist(self):
+        vehicles = [_v("old_a"), _v("old_b"), _v("new_1")]
+        live = [
+            _live("old_a", "account_1", "2025-01-01T00:00:00+00:00"),
+            _live("old_b", "account_1", "2025-06-01T00:00:00+00:00"),
+        ]
+        alloc = allocate_slots(
+            vehicles,
+            ["account_1"],
+            live,
+            max_per_account=2,
+            fifo_rotation=False,
+        )
+        self.assertEqual(alloc.rotations, [])
+        self.assertEqual(alloc.creates, [])
+        self.assertEqual(alloc.waitlist, ["new_1"])
 
 
 if __name__ == "__main__":

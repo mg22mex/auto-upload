@@ -8,11 +8,15 @@ autosell:
 sync:
   timezone: America/Chihuahua
   max_posts_per_account_per_run: 15
-  max_listings_per_account: 25  # live Marketplace slots per FB profile
+  max_listings_per_account: 40  # live Marketplace slots per FB profile
   slot_allocator:
     enabled: true
-    # false = do not auto-delete extra live listings while downsizing from 1:1 clone
-    enforce_overflow_removals: false
+    # Remove duplicate / over-cap / FIFO-yielded live listings so waitlist can enter
+    enforce_overflow_removals: true
+    # When waitlist > 0 and accounts are full, yield oldest live sticky slots
+    fifo_rotation: true
+    # Cap sticky yields per account per plan (defaults to max_posts_per_account_per_run)
+    max_rotations_per_account: 15
   removal_action: mark_sold  # mark_sold | delete
   # Live sync accounts. account_3 excluded until operator clears old FB listings.
   active_accounts:

@@ -35,6 +35,47 @@ DRAFT_SAVED_RE = re.compile(
     re.I,
 )
 
+# "Sugerencia: ¿Querías publicar en 'Vehículos'?" / EN equivalents
+VEHICLE_CATEGORY_SUGGESTION_RE = re.compile(
+    r"sugerencia|"
+    r"quer[ií]as publicar|"
+    r"publicar en ['\"]?veh[ií]culos|"
+    r"listar en veh[ií]culos|"
+    r"list in vehicles|"
+    r"did you mean to list|"
+    r"switch to vehicles|"
+    r"use the vehicles? category",
+    re.I,
+)
+
+VEHICLE_SUGGESTION_ACCEPT_LABELS = (
+    "Publicar en Vehículos",
+    "Publicar en Vehiculos",
+    "Cambiar a Vehículos",
+    "Cambiar a Vehiculos",
+    "List in Vehicles",
+    "Switch to Vehicles",
+    "Use Vehicles",
+)
+
+# Only safe inside a detected suggestion dialog (not page-wide — avoids Next/Siguiente)
+VEHICLE_SUGGESTION_DIALOG_CONFIRM_LABELS = (
+    "Sí",
+    "Si",
+    "Yes",
+    "Aceptar",
+    "Accept",
+    "Vehículos",
+    "Vehiculos",
+    "Vehicles",
+)
+
+VEHICLE_SUGGESTION_DECLINE_RE = re.compile(
+    r"ahora no|not now|seguir con|continue with|no,? gracias|no thanks|cancel|"
+    r"artículo|item|cerrar|close|descartar|discard",
+    re.I,
+)
+
 
 def human_pause_before_next(
     page: Page,
@@ -49,6 +90,7 @@ def human_pause_before_next(
 
 
 def dismiss_overlays(page: Page) -> None:
+    accept_vehicle_category_suggestion(page)
     for label in DISMISS_LABELS:
         for locator in (
             page.locator(f'[aria-label="{label}"]'),
@@ -61,6 +103,97 @@ def dismiss_overlays(page: Page) -> None:
             except Exception:
                 continue
     _dismiss_draft_saved(page)
+    accept_vehicle_category_suggestion(page)
+
+
+def accept_vehicle_category_suggestion(page: Page) -> bool:
+    """Accept FB's 'Sugerencia: ¿Querías publicar en Vehículos?' modal if present.
+
+    Returns True when a confirm/accept control was clicked.
+    """
+    in_dialog = False
+    try:
+        dialog = page.locator('[role="dialog"], [aria-modal="true"]').filter(
+            has_text=VEHICLE_CATEGORY_SUGGESTION_RE
+        )
+        if dialog.count() and dialog.first.is_visible():
+            root = dialog.first
+            in_dialog = True
+        else:
+            hit = page.get_by_text(VEHICLE_CATEGORY_SUGGESTION_RE)
+            if not hit.count() or not hit.first.is_visible():
+                return False
+            ancestor = hit.first.locator(
+                "xpath=ancestor::*[@role='dialog' or @aria-modal='true'][1]"
+            )
+            if ancestor.count():
+                root = ancestor
+                in_dialog = True
+            else:
+                root = hit.first
+    except Exception:
+        return False
+
+    labels = VEHICLE_SUGGESTION_ACCEPT_LABELS
+    if in_dialog:
+        labels = VEHICLE_SUGGESTION_ACCEPT_LABELS + VEHICLE_SUGGESTION_DIALOG_CONFIRM_LABELS
+
+    for label in labels:
+        pattern = re.compile(rf"^\s*{re.escape(label)}\s*$", re.I)
+        scopes = [root]
+        if in_dialog:
+            scopes.append(page)
+        for scope in scopes:
+            for btn in (
+                scope.get_by_role("button", name=pattern),
+                scope.locator(f'[aria-label="{label}"]'),
+                scope.locator('[role="button"]').filter(has_text=pattern),
+            ):
+                try:
+                    if not btn.count() or not btn.first.is_visible():
+                        continue
+                    text = (btn.first.inner_text(timeout=1_000) or "").strip()
+                    aria = (btn.first.get_attribute("aria-label") or "").strip()
+                    hay = f"{text} {aria}"
+                    if VEHICLE_SUGGESTION_DECLINE_RE.search(hay) and not re.search(
+                        r"veh[ií]culo|vehicle", hay, re.I
+                    ):
+                        continue
+                    btn.first.click(timeout=3_000)
+                    page.wait_for_timeout(1_500)
+                    print(f"  accepted vehicle category suggestion ({label})")
+                    return True
+                except Exception:
+                    continue
+
+    if not in_dialog:
+        return False
+
+    # Last resort: primary-looking button inside the suggestion dialog
+    try:
+        candidates = root.locator('[role="button"], button')
+        for index in range(min(candidates.count(), 8)):
+            btn = candidates.nth(index)
+            try:
+                if not btn.is_visible():
+                    continue
+                text = (btn.inner_text(timeout=800) or "").strip()
+                aria = (btn.get_attribute("aria-label") or "").strip()
+                hay = f"{text} {aria}"
+                if VEHICLE_SUGGESTION_DECLINE_RE.search(hay) and not re.search(
+                    r"veh[ií]culo|vehicle", hay, re.I
+                ):
+                    continue
+                if re.search(r"veh[ií]culo|vehicle|s[ií]|yes|aceptar|accept", hay, re.I):
+                    btn.click(timeout=3_000)
+                    page.wait_for_timeout(1_500)
+                    print(f"  accepted vehicle category suggestion (dialog btn: {text or aria})")
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
 
 
 def _dismiss_draft_saved(page: Page) -> None:

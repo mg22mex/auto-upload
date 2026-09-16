@@ -13,6 +13,7 @@ from src.facebook.photos import download_vehicle_photos
 from src.facebook.ui import (
     PUBLISH_LABELS,
     NEXT_LABELS,
+    accept_vehicle_category_suggestion,
     advance_composer_next,
     advance_past_photo_step,
     click_labeled_action,
@@ -41,6 +42,21 @@ from src.models import Vehicle
 
 
 ITEM_URL_PATTERN = re.compile(r"/marketplace/item/(\d+)")
+VEHICLE_CREATE_URL = "https://www.facebook.com/marketplace/create/vehicle"
+CREATE_VEHICLE_PATH_RE = re.compile(r"/marketplace/create/vehicle", re.I)
+CREATE_ITEM_PATH_RE = re.compile(r"/marketplace/create/item\b", re.I)
+
+
+def _resolve_vehicle_create_url(fb_config: dict) -> str:
+    """Always land on Marketplace vehicle composer — never /create/item."""
+    raw = str(fb_config.get("create_url") or VEHICLE_CREATE_URL).strip()
+    if not raw:
+        return VEHICLE_CREATE_URL
+    if CREATE_ITEM_PATH_RE.search(raw):
+        return VEHICLE_CREATE_URL
+    if not CREATE_VEHICLE_PATH_RE.search(raw):
+        return VEHICLE_CREATE_URL
+    return raw
 
 
 def create_vehicle_listing(
@@ -51,9 +67,10 @@ def create_vehicle_listing(
     max_photos: int,
     log_dir: Path,
 ) -> str:
-    create_url = fb_config.get("create_url", "https://www.facebook.com/marketplace/create/vehicle")
+    create_url = _resolve_vehicle_create_url(fb_config)
     page.goto(create_url, wait_until="domcontentloaded", timeout=90_000)
     _wait_for_photo_file_input(page, timeout_ms=15_000)
+    accept_vehicle_category_suggestion(page)
     dismiss_overlays(page)
     log_page_state(page, "create_opened")
     if page_shows_login_form(page):
@@ -65,7 +82,7 @@ def create_vehicle_listing(
         raise FacebookSessionError(
             "Facebook session expired — log in again with scripts/fb_login.py"
         )
-    if not re.search(r"/marketplace/create/(vehicle|item)", page.url, re.I):
+    if not CREATE_VEHICLE_PATH_RE.search(page.url):
         raise FacebookPostingError(
             f"Not on vehicle composer after opening create URL (at {page.url})"
         )
@@ -138,12 +155,27 @@ def create_vehicle_listing(
 
 
 def _ensure_vehicle_create_flow(page: Page, *, create_url: str) -> None:
-    """Handle category pickers only when not already on the vehicle composer."""
-    if re.search(r"/marketplace/create/(vehicle|item)", page.url, re.I):
+    """Land on /marketplace/create/vehicle; leave /create/item if FB redirected us."""
+    accept_vehicle_category_suggestion(page)
+    if CREATE_VEHICLE_PATH_RE.search(page.url):
         return
+
+    # Item composer lacks native Año/Marca/Kilometraje — force vehicle URL.
+    if CREATE_ITEM_PATH_RE.search(page.url):
+        print(f"  redirected from item composer → {create_url}")
+        page.goto(create_url, wait_until="domcontentloaded", timeout=90_000)
+        _wait_for_photo_file_input(page, timeout_ms=15_000)
+        accept_vehicle_category_suggestion(page)
+        dismiss_overlays(page)
+        log_page_state(page, "create_forced_vehicle")
+        if CREATE_VEHICLE_PATH_RE.search(page.url):
+            return
+
     for label in (
         "Vehículo",
         "Vehicle",
+        "Vehículos",
+        "Vehicles",
         "Carro",
         "Car",
         "Camioneta",
@@ -154,14 +186,16 @@ def _ensure_vehicle_create_flow(page: Page, *, create_url: str) -> None:
             if option.count() and option.is_visible():
                 option.click(timeout=3_000)
                 page.wait_for_timeout(1_500)
+                accept_vehicle_category_suggestion(page)
                 log_page_state(page, f"selected_{label}")
-                if re.search(r"/marketplace/create/(vehicle|item)", page.url, re.I):
+                if CREATE_VEHICLE_PATH_RE.search(page.url):
                     return
         except Exception:
             continue
 
     page.goto(create_url, wait_until="domcontentloaded", timeout=90_000)
     _wait_for_photo_file_input(page, timeout_ms=15_000)
+    accept_vehicle_category_suggestion(page)
     dismiss_overlays(page)
     log_page_state(page, "create_retry")
 
@@ -176,7 +210,9 @@ def _reopen_vehicle_composer(page: Page, *, create_url: str) -> None:
     dismiss_overlays(page)
     page.goto(create_url, wait_until="domcontentloaded", timeout=90_000)
     _wait_for_photo_file_input(page, timeout_ms=20_000)
+    accept_vehicle_category_suggestion(page)
     dismiss_overlays(page)
+    _ensure_vehicle_create_flow(page, create_url=create_url)
     log_page_state(page, "create_composer_ready")
     if page_shows_login_form(page):
         raise FacebookSessionError(
@@ -351,12 +387,17 @@ def _fill_vehicle_form(
     _fill_vehicle_type(page, attrs)
     _scroll_composer_sidebar(page)
 
-    # Match FB composer order: type -> year/make/model -> mileage -> location -> price
+    # Native vehicle-composer fields (requires /marketplace/create/vehicle):
+    #   Vehicle.year    -> Año / Year
+    #   Vehicle.brand   -> Marca / Make
+    #   Vehicle.mileage -> Kilometraje / Mileage  (via attrs.mileage_km)
+    #   Vehicle.price   -> Precio / Price
+    # Order: type -> year/make/model -> mileage -> location -> price
     core_fields: list[tuple[str, str, tuple[str, ...], str]] = [
         ("year", vehicle.year, ("Año", "Year", "Año del modelo", "Model year"), "listbox"),
         ("make", vehicle.brand, ("Marca", "Make"), "make"),
         ("model", attrs.model, ("Modelo", "Model"), "text"),
-        ("mileage", attrs.mileage_km, (
+        ("mileage", attrs.mileage_km or mileage_for_listing(vehicle.mileage), (
             "Kilometraje", "Mileage", "Odómetro", "Odometro", "Odometer",
             "Kilómetros", "Kilometros", "Kilometers", "Vehicle mileage",
         ), "mileage"),
@@ -927,16 +968,22 @@ def _publish_succeeded(page: Page) -> bool:
 
 
 def _dismiss_vehicle_category_prompts(page: Page) -> None:
+    """Accept 'Sugerencia: ¿Querías publicar en Vehículos?' and legacy EN prompts."""
+    if accept_vehicle_category_suggestion(page):
+        return
     for pattern in (
         re.compile(r"list in vehicles", re.I),
         re.compile(r"listar en veh[ií]culos", re.I),
         re.compile(r"did you mean to list", re.I),
+        re.compile(r"quer[ií]as publicar", re.I),
     ):
         try:
             link = page.get_by_text(pattern)
             if link.count() and link.first.is_visible():
                 link.first.click(timeout=3_000)
                 page.wait_for_timeout(1_500)
+                accept_vehicle_category_suggestion(page)
+                return
         except Exception:
             continue
 

@@ -1,12 +1,13 @@
 """Partition catalog vehicles across Facebook accounts with a hard slot cap."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
 
 from src.models import Vehicle
 
 DEFAULT_MAX_LISTINGS_PER_ACCOUNT = 25
+DEFAULT_MAX_ROTATIONS_PER_ACCOUNT = 15
 
 
 def slot_allocator_config(config: dict[str, Any] | None) -> dict[str, Any]:
@@ -18,10 +19,18 @@ def slot_allocator_config(config: dict[str, Any] | None) -> dict[str, Any]:
     enabled = raw.get("enabled")
     if enabled is None:
         enabled = True
+    fifo_rotation = raw.get("fifo_rotation")
+    if fifo_rotation is None:
+        fifo_rotation = True
+    max_rot = raw.get("max_rotations_per_account")
+    if max_rot is None:
+        max_rot = sync.get("max_posts_per_account_per_run", DEFAULT_MAX_ROTATIONS_PER_ACCOUNT)
     return {
         "enabled": bool(enabled),
         "max_listings_per_account": max(1, int(max_n)),
         "enforce_overflow_removals": bool(raw.get("enforce_overflow_removals", False)),
+        "fifo_rotation": bool(fifo_rotation),
+        "max_rotations_per_account": max(0, int(max_rot)),
     }
 
 
@@ -39,6 +48,8 @@ def allocate_from_config(
         account_ids,
         live_listings,
         max_per_account=cfg["max_listings_per_account"],
+        fifo_rotation=cfg["fifo_rotation"],
+        max_rotations_per_account=cfg["max_rotations_per_account"],
     )
 
 
@@ -67,6 +78,7 @@ class Allocation:
     creates: list[tuple[str, str]]  # assigned but not currently live
     max_per_account: int
     account_ids: list[str]
+    rotations: list[tuple[str, str]] = field(default_factory=list)  # FIFO yields
 
     def assigned_ids(self, account_id: str) -> set[str]:
         return set(self.by_account.get(account_id) or [])
@@ -102,7 +114,8 @@ class Allocation:
             )
         lines.append(
             f"Waitlist: {len(self.waitlist)}  |  Overflow live (not in partition): "
-            f"{len(self.overflow)}  |  New slot fills: {len(self.creates)}"
+            f"{len(self.overflow)}  |  New slot fills: {len(self.creates)}  |  "
+            f"FIFO rotations: {len(self.rotations)}"
         )
         return "\n".join(lines)
 
@@ -113,6 +126,8 @@ def allocate_slots(
     live_listings: Iterable[Any],
     *,
     max_per_account: int = DEFAULT_MAX_LISTINGS_PER_ACCOUNT,
+    fifo_rotation: bool = True,
+    max_rotations_per_account: int = DEFAULT_MAX_ROTATIONS_PER_ACCOUNT,
 ) -> Allocation:
     """Sticky partition: keep existing live pairs, cap at max_per_account, fill empties.
 
@@ -120,6 +135,9 @@ def allocate_slots(
     Over-capacity on one account: keep the oldest ``posted_at`` (FIFO bump queue).
     Vacancies fill from unassigned catalog, prioritizing never-posted then
     stale (oldest prior ``posted_at``), then catalog order.
+    When the waitlist is non-empty and every account is at capacity, optionally
+    yield the oldest live sticky listings (FIFO) into ``overflow`` so waitlisted
+    catalog vehicles can enter ``creates`` (capped by ``max_rotations_per_account``).
     Sold/removed rows are absent from live_listings so their slots free automatically.
     """
     accounts = [a for a in account_ids if a]
@@ -207,6 +225,61 @@ def allocate_slots(
         creates.append((aid, acct))
     waitlist = remaining
 
+    rotations: list[tuple[str, str]] = []
+    if (
+        fifo_rotation
+        and waitlist
+        and max_rotations_per_account > 0
+        and accounts
+    ):
+        create_ids = {aid for aid, _acct in creates}
+        live_keys = {(aid, acct) for aid, acct, _posted in live_rows}
+
+        # Oldest currently-live sticky holders first (skip not-yet-live creates).
+        candidates: list[tuple[str, str, str]] = []
+        for acct in accounts:
+            for aid in list(assigned.get(acct) or []):
+                if aid in create_ids:
+                    continue
+                if (aid, acct) not in live_keys:
+                    continue
+                posted = _posted_key(
+                    posted_lookup.get((aid, acct)) or oldest_posted.get(aid)
+                )
+                candidates.append((posted, acct, aid))
+        candidates.sort(key=lambda item: (item[0], accounts.index(item[1]), item[2]))
+
+        rotations_left = {acct: int(max_rotations_per_account) for acct in accounts}
+        wait_q = list(waitlist)
+        wi = 0
+        for _posted, acct, old_aid in candidates:
+            if wi >= len(wait_q):
+                break
+            if rotations_left[acct] <= 0:
+                continue
+            if len(assigned[acct]) < max_n:
+                # Should not happen when waitlist stuck, but allow fill without yield.
+                new_aid = wait_q[wi]
+                wi += 1
+                assigned[acct].append(new_aid)
+                creates.append((new_aid, acct))
+                continue
+
+            new_aid = wait_q[wi]
+            wi += 1
+            try:
+                assigned[acct].remove(old_aid)
+            except ValueError:
+                wi -= 1
+                continue
+            overflow.append((old_aid, acct))
+            rotations.append((old_aid, acct))
+            assigned[acct].append(new_aid)
+            creates.append((new_aid, acct))
+            rotations_left[acct] -= 1
+
+        waitlist = wait_q[wi:]
+
     return Allocation(
         by_account=assigned,
         waitlist=waitlist,
@@ -214,4 +287,5 @@ def allocate_slots(
         creates=creates,
         max_per_account=max_n,
         account_ids=list(accounts),
+        rotations=rotations,
     )
