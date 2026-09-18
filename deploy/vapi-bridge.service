@@ -1,0 +1,40 @@
+[Unit]
+Description=Autosell Vapi inventory bridge (Odoo product.template)
+Documentation=file:///Extra/Yandex.Disk/Autosell/Auto-upload/SETUP.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# This host: repo owned by root under /Extra/Yandex.Disk/Autosell/Auto-upload
+# Oracle fb-worker template: change paths + User=ubuntu (see comments below).
+User=root
+Group=root
+
+WorkingDirectory=/Extra/Yandex.Disk/Autosell/Auto-upload
+
+# Do NOT EnvironmentFile= the full project .env — JSON REPS_* lines break systemd parsing.
+# vapi_bridge.py loads WorkingDirectory/.env via python-dotenv (ODOO_* / VAPI_BRIDGE_*).
+Environment=PYTHONUNBUFFERED=1
+Environment=VAPI_BRIDGE_HOST=127.0.0.1
+Environment=VAPI_BRIDGE_PORT=8000
+Environment=VAPI_BRIDGE_RELOAD=false
+
+# Absolute venv interpreter — matches "python -m src.voice_gateway.vapi_bridge"
+ExecStart=/Extra/Yandex.Disk/Autosell/Auto-upload/.venv/bin/python -m src.voice_gateway.vapi_bridge
+
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+
+# Bind localhost only; Cloudflare Tunnel / ngrok is the public ingress.
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+
+# --- Oracle fb-worker alternate paths ---
+# User=ubuntu
+# Group=ubuntu
+# WorkingDirectory=/home/ubuntu/auto-upload
+# ExecStart=/home/ubuntu/auto-upload/.venv/bin/python -m src.voice_gateway.vapi_bridge

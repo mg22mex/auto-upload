@@ -994,6 +994,8 @@ class OdooCRMClient(WhatsAppMixin, FleetMixin, DocumentsMixin, OdooClient):
             alts: list[str] = []
             if "prueba" in lowered or "cita" in lowered or "manejo" in lowered:
                 alts = [
+                    "Cita Agendada",
+                    "Cita agendada",
                     "Prueba de manejo",
                     "Cita",
                     "Test Drive",

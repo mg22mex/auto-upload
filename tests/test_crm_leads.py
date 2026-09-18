@@ -175,6 +175,9 @@ class TestCRMLeadManagerLiveMocked(unittest.TestCase):
                 return ["mail.message.subtype", 1]
             if model == "mail.message.subtype":
                 return [1]
+            if model == "crm.stage" and method == "search_read":
+                name = args[0][0][2] if args and args[0] else "Stage"
+                return [{"id": 15, "name": name}]
             raise AssertionError(f"unexpected {model}.{method}")
 
         return execute_kw, created, writes, utm_ids
@@ -317,6 +320,77 @@ class TestCRMLeadManagerLiveMocked(unittest.TestCase):
             if c.args[3] == "crm.lead" and c.args[4] == "create"
         ]
         self.assertEqual(create_calls, [])
+
+    def test_explicit_lead_id_skips_create_preserves_owner(self):
+        execute_kw, _created, writes, _utm = self._crm_rpc(existing=[1937])
+        models = MagicMock()
+        messages: list = []
+        stages: list = []
+
+        def wrapped(db, uid, key, model, method, args, kwargs=None):
+            if model == "mail.message" and method == "create":
+                messages.append(args[0])
+                return 99
+            if model == "crm.stage" and method == "search_read":
+                stages.append(args)
+                return [{"id": 15, "name": "Cita Agendada"}]
+            return execute_kw(db, uid, key, model, method, args, kwargs)
+
+        models.execute_kw.side_effect = wrapped
+        client = _client(models)
+        mgr = CRMLeadManager(client=client)
+        with patch(
+            "src.odoo_sync.crm.assign_lead_owner",
+            side_effect=AssertionError("RR must not run on update"),
+        ):
+            result = mgr.create_or_update_lead(
+                {
+                    "client_name": "Marco",
+                    "phone": "6145550000",
+                    "lead_id": 1937,
+                    "vehicle_info": "CX-5",
+                    "notes": "Cita outbound",
+                    "stage_name": "Cita Agendada",
+                    "assign_round_robin": True,
+                    "preserve_salesperson": True,
+                    "opportunity_name": "Llamada Paulina - Marco",
+                    "channel": "Voice",
+                }
+            )
+        self.assertEqual(result["status"], "updated")
+        self.assertEqual(result["lead_id"], 1937)
+        self.assertTrue(result["salesperson_preserved"])
+        self.assertEqual(len(messages), 1)
+        self.assertTrue(writes)
+        write_vals = writes[0][1]
+        self.assertNotIn("user_id", write_vals)
+        self.assertNotIn("description", write_vals)
+        self.assertEqual(write_vals.get("stage_id"), 15)
+        self.assertTrue(stages)
+
+    def test_create_uses_opportunity_name_and_round_robin(self):
+        execute_kw, created, _writes, _utm = self._crm_rpc(existing=[])
+        models = MagicMock()
+        models.execute_kw.side_effect = execute_kw
+        client = _client(models)
+        mgr = CRMLeadManager(client=client)
+        fake_rep = MagicMock(odoo_id=21)
+        with patch("src.odoo_sync.crm.assign_lead_owner", return_value=fake_rep):
+            result = mgr.create_or_update_lead(
+                {
+                    "client_name": "Nueva",
+                    "phone": "6142223333",
+                    "vehicle_info": "Sentra",
+                    "opportunity_name": "Llamada Paulina - Nueva",
+                    "assign_round_robin": True,
+                    "stage_name": "Cita Agendada",
+                    "channel": "Voice",
+                }
+            )
+        self.assertEqual(result["status"], "created")
+        self.assertFalse(result["deduplicated"])
+        self.assertEqual(created["vals"]["name"], "Llamada Paulina - Nueva")
+        self.assertEqual(created["vals"]["user_id"], 21)
 
     def test_fleet_linked_on_create(self):
         models = MagicMock()

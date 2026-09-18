@@ -1,0 +1,19 @@
+[Unit]
+Description=Autosell Vapi inventory bridge (user service)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/Extra/Yandex.Disk/Autosell/Auto-upload
+Environment=PYTHONUNBUFFERED=1
+Environment=VAPI_BRIDGE_HOST=127.0.0.1
+Environment=VAPI_BRIDGE_PORT=8000
+Environment=VAPI_BRIDGE_RELOAD=false
+ExecStart=/Extra/Yandex.Disk/Autosell/Auto-upload/.venv/bin/python -m src.voice_gateway.vapi_bridge
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

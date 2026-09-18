@@ -1,0 +1,15 @@
+[Unit]
+Description=Cloudflare quick tunnel for Vapi inventory bridge (user)
+After=network-online.target vapi-bridge.service
+Wants=network-online.target
+Requires=vapi-bridge.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8000
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

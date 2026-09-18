@@ -1,1 +1,1 @@
-"""Outbound operator notifications (sales-rep handoff alerts)."""
+"""Outbound operator + customer notifications (Evolution WhatsApp)."""

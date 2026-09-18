@@ -197,6 +197,14 @@ class CRMLeadManager:
     ) -> dict[str, Any]:
         """Create or update a lead from a free-form payload.
 
+        Lookup: explicit ``lead_id`` / ``odoo_lead_id``, else active phone match.
+        Updates append chatter (and optional stage); ``preserve_salesperson``
+        skips ``user_id`` / ``team_id`` / description rewrites. Creates may set
+        ``opportunity_name``, ``stage_name``, and ``assign_round_robin``.
+
+        Customer WhatsApp confirmations are owned by ``vapi_bridge`` (Evolution),
+        not this method.
+
         Returns a compact result dict::
 
             {
@@ -233,7 +241,8 @@ class CRMLeadManager:
             or ""
         ).strip()
         vehicle_label = vehicle_info or "General"
-        title = f"Consulta: {vehicle_label} - {client_name}"
+        custom_title = str(payload.get("opportunity_name") or payload.get("title") or "").strip()
+        title = custom_title or f"Consulta: {vehicle_label} - {client_name}"
         if len(title) > 128:
             title = title[:125] + "..."
 
@@ -249,6 +258,12 @@ class CRMLeadManager:
             or ""
         ).strip()
         channel = str(payload.get("channel") or "").strip()
+        stage_name = str(
+            payload.get("stage_name") or payload.get("stage") or ""
+        ).strip()
+        assign_rr = bool(payload.get("assign_round_robin", False))
+        # Default False preserves prior WA/voice team_id write behavior.
+        preserve_owner = bool(payload.get("preserve_salesperson", False))
 
         physical_location, fleet_preview = self._resolve_physical_location(payload)
         effective_branch, team_id, fell_back, location_overrode = (
@@ -282,7 +297,8 @@ class CRMLeadManager:
                 f"physical_location={physical_location!r} "
                 f"location_overrode={location_overrode} fell_back={fell_back} "
                 f"medium={medium_name!r} source={source_name!r} "
-                f"tag={self._client.QUOTE_LEAD_TAG!r}"
+                f"tag={self._client.QUOTE_LEAD_TAG!r} stage={stage_name!r} "
+                f"assign_round_robin={assign_rr}"
             )
             vin = str(payload.get("vin") or payload.get("vin_sn") or "").strip()
             plate = str(
@@ -298,10 +314,15 @@ class CRMLeadManager:
                     "physical_location": physical_location,
                     **(fleet_preview or {}),
                 }
+            existing_preview = _optional_int(
+                payload.get("lead_id")
+                or payload.get("odoo_lead_id")
+                or payload.get("crm_lead_id")
+            )
             return {
-                "status": "created",
-                "lead_id": -1,
-                "deduplicated": False,
+                "status": "updated" if existing_preview else "created",
+                "lead_id": int(existing_preview or -1),
+                "deduplicated": bool(existing_preview),
                 "branch": effective_branch,
                 "team_id": team_id,
                 "fell_back": fell_back,
@@ -315,13 +336,14 @@ class CRMLeadManager:
                 "source_id": None,
                 "tag_ids": [],
                 "fleet": fleet_meta,
+                "stage_name": stage_name or None,
                 "dry_run": True,
             }
 
         medium_id, source_id = self._resolve_attribution_ids(payload, channel=channel)
         tag_ids = self._client._resolve_quote_lead_tag_ids(channel or None)
 
-        existing_id = self._find_active_lead_id(phone_digits, phone_raw)
+        existing_id = self._resolve_existing_lead_id(payload, phone_digits, phone_raw)
 
         if existing_id is not None:
             chatter_body = self._inquiry_chatter_body(
@@ -337,14 +359,17 @@ class CRMLeadManager:
                     f"WARN CRMLeadManager chatter on lead {existing_id}: {exc}"
                 )
             try:
+                # Never rewrite user_id — preserve Round Robin / outbound owner.
                 update_vals: dict[str, Any] = {
                     "contact_name": client_name,
                     "phone": phone_digits,
-                    "description": description,
                 }
+                # Outbound / returning: append via chatter only; keep original description.
+                if not preserve_owner:
+                    update_vals["description"] = description
                 if email:
                     update_vals["email_from"] = email
-                if team_id is not None:
+                if team_id is not None and not preserve_owner:
                     update_vals["team_id"] = int(team_id)
                 if medium_id is not None:
                     update_vals["medium_id"] = int(medium_id)
@@ -352,6 +377,10 @@ class CRMLeadManager:
                     update_vals["source_id"] = int(source_id)
                 if tag_ids:
                     update_vals["tag_ids"] = [(6, 0, list(tag_ids))]
+                if stage_name:
+                    stage_id = self._client._resolve_crm_stage_id(stage_name)
+                    if stage_id is not None:
+                        update_vals["stage_id"] = int(stage_id)
                 self._client.execute_kw(
                     "crm.lead",
                     "write",
@@ -378,6 +407,8 @@ class CRMLeadManager:
                 "source_id": source_id,
                 "tag_ids": list(tag_ids),
                 "fleet": fleet_meta,
+                "stage_name": stage_name or None,
+                "salesperson_preserved": True,
                 "dry_run": False,
             }
 
@@ -399,6 +430,20 @@ class CRMLeadManager:
             vals["medium_id"] = int(medium_id)
         if tag_ids:
             vals["tag_ids"] = [(6, 0, list(tag_ids))]
+        if stage_name:
+            stage_id = self._client._resolve_crm_stage_id(stage_name)
+            if stage_id is not None:
+                vals["stage_id"] = int(stage_id)
+
+        assigned_user_id: int | None = None
+        if assign_rr:
+            try:
+                assignment = assign_lead_owner(effective_branch)
+                if assignment.odoo_id:
+                    assigned_user_id = int(assignment.odoo_id)
+                    vals["user_id"] = assigned_user_id
+            except Exception as exc:
+                print(f"WARN CRMLeadManager round-robin assign: {exc}")
 
         lead_id = self._create_lead_with_fallbacks(vals)
         if tag_ids:
@@ -417,7 +462,8 @@ class CRMLeadManager:
             f"CRMLeadManager created lead id={lead_id} branch={effective_branch} "
             f"team_id={team_id} physical_location={physical_location} "
             f"location_overrode={location_overrode} "
-            f"medium_id={medium_id} source_id={source_id}"
+            f"medium_id={medium_id} source_id={source_id} "
+            f"user_id={assigned_user_id} stage={stage_name!r}"
         )
         return {
             "status": "created",
@@ -434,6 +480,8 @@ class CRMLeadManager:
             "source_id": source_id,
             "tag_ids": list(tag_ids),
             "fleet": fleet_meta,
+            "stage_name": stage_name or None,
+            "user_id": assigned_user_id,
             "dry_run": False,
         }
 
@@ -549,6 +597,35 @@ class CRMLeadManager:
         raise OdooCRMError(
             f"lead create failed after field fallbacks: {last_exc}"
         ) from last_exc
+
+    def _resolve_existing_lead_id(
+        self,
+        payload: dict[str, Any],
+        phone_digits: str,
+        phone_raw: str,
+    ) -> int | None:
+        """Prefer explicit ``lead_id`` (outbound context), else phone dedupe."""
+        explicit = _optional_int(
+            payload.get("lead_id")
+            or payload.get("odoo_lead_id")
+            or payload.get("crm_lead_id")
+        )
+        if explicit is not None:
+            try:
+                found = self._client.execute_kw(
+                    "crm.lead",
+                    "search",
+                    [[("id", "=", int(explicit))]],
+                    {"limit": 1},
+                )
+                if found:
+                    return int(found[0])
+            except Exception as exc:
+                print(f"WARN CRMLeadManager verify lead_id={explicit}: {exc}")
+                # Trust caller id when search fails (permissions / transient)
+                return int(explicit)
+            print(f"WARN CRMLeadManager lead_id={explicit} not found; falling back to phone")
+        return self._find_active_lead_id(phone_digits, phone_raw)
 
     def _find_active_lead_id(
         self,

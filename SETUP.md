@@ -439,6 +439,53 @@ sudo systemctl enable autosell-webhook
 sudo systemctl start autosell-webhook
 ```
 
+---
+
+## Vapi inventory bridge (systemd + Cloudflare Tunnel)
+
+Standalone FastAPI app: `src/voice_gateway/vapi_bridge.py` — Riley tools:
+
+| Route | Role |
+|-------|------|
+| `POST /vapi/inventory` | Odoo `product.template` search |
+| `POST /vapi/financing` | Local Scotiabank-calibrated amortization |
+| `POST /vapi/tradein` | Autométrica Valor Compra estimate |
+| `POST /vapi/lead` | CRM upsert (`lead_id` / phone dedupe) → stage `Cita Agendada` → **background** Evolution WhatsApp confirmation |
+
+Customer WhatsApp uses `src/notifications/whatsapp.py` → `WhatsAppWorkerClient` (`WHATSAPP_API_URL` / `WHATSAPP_API_KEY` / `WHATSAPP_INSTANCE_*`). Toggle: `VAPI_CUSTOMER_WHATSAPP` (default on). Failures are logged; they never block TTS.
+
+| Setting | This host (Arch) | Oracle fb-worker |
+|---------|------------------|------------------|
+| Unit | `deploy/vapi-bridge.service` | same file — edit paths / `User=` |
+| WorkingDirectory | `/Extra/Yandex.Disk/Autosell/Auto-upload` | `/home/ubuntu/auto-upload` |
+| Listen | `127.0.0.1:8000` | `127.0.0.1:8000` |
+| Public HTTPS | `cloudflared` quick tunnel (`*.trycloudflare.com`) | named tunnel recommended |
+
+**Do not** point systemd `EnvironmentFile=` at the full project `.env` (JSON `REPS_*` lines break the parser). The app loads `.env` via `python-dotenv`.
+
+```bash
+cd /Extra/Yandex.Disk/Autosell/Auto-upload   # or ~/auto-upload
+sudo bash deploy/install_vapi_bridge.sh
+
+# Manual equivalent:
+sudo cp deploy/vapi-bridge.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now vapi-bridge
+curl -fsS http://127.0.0.1:8000/health
+
+# Tunnel (ephemeral URL — check journal after start):
+sudo cp deploy/cloudflared-vapi-bridge.service /etc/systemd/system/
+# ensure cloudflared is at /usr/local/bin/cloudflared
+sudo systemctl enable --now cloudflared-vapi-bridge
+journalctl -u cloudflared-vapi-bridge -n 50 --no-pager | grep trycloudflare
+
+# Vapi Dashboard tool server URL:
+#   https://<id>.trycloudflare.com/vapi/inventory
+```
+
+Foreground tunnel (no systemd): `cloudflared tunnel --url http://127.0.0.1:8000`
+```
+
 **Ops:**
 
 ```bash

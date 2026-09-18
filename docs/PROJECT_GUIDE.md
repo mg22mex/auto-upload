@@ -535,7 +535,7 @@ flowchart TD
 
 | API | Behavior |
 |-----|----------|
-| `CRMLeadManager.create_or_update_lead(payload, branch="periferico")` | Search by phone; **update** = chatter only (no duplicate). Teams: `ODOO_TEAM_PERIFERICO` / `ODOO_TEAM_SAN_FELIPE`. If fleet unit is at **San Felipe**, override `team_id` and append `Ubicación Física del Vehículo: …` to description. |
+| `CRMLeadManager.create_or_update_lead(payload, branch="periferico")` | Prefer explicit `lead_id`, else phone search; **update** = chatter + optional stage (preserve `user_id` when `preserve_salesperson`); **create** = title + optional round-robin. Teams: `ODOO_TEAM_*`. Vapi customer WhatsApp is triggered from `vapi_bridge` (not here). |
 | `QuotePDFManager.render_and_attach(lead_id, vehicle, quote, client, …)` | Branch header/footer branding; attach PDF to `crm.lead`. Soft fallback if ReportLab missing. |
 | `OdooTriggerManager.on_lead_stage_change(lead_id, new_stage, lead_data)` | On `quoted` / `cotizado` (and aliases): PDF attach + enqueue `payment_link` WhatsApp job (`status=queued_pending_meta`, not sent). |
 | `process_incoming_webhook(payload, dry_run=…)` | Normalize form/voice envelopes → CRM; optional auto-quote when `trigger_quote` or stage is quote-like. |
