@@ -53,50 +53,29 @@ class OdooCRMClient(WhatsAppMixin, FleetMixin, DocumentsMixin, OdooClient):
 
     def search_vehicle_inventory(self, query_string: str) -> list[dict[str, Any]]:
         """Search vehicle product templates and return normalized inventory rows."""
+        from src.odoo_sync.inventory import RESULT_LIMIT, query_inventory
+
         query = (query_string or "").strip()
         if not query:
             return []
 
-        fields = ["id", "name", "list_price", "qty_available", "categ_id"]
-        vehicle_domain: list[Any] = [
-            ("name", "ilike", query),
-            ("categ_id.name", "ilike", "vehicul"),
-        ]
-        records = self.execute_kw(
-            "product.template",
-            "search_read",
-            [vehicle_domain],
-            {"fields": fields, "limit": 20, "order": "id desc"},
+        records = query_inventory(
+            self.execute_kw,
+            query=query,
+            limit=RESULT_LIMIT,
+            available_only=True,
         )
-        if not records:
-            records = self.execute_kw(
-                "product.template",
-                "search_read",
-                [[("name", "ilike", query)]],
-                {"fields": fields, "limit": 20, "order": "id desc"},
-            )
-
         vehicles: list[dict[str, Any]] = []
         for record in records:
-            category = record.get("categ_id")
-            category_id = (
-                int(category[0])
-                if isinstance(category, (list, tuple)) and category
-                else None
-            )
-            category_name = (
-                str(category[1])
-                if isinstance(category, (list, tuple)) and len(category) > 1
-                else ""
-            )
             vehicles.append(
                 {
                     "id": int(record["id"]),
                     "name": str(record.get("name") or ""),
                     "list_price": float(record.get("list_price") or 0),
-                    "qty_available": float(record.get("qty_available") or 0),
-                    "categ_id": category_id,
-                    "category_name": category_name,
+                    "qty_available": 1.0,
+                    "categ_id": None,
+                    "category_name": "",
+                    "default_code": str(record.get("default_code") or ""),
                 }
             )
         return vehicles
@@ -976,50 +955,81 @@ class OdooCRMClient(WhatsAppMixin, FleetMixin, DocumentsMixin, OdooClient):
         )
 
     def _resolve_crm_stage_id(self, stage_name: str) -> int | None:
-        """Best-effort match for crm.stage by name (e.g. Quote Generated)."""
+        """Best-effort ``crm.stage`` match; appointment stages fall back to id 2."""
         label = (stage_name or "").strip()
         if not label:
             return None
-        try:
-            rows = self.execute_kw(
-                "crm.stage",
-                "search_read",
-                [[("name", "ilike", label)]],
-                {"fields": ["id", "name"], "limit": 10},
+
+        def _search(domain: list[Any], *, limit: int = 20) -> list[dict[str, Any]]:
+            try:
+                rows = self.execute_kw(
+                    "crm.stage",
+                    "search_read",
+                    [domain],
+                    {"fields": ["id", "name"], "limit": limit},
+                )
+            except Exception:
+                return []
+            return list(rows or [])
+
+        rows = _search([("name", "ilike", label)])
+        lowered = label.lower()
+        appointment_like = any(
+            token in lowered for token in ("cita", "prueba", "manejo", "appointment", "test drive")
+        )
+
+        if not rows and appointment_like:
+            # Prefer real Autosell pipeline stage: "Cita/Prueba de manejo"
+            rows = _search(
+                [
+                    "|",
+                    ("name", "ilike", "Cita"),
+                    ("name", "ilike", "Prueba de manejo"),
+                ]
             )
-        except Exception:
-            rows = []
-        if not rows:
-            lowered = label.lower()
-            alts: list[str] = []
-            if "prueba" in lowered or "cita" in lowered or "manejo" in lowered:
-                alts = [
-                    "Cita Agendada",
-                    "Cita agendada",
+            if not rows:
+                for alt in (
+                    "Cita/Prueba de manejo",
                     "Prueba de manejo",
+                    "Cita Agendada",
                     "Cita",
                     "Test Drive",
                     "Appointment",
-                ]
-            for alt in alts:
-                try:
-                    rows = self.execute_kw(
-                        "crm.stage",
-                        "search_read",
-                        [[("name", "ilike", alt)]],
-                        {"fields": ["id", "name"], "limit": 5},
-                    )
-                except Exception:
-                    rows = []
-                if rows:
-                    break
-        if not rows:
-            return None
-        lowered = label.lower()
-        for row in rows:
-            if str(row.get("name") or "").strip().lower() == lowered:
-                return int(row["id"])
-        return int(rows[0]["id"])
+                ):
+                    rows = _search([("name", "ilike", alt)], limit=5)
+                    if rows:
+                        break
+
+        if rows:
+            # Exact match first
+            for row in rows:
+                if str(row.get("name") or "").strip().lower() == lowered:
+                    return int(row["id"])
+            # Prefer the canonical appointment stage name when present
+            for row in rows:
+                name = str(row.get("name") or "").strip().lower()
+                if "prueba" in name and "manejo" in name:
+                    return int(row["id"])
+            for row in rows:
+                name = str(row.get("name") or "").strip().lower()
+                if "cita" in name:
+                    return int(row["id"])
+            return int(rows[0]["id"])
+
+        if appointment_like:
+            try:
+                fallback = int(
+                    (os.getenv("ODOO_CRM_CITA_STAGE_ID") or "2").strip() or "2"
+                )
+            except ValueError:
+                fallback = 2
+            if fallback > 0:
+                print(
+                    f"WARN CRM stage {label!r} not found; "
+                    f"using fallback stage_id={fallback}"
+                )
+                return fallback
+        return None
 
     def _advisor_ids_for_branch(self, branch_id: int) -> list[int]:
         """Salespeople on crm.team (branch)."""

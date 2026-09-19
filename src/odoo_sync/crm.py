@@ -261,6 +261,14 @@ class CRMLeadManager:
         stage_name = str(
             payload.get("stage_name") or payload.get("stage") or ""
         ).strip()
+        appointment = str(
+            payload.get("appointment_date")
+            or payload.get("appointment")
+            or payload.get("cita")
+            or ""
+        ).strip()
+        if not stage_name and appointment:
+            stage_name = self._client.TEST_DRIVE_STAGE
         assign_rr = bool(payload.get("assign_round_robin", False))
         # Default False preserves prior WA/voice team_id write behavior.
         preserve_owner = bool(payload.get("preserve_salesperson", False))
@@ -360,13 +368,12 @@ class CRMLeadManager:
                 )
             try:
                 # Never rewrite user_id — preserve Round Robin / outbound owner.
+                # Always map contact/phone/description (appointment notes live here).
                 update_vals: dict[str, Any] = {
                     "contact_name": client_name,
                     "phone": phone_digits,
+                    "description": description,
                 }
-                # Outbound / returning: append via chatter only; keep original description.
-                if not preserve_owner:
-                    update_vals["description"] = description
                 if email:
                     update_vals["email_from"] = email
                 if team_id is not None and not preserve_owner:
@@ -377,10 +384,7 @@ class CRMLeadManager:
                     update_vals["source_id"] = int(source_id)
                 if tag_ids:
                     update_vals["tag_ids"] = [(6, 0, list(tag_ids))]
-                if stage_name:
-                    stage_id = self._client._resolve_crm_stage_id(stage_name)
-                    if stage_id is not None:
-                        update_vals["stage_id"] = int(stage_id)
+                resolved_stage_id = self._apply_stage_id(update_vals, stage_name)
                 self._client.execute_kw(
                     "crm.lead",
                     "write",
@@ -388,6 +392,15 @@ class CRMLeadManager:
                 )
             except Exception as exc:
                 print(f"WARN CRMLeadManager update lead {existing_id}: {exc}")
+                resolved_stage_id = None
+
+            stage_label = stage_name or (
+                self._client.TEST_DRIVE_STAGE if resolved_stage_id else "(no stage)"
+            )
+            print(
+                f"[CRM] Lead updated ID: {int(existing_id)} -> Stage: {stage_label}"
+                + (f" (stage_id={resolved_stage_id})" if resolved_stage_id else "")
+            )
 
             fleet_meta = self._maybe_link_fleet(int(existing_id), payload)
             if fleet_meta is not None and physical_location:
@@ -408,6 +421,7 @@ class CRMLeadManager:
                 "tag_ids": list(tag_ids),
                 "fleet": fleet_meta,
                 "stage_name": stage_name or None,
+                "stage_id": resolved_stage_id,
                 "salesperson_preserved": True,
                 "dry_run": False,
             }
@@ -430,10 +444,7 @@ class CRMLeadManager:
             vals["medium_id"] = int(medium_id)
         if tag_ids:
             vals["tag_ids"] = [(6, 0, list(tag_ids))]
-        if stage_name:
-            stage_id = self._client._resolve_crm_stage_id(stage_name)
-            if stage_id is not None:
-                vals["stage_id"] = int(stage_id)
+        resolved_stage_id = self._apply_stage_id(vals, stage_name)
 
         assigned_user_id: int | None = None
         if assign_rr:
@@ -458,6 +469,13 @@ class CRMLeadManager:
         fleet_meta = self._maybe_link_fleet(int(lead_id), payload)
         if fleet_meta is not None and physical_location:
             fleet_meta = {**fleet_meta, "physical_location": physical_location}
+        stage_label = stage_name or (
+            self._client.TEST_DRIVE_STAGE if resolved_stage_id else "(no stage)"
+        )
+        print(
+            f"[CRM] Lead created ID: {int(lead_id)} -> Stage: {stage_label}"
+            + (f" (stage_id={resolved_stage_id})" if resolved_stage_id else "")
+        )
         print(
             f"CRMLeadManager created lead id={lead_id} branch={effective_branch} "
             f"team_id={team_id} physical_location={physical_location} "
@@ -481,6 +499,7 @@ class CRMLeadManager:
             "tag_ids": list(tag_ids),
             "fleet": fleet_meta,
             "stage_name": stage_name or None,
+            "stage_id": resolved_stage_id,
             "user_id": assigned_user_id,
             "dry_run": False,
         }
@@ -721,6 +740,25 @@ class CRMLeadManager:
             print(f"WARN CRMLeadManager fleet link lead={lead_id}: {exc}")
             return {"status": "error", "error": str(exc)}
 
+    def _apply_stage_id(
+        self,
+        vals: dict[str, Any],
+        stage_name: str,
+    ) -> int | None:
+        """Resolve and set ``stage_id``; never raise — omit field on failure."""
+        label = (stage_name or "").strip()
+        if not label:
+            return None
+        try:
+            stage_id = self._client._resolve_crm_stage_id(label)
+        except Exception as exc:
+            print(f"WARN CRMLeadManager stage resolve {label!r}: {exc}")
+            return None
+        if stage_id is None:
+            return None
+        vals["stage_id"] = int(stage_id)
+        return int(stage_id)
+
     @staticmethod
     def _build_description(
         *,
@@ -742,6 +780,15 @@ class CRMLeadManager:
             lines.append(f"Email: {email}")
         if channel:
             lines.append(f"Channel: {channel}")
+        appointment = str(
+            payload.get("appointment_date")
+            or payload.get("appointment")
+            or payload.get("cita")
+            or payload.get("preferred_visit")
+            or ""
+        ).strip()
+        if appointment:
+            lines.append(f"Appointment: {appointment}")
         sku = str(payload.get("sku") or payload.get("autosell_id") or "").strip()
         if sku:
             lines.append(f"SKU: {sku}")

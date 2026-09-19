@@ -177,7 +177,7 @@ class TestCRMLeadManagerLiveMocked(unittest.TestCase):
                 return [1]
             if model == "crm.stage" and method == "search_read":
                 name = args[0][0][2] if args and args[0] else "Stage"
-                return [{"id": 15, "name": name}]
+                return [{"id": 15, "name": "Cita/Prueba de manejo"}]
             raise AssertionError(f"unexpected {model}.{method}")
 
         return execute_kw, created, writes, utm_ids
@@ -333,7 +333,7 @@ class TestCRMLeadManagerLiveMocked(unittest.TestCase):
                 return 99
             if model == "crm.stage" and method == "search_read":
                 stages.append(args)
-                return [{"id": 15, "name": "Cita Agendada"}]
+                return [{"id": 15, "name": "Cita/Prueba de manejo"}]
             return execute_kw(db, uid, key, model, method, args, kwargs)
 
         models.execute_kw.side_effect = wrapped
@@ -350,7 +350,8 @@ class TestCRMLeadManagerLiveMocked(unittest.TestCase):
                     "lead_id": 1937,
                     "vehicle_info": "CX-5",
                     "notes": "Cita outbound",
-                    "stage_name": "Cita Agendada",
+                    "appointment_date": "viernes 16:00",
+                    "stage_name": "Cita/Prueba de manejo",
                     "assign_round_robin": True,
                     "preserve_salesperson": True,
                     "opportunity_name": "Llamada Paulina - Marco",
@@ -364,7 +365,8 @@ class TestCRMLeadManagerLiveMocked(unittest.TestCase):
         self.assertTrue(writes)
         write_vals = writes[0][1]
         self.assertNotIn("user_id", write_vals)
-        self.assertNotIn("description", write_vals)
+        self.assertIn("description", write_vals)
+        self.assertIn("Appointment: viernes 16:00", write_vals["description"])
         self.assertEqual(write_vals.get("stage_id"), 15)
         self.assertTrue(stages)
 
@@ -379,18 +381,22 @@ class TestCRMLeadManagerLiveMocked(unittest.TestCase):
             result = mgr.create_or_update_lead(
                 {
                     "client_name": "Nueva",
-                    "phone": "6142223333",
+                    "phone": "614-222-3333",
                     "vehicle_info": "Sentra",
                     "opportunity_name": "Llamada Paulina - Nueva",
                     "assign_round_robin": True,
-                    "stage_name": "Cita Agendada",
+                    "stage_name": "Cita/Prueba de manejo",
+                    "appointment_date": "mañana 11:00",
                     "channel": "Voice",
                 }
             )
         self.assertEqual(result["status"], "created")
         self.assertFalse(result["deduplicated"])
         self.assertEqual(created["vals"]["name"], "Llamada Paulina - Nueva")
+        self.assertEqual(created["vals"]["phone"], "6142223333")
+        self.assertIn("Appointment: mañana 11:00", created["vals"]["description"])
         self.assertEqual(created["vals"]["user_id"], 21)
+        self.assertEqual(created["vals"].get("stage_id"), 15)
 
     def test_fleet_linked_on_create(self):
         models = MagicMock()

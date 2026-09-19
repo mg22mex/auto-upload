@@ -86,10 +86,22 @@ class TestParse(unittest.TestCase):
         self.assertIn(("list_price", "<=", 900000.0), domain)
         self.assertIn(("name", "ilike", "2018"), domain)
         self.assertIn(("sale_ok", "=", True), domain)
+        self.assertIn(("active", "=", True), domain)
+        self.assertTrue(
+            any(
+                isinstance(term, (list, tuple))
+                and len(term) == 3
+                and term[1] == "in"
+                and "available" in term[2]
+                for term in domain
+            )
+        )
 
 
 class TestHandle(unittest.TestCase):
     def test_handle_with_mock_odoo(self):
+        import asyncio
+
         models = MagicMock()
         models.execute_kw.return_value = [
             {
@@ -103,24 +115,82 @@ class TestHandle(unittest.TestCase):
             "src.voice_gateway.vapi_bridge.connect_odoo",
             return_value=("db", 2, models, "key"),
         ):
-            resp = handle_inventory_payload(
-                {
-                    "message": {
-                        "toolCalls": [
-                            {
-                                "id": "tc1",
-                                "function": {
-                                    "arguments": '{"brand":"Mazda","max_price":400000}'
-                                },
-                            }
-                        ]
+            resp = asyncio.run(
+                handle_inventory_payload(
+                    {
+                        "message": {
+                            "toolCalls": [
+                                {
+                                    "id": "tc1",
+                                    "function": {
+                                        "arguments": '{"brand":"Mazda","max_price":400000}'
+                                    },
+                                }
+                            ]
+                        }
                     }
-                }
+                )
             )
         self.assertEqual(len(resp.results), 1)
         self.assertEqual(resp.results[0].toolCallId, "tc1")
         self.assertIn("CX5 Mazda 2020", resp.results[0].result)
-        models.execute_kw.assert_called_once()
+        models.execute_kw.assert_called()
+        call_kw = models.execute_kw.call_args
+        # execute_kw(db, uid, password, model, method, [domain], opts)
+        opts = call_kw.args[6] if len(call_kw.args) > 6 else call_kw.kwargs
+        self.assertEqual(opts["limit"], 3)
+        self.assertNotIn("qty_available", opts["fields"])
+        self.assertNotIn("categ_id", opts["fields"])
+
+    def test_inventory_timeout_fallback(self):
+        import asyncio
+
+        from src.voice_gateway import vapi_bridge as vb
+
+        def _slow(_args):
+            import time
+
+            time.sleep(0.2)
+            return []
+
+        with (
+            patch.object(vb, "INVENTORY_TIMEOUT_SEC", 0.05),
+            patch.object(vb, "_search_inventory_blocking", side_effect=_slow),
+        ):
+            resp = asyncio.run(
+                handle_inventory_payload({"brand": "Mazda", "max_price": 400000})
+            )
+        text = resp.results[0].result.lower()
+        self.assertIn("no se pudo conectar", text)
+        self.assertIn("whatsapp", text)
+        self.assertIn("cita", text)
+
+    def test_inventory_cache_hit_skips_odoo(self):
+        import asyncio
+        import time
+
+        from src.odoo_sync import inventory as inv
+        from src.voice_gateway import vapi_bridge as vb
+
+        inv.cache_clear()
+        rows = [
+            {
+                "id": 1,
+                "name": "Toyota RAV4 2021",
+                "list_price": 389000.0,
+                "default_code": "rav1",
+            }
+        ]
+        key = inv.cache_key(brand="RAV4", max_price=None, year=None, limit=3)
+        inv.cache_set(key, rows)
+
+        with patch.object(vb, "_search_inventory_blocking") as blocking:
+            t0 = time.perf_counter()
+            resp = asyncio.run(handle_inventory_payload({"brand": "RAV4"}))
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+        blocking.assert_not_called()
+        self.assertIn("RAV4", resp.results[0].result)
+        self.assertLess(elapsed_ms, 50)
 
 
 class TestFinancing(unittest.TestCase):
@@ -230,7 +300,7 @@ class TestLead(unittest.TestCase):
         self.assertIn("Financiamiento:", payload["description"])
         self.assertIn("Cita preferida:", payload["description"])
         self.assertTrue(payload["opportunity_name"].startswith("Llamada Paulina - "))
-        self.assertEqual(payload["stage_name"], "Cita Agendada")
+        self.assertEqual(payload["stage_name"], "Cita/Prueba de manejo")
         self.assertTrue(payload["assign_round_robin"])
         self.assertTrue(payload["preserve_salesperson"])
         manager.odoo.execute_kw.assert_not_called()

@@ -447,7 +447,7 @@ Standalone FastAPI app: `src/voice_gateway/vapi_bridge.py` — Riley tools:
 
 | Route | Role |
 |-------|------|
-| `POST /vapi/inventory` | Odoo `product.template` search |
+| `POST /vapi/inventory` | Odoo `product.template` search (available only, `limit=3`, **2.0s** timeout fallback + 15m TTL cache) |
 | `POST /vapi/financing` | Local Scotiabank-calibrated amortization |
 | `POST /vapi/tradein` | Autométrica Valor Compra estimate |
 | `POST /vapi/lead` | CRM upsert (`lead_id` / phone dedupe) → stage `Cita Agendada` → **background** Evolution WhatsApp confirmation |

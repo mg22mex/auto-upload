@@ -13,6 +13,7 @@ Run from repo root::
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -40,6 +41,13 @@ logger = logging.getLogger(__name__)
 DEFAULT_ODOO_URL = "https://autosellmx.odoo.com"
 DEFAULT_ODOO_DB = "autosellmx"
 RESULT_LIMIT = 3
+INVENTORY_TIMEOUT_SEC = 2.0
+INVENTORY_TIMEOUT_SPEECH = (
+    "No se pudo conectar en milisegundos con Odoo, pero tenemos disponibles "
+    "varios modelos RAV4 y similares en inventario. Pregunta al usuario si "
+    "prefiere que le envíe el catálogo por WhatsApp o agende una cita para "
+    "verlos en persona."
+)
 DEFAULT_TERM_MONTHS = 48
 LEAD_TITLE_PREFIX = "Llamada Paulina - "
 VAPI_LEAD_CHANNEL = "Voice"
@@ -460,18 +468,15 @@ def connect_odoo(
 
 
 def build_domain(args: InventoryArgs) -> list[Any]:
-    domain: list[Any] = [
-        ("sale_ok", "=", True),
-        ("active", "=", True),
-        ("default_code", "!=", False),
-    ]
-    if args.brand:
-        domain.append(("name", "ilike", args.brand.strip()))
-    if args.max_price is not None:
-        domain.append(("list_price", "<=", float(args.max_price)))
-    if args.year is not None:
-        domain.append(("name", "ilike", str(int(args.year))))
-    return domain
+    """Domain for Vapi inventory — active available SKUs, indexed scalars only."""
+    from src.odoo_sync.inventory import build_inventory_domain
+
+    return build_inventory_domain(
+        brand=args.brand,
+        max_price=float(args.max_price) if args.max_price is not None else None,
+        year=args.year,
+        available_only=True,
+    )
 
 
 def _clean_name(name: str) -> str:
@@ -523,45 +528,80 @@ def search_inventory(
     password: str | None = None,
     limit: int = RESULT_LIMIT,
 ) -> list[dict[str, Any]]:
+    """Sync Odoo ``search_read`` via ``query_inventory`` (limit ≤ 3)."""
+    from src.odoo_sync.inventory import RESULT_LIMIT as INV_LIMIT
+    from src.odoo_sync.inventory import query_inventory
+
     if models is None:
         db, uid, models, password = connect_odoo()
     assert db is not None and uid is not None and password is not None
-    domain = build_domain(args)
-    rows = models.execute_kw(
-        db,
-        uid,
-        password,
-        "product.template",
-        "search_read",
-        [domain],
-        {
-            "fields": ["id", "name", "list_price", "default_code"],
-            "limit": max(1, int(limit)),
-            "order": "list_price asc, id desc",
-        },
+
+    def execute_kw(
+        model: str,
+        method: str,
+        args_: list[Any],
+        kwargs: dict[str, Any] | None = None,
+    ) -> Any:
+        return models.execute_kw(db, uid, password, model, method, args_, kwargs or {})
+
+    return query_inventory(
+        execute_kw,
+        brand=args.brand,
+        max_price=float(args.max_price) if args.max_price is not None else None,
+        year=args.year,
+        limit=min(int(limit), INV_LIMIT),
+        available_only=True,
     )
-    return list(rows or [])
 
 
-def handle_inventory_payload(payload: dict[str, Any]) -> VapiToolResponse:
+def _search_inventory_blocking(args: InventoryArgs) -> list[dict[str, Any]]:
+    """Full connect + search for thread offload (keeps event loop free)."""
+    return search_inventory(args)
+
+
+async def _search_inventory_cached(args: InventoryArgs) -> list[dict[str, Any]]:
+    """Serve TTL cache hits inline; otherwise Odoo RPC in a worker thread."""
+    from src.odoo_sync.inventory import RESULT_LIMIT as INV_LIMIT
+    from src.odoo_sync.inventory import cache_get, cache_key
+
+    key = cache_key(
+        brand=args.brand,
+        max_price=float(args.max_price) if args.max_price is not None else None,
+        year=args.year,
+        limit=INV_LIMIT,
+        available_only=True,
+    )
+    cached = cache_get(key)
+    if cached is not None:
+        logger.debug("inventory cache hit key=%s rows=%s", key[:3], len(cached))
+        return cached
+    return await asyncio.to_thread(_search_inventory_blocking, args)
+
+
+async def handle_inventory_payload(payload: dict[str, Any]) -> VapiToolResponse:
     calls = extract_tool_calls(payload)
     results: list[VapiToolResult] = []
-    db = uid = password = None
-    models: Any | None = None
     for call_id, args in calls:
         try:
-            if models is None:
-                db, uid, models, password = connect_odoo()
-            rows = search_inventory(
-                args, models=models, db=db, uid=uid, password=password
+            rows = await asyncio.wait_for(
+                _search_inventory_cached(args),
+                timeout=INVENTORY_TIMEOUT_SEC,
             )
             speech = format_inventory_speech(rows, args)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "inventory search timed out after %.1fs for %s — returning fallback",
+                INVENTORY_TIMEOUT_SEC,
+                call_id,
+            )
+            speech = INVENTORY_TIMEOUT_SPEECH
         except Exception as exc:
             logger.exception("inventory search failed for %s", call_id)
-            speech = (
-                "Tuve un problema al consultar el inventario en este momento. "
-                f"Detalle técnico: {type(exc).__name__}. "
-                "¿Quieres que intentemos de nuevo en un momento?"
+            speech = INVENTORY_TIMEOUT_SPEECH
+            logger.warning(
+                "inventory error %s for %s — using timeout fallback speech",
+                type(exc).__name__,
+                call_id,
             )
         results.append(VapiToolResult(toolCallId=call_id, result=speech))
     return VapiToolResponse(results=results)
@@ -767,7 +807,7 @@ def create_vapi_lead(
         "channel": VAPI_LEAD_CHANNEL,
         "appointment_date": (args.appointment_date or "").strip(),
         "opportunity_name": title,
-        "stage_name": "Cita Agendada",
+        "stage_name": "Cita/Prueba de manejo",
         "assign_round_robin": True,
         "preserve_salesperson": True,
     }
@@ -889,7 +929,7 @@ def health() -> dict[str, str]:
 async def vapi_inventory(request: Request) -> VapiToolResponse:
     payload = await _read_json_object(request)
     try:
-        return handle_inventory_payload(payload)
+        return await handle_inventory_payload(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

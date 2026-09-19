@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -450,6 +450,36 @@ class TestArchiveOrphans(unittest.TestCase):
         )
 
 
+class TestCrmStageResolve(unittest.TestCase):
+    def test_appointment_stage_or_search(self):
+        models = MagicMock()
+
+        def execute_kw(db, uid, key, model, method, args, kwargs=None):
+            if model == "crm.stage" and method == "search_read":
+                domain = args[0]
+                # First exact label miss
+                if domain and domain[0] == ("name", "ilike", "Cita/Prueba de manejo"):
+                    return []
+                # OR domain for Cita | Prueba de manejo
+                if domain and domain[0] == "|":
+                    return [{"id": 15, "name": "Cita/Prueba de manejo"}]
+                return []
+            raise AssertionError(f"unexpected {model}.{method}")
+
+        models.execute_kw.side_effect = execute_kw
+        client = _mock_client(models)
+        stage_id = client._resolve_crm_stage_id("Cita/Prueba de manejo")
+        self.assertEqual(stage_id, 15)
+
+    def test_appointment_stage_fallback_id_2(self):
+        models = MagicMock()
+        models.execute_kw.return_value = []
+        client = _mock_client(models)
+        with patch.dict("os.environ", {"ODOO_CRM_CITA_STAGE_ID": "2"}):
+            stage_id = client._resolve_crm_stage_id("Cita Agendada")
+        self.assertEqual(stage_id, 2)
+
+
 class TestVehicleInventory(unittest.TestCase):
     def test_formats_vehicle_matches(self):
         models = MagicMock()
@@ -458,8 +488,7 @@ class TestVehicleInventory(unittest.TestCase):
                 "id": 638,
                 "name": "MAZDA CX3 2020",
                 "list_price": 289000.0,
-                "qty_available": 1.0,
-                "categ_id": [8, "vehiculos"],
+                "default_code": "obj638",
             }
         ]
         client = _mock_client(models)
@@ -467,34 +496,33 @@ class TestVehicleInventory(unittest.TestCase):
 
         vehicles = client.search_vehicle_inventory("Mazda")
 
-        self.assertEqual(
-            vehicles,
-            [
-                {
-                    "id": 638,
-                    "name": "MAZDA CX3 2020",
-                    "list_price": 289000.0,
-                    "qty_available": 1.0,
-                    "categ_id": 8,
-                    "category_name": "vehiculos",
-                }
-            ],
-        )
+        self.assertEqual(len(vehicles), 1)
+        self.assertEqual(vehicles[0]["id"], 638)
+        self.assertEqual(vehicles[0]["name"], "MAZDA CX3 2020")
+        self.assertEqual(vehicles[0]["list_price"], 289000.0)
+        self.assertEqual(vehicles[0]["default_code"], "obj638")
         domain = models.execute_kw.call_args.args[5][0]
         self.assertIn(("name", "ilike", "Mazda"), domain)
-        self.assertIn(("categ_id.name", "ilike", "vehicul"), domain)
+        self.assertIn(("active", "=", True), domain)
+        self.assertIn(("sale_ok", "=", True), domain)
+        opts = models.execute_kw.call_args.args[6]
+        self.assertEqual(opts["limit"], 3)
+        self.assertNotIn("categ_id", opts["fields"])
+        self.assertNotIn("qty_available", opts["fields"])
 
-    def test_falls_back_to_all_categories(self):
+    def test_soft_fallback_when_state_field_missing(self):
         models = MagicMock()
         models.execute_kw.side_effect = [
-            [],
+            Exception("Invalid field x_studio_state"),
+            Exception("Invalid field x_studio_estatus"),
+            Exception("Invalid field x_vehicle_state"),
+            Exception("Invalid field state"),
             [
                 {
                     "id": 10,
                     "name": "Mazda",
                     "list_price": 1.0,
-                    "qty_available": 0.0,
-                    "categ_id": False,
+                    "default_code": "m1",
                 }
             ],
         ]
@@ -503,8 +531,15 @@ class TestVehicleInventory(unittest.TestCase):
         vehicles = client.search_vehicle_inventory("Mazda")
 
         self.assertEqual(len(vehicles), 1)
-        self.assertIsNone(vehicles[0]["categ_id"])
-        self.assertEqual(models.execute_kw.call_count, 2)
+        self.assertEqual(vehicles[0]["id"], 10)
+        self.assertGreaterEqual(models.execute_kw.call_count, 2)
+        final_domain = models.execute_kw.call_args.args[5][0]
+        self.assertFalse(
+            any(
+                isinstance(t, (list, tuple)) and len(t) == 3 and t[1] == "in"
+                for t in final_domain
+            )
+        )
 
 
 class TestRoundRobin(unittest.TestCase):
