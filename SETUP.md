@@ -473,18 +473,20 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now vapi-bridge
 curl -fsS http://127.0.0.1:8000/health
 
-# Tunnel (ephemeral URL — check journal after start):
-sudo cp deploy/cloudflared-vapi-bridge.service /etc/systemd/system/
-# ensure cloudflared is at /usr/local/bin/cloudflared
-sudo systemctl enable --now cloudflared-vapi-bridge
-journalctl -u cloudflared-vapi-bridge -n 50 --no-pager | grep trycloudflare
+# Tunnel (ephemeral URL — check journal after start; use --user on this host):
+systemctl --user daemon-reload
+systemctl --user enable --now cloudflared-vapi-bridge
+journalctl --user -u cloudflared-vapi-bridge -n 50 --no-pager | grep trycloudflare
+
+# Unit forces --protocol http2 + --edge-ip-version 4 (TCP/IPv4; avoids QUIC/Wi-Fi flaps).
+# Stable hostname (vapi.autosell.mx): see deploy/cloudflared-named-tunnel.md
 
 # Vapi Dashboard tool server URL:
 #   https://<id>.trycloudflare.com/vapi/inventory
 ```
 
-Foreground tunnel (no systemd): `cloudflared tunnel --url http://127.0.0.1:8000`
-```
+Foreground tunnel (no systemd):  
+`cloudflared tunnel --no-autoupdate --protocol http2 --edge-ip-version 4 --url http://127.0.0.1:8000`
 
 **Ops:**
 

@@ -6,7 +6,10 @@ Requires=vapi-bridge.service
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8000
+# Force HTTP/2 over TCP — avoids QUIC/UDP Wi-Fi flaps mid-call.
+# Ephemeral trycloudflare.com URL is printed to the journal on start.
+# Named tunnel (stable host): see deploy/cloudflared-named-tunnel.md
+ExecStart=%h/.local/bin/cloudflared tunnel --no-autoupdate --protocol http2 --edge-ip-version 4 --url http://127.0.0.1:8000
 Restart=always
 RestartSec=5
 TimeoutStopSec=20

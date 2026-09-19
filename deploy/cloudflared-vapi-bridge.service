@@ -10,9 +10,11 @@ Type=simple
 User=root
 Group=root
 
+# Force HTTP/2 over TCP — QUIC/UDP flaps on Wi-Fi caused mid-call drops.
 # Ephemeral trycloudflare.com URL is printed to the journal on start.
-# For a stable hostname, replace with a named tunnel + config.yml.
-ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8000
+# For a stable hostname, replace with a named tunnel + config.yml
+# (see deploy/cloudflared-named-tunnel.md).
+ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate --protocol http2 --edge-ip-version 4 --url http://127.0.0.1:8000
 
 Restart=always
 RestartSec=5
