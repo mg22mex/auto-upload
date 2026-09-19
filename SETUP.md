@@ -473,15 +473,21 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now vapi-bridge
 curl -fsS http://127.0.0.1:8000/health
 
-# Tunnel (ephemeral URL — check journal after start; use --user on this host):
+# Tunnel — prefer named (stable https://vapi.autosell.mx); else quick tunnel:
+
+# Named (after cloudflared tunnel login + create + DNS route):
+#   see deploy/cloudflared-named-tunnel.md
+#   systemctl --user restart cloudflared-vapi-bridge
+#   Vapi base URL: https://vapi.autosell.mx
+
+# Quick tunnel fallback (ephemeral URL; forces HTTP/2 + IPv4):
 systemctl --user daemon-reload
 systemctl --user enable --now cloudflared-vapi-bridge
-journalctl --user -u cloudflared-vapi-bridge -n 50 --no-pager | grep trycloudflare
+journalctl --user -u cloudflared-vapi-bridge -n 50 --no-pager | grep -E 'trycloudflare|protocol=|Registered'
 
-# Unit forces --protocol http2 + --edge-ip-version 4 (TCP/IPv4; avoids QUIC/Wi-Fi flaps).
-# Stable hostname (vapi.autosell.mx): see deploy/cloudflared-named-tunnel.md
-
-# Vapi Dashboard tool server URL:
+# Vapi Dashboard tool server URL (named):
+#   https://vapi.autosell.mx/vapi/inventory
+# Quick tunnel:
 #   https://<id>.trycloudflare.com/vapi/inventory
 ```
 

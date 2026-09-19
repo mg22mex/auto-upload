@@ -1,5 +1,5 @@
 [Unit]
-Description=Cloudflare quick tunnel for Autosell Vapi inventory bridge
+Description=Cloudflare named tunnel for Autosell Vapi inventory bridge
 Documentation=https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/
 After=network-online.target vapi-bridge.service
 Wants=network-online.target
@@ -10,11 +10,9 @@ Type=simple
 User=root
 Group=root
 
-# Force HTTP/2 over TCP — QUIC/UDP flaps on Wi-Fi caused mid-call drops.
-# Ephemeral trycloudflare.com URL is printed to the journal on start.
-# For a stable hostname, replace with a named tunnel + config.yml
-# (see deploy/cloudflared-named-tunnel.md).
-ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate --protocol http2 --edge-ip-version 4 --url http://127.0.0.1:8000
+# Named tunnel → https://vapi.autosell.mx
+# Requires /root/.cloudflared/config.yml + credentials (or run as user unit).
+ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate --protocol http2 --edge-ip-version 4 run vapi-bridge
 
 Restart=always
 RestartSec=5
