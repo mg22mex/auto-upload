@@ -43,10 +43,9 @@ DEFAULT_ODOO_DB = "autosellmx"
 RESULT_LIMIT = 3
 INVENTORY_TIMEOUT_SEC = 2.0
 INVENTORY_TIMEOUT_SPEECH = (
-    "No se pudo conectar en milisegundos con Odoo, pero tenemos disponibles "
-    "varios modelos RAV4 y similares en inventario. Pregunta al usuario si "
-    "prefiere que le envíe el catálogo por WhatsApp o agende una cita para "
-    "verlos en persona."
+    "El sistema de inventario tardó un momento en responder, pero tenemos "
+    "varias unidades en inventario. ¿Te gustaría que agendemos una prueba "
+    "de manejo o te envíe la lista por WhatsApp?"
 )
 DEFAULT_TERM_MONTHS = 48
 LEAD_TITLE_PREFIX = "Llamada Paulina - "

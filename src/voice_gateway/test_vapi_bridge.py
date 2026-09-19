@@ -161,9 +161,9 @@ class TestHandle(unittest.TestCase):
                 handle_inventory_payload({"brand": "Mazda", "max_price": 400000})
             )
         text = resp.results[0].result.lower()
-        self.assertIn("no se pudo conectar", text)
+        self.assertIn("tardó un momento", text)
         self.assertIn("whatsapp", text)
-        self.assertIn("cita", text)
+        self.assertIn("prueba de manejo", text)
 
     def test_inventory_cache_hit_skips_odoo(self):
         import asyncio
