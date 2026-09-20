@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_ODOO_URL = "https://autosellmx.odoo.com"
 DEFAULT_ODOO_DB = "autosellmx"
 RESULT_LIMIT = 3
-INVENTORY_TIMEOUT_SEC = 2.8
+INVENTORY_TIMEOUT_SEC = 1.5
 INVENTORY_TIMEOUT_SPEECH = (
     "El inventario tardó un momento. ¿Agendamos una prueba de manejo "
     "o te envío opciones por WhatsApp?"
@@ -461,15 +461,19 @@ def _extract_context_lead_id(payload: dict[str, Any]) -> int | None:
 def _parse_lead_dict(raw: dict[str, Any]) -> LeadArgs:
     name = raw.get("name") or raw.get("client_name") or raw.get("contact_name")
     phone = raw.get("phone") or raw.get("mobile") or raw.get("telefono")
-    vehicle = (
+    vehicle = _coerce_optional_str(
         raw.get("interested_vehicle")
         or raw.get("vehicle")
         or raw.get("vehicle_info")
         or raw.get("vehicle_name")
     )
-    financing = raw.get("financing_summary") or raw.get("financing") or raw.get("quote_summary")
-    tradein = raw.get("tradein_summary") or raw.get("trade_in_summary") or raw.get("tradein")
-    appointment = (
+    financing = _coerce_optional_str(
+        raw.get("financing_summary") or raw.get("financing") or raw.get("quote_summary")
+    )
+    tradein = _coerce_optional_str(
+        raw.get("tradein_summary") or raw.get("trade_in_summary") or raw.get("tradein")
+    )
+    appointment = _coerce_optional_str(
         raw.get("appointment_date")
         or raw.get("appointment")
         or raw.get("cita")
@@ -578,11 +582,15 @@ def _clean_name(name: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-# Catalog / Odoo title markers → physical lot (Beatriz must voice this to the caller).
+# Catalog / Odoo title markers → physical lot (Beatriz must voice this verbatim).
+# Marker ``-`` is internal consignación stock — never say "Consignación" to the caller.
 BRANCH_MARKER_LOCATION: dict[str, str] = {
     "*": "Lote Periférico",
     "+": "Lote San Felipe",
-    "-": "consignación (se puede traer a cualquier sucursal a solicitud)",
+    "-": (
+        "Disponible para entrega en la sucursal de tu preferencia "
+        "(Periférico o San Felipe)"
+    ),
 }
 
 
@@ -607,17 +615,36 @@ def branch_marker_from_title(title: str) -> str | None:
 
 
 def location_speech_for_title(title: str) -> str:
+    """Exact lot / delivery phrase for TTS — never 'Sucursal Autosell' or 'Consignación'."""
     marker = branch_marker_from_title(title)
     if marker is None:
-        return "ubicado: consultar disponibilidad en sucursal"
+        return "Ubicación: consultar disponibilidad en sucursal"
     place = BRANCH_MARKER_LOCATION[marker]
     if marker == "-":
-        return f"está en {place}"
-    return f"está en {place}"
+        return place  # already a full customer-facing sentence
+    return f"Ubicación: {place}"
+
+
+def branch_from_vehicle_title(title: str) -> tuple[str, str | None]:
+    """Map vehicle title marker/keywords → (crm branch key, physical_location label).
+
+    ``*`` / internal ``-`` stock → Periférico desk; ``+`` → San Felipe.
+    """
+    from src.config import BRANCH_LABELS, PRIMARY_BRANCH, branch_for_tag
+    from src.odoo_sync.crm import infer_physical_location
+
+    marker = branch_marker_from_title(title)
+    if marker:
+        key = branch_for_tag(marker)
+        return key, BRANCH_LABELS.get(key, "Periférico")
+    inferred = infer_physical_location(title)
+    if inferred:
+        return inferred, BRANCH_LABELS.get(inferred, "Periférico")
+    return PRIMARY_BRANCH, None
 
 
 def format_inventory_speech(rows: list[dict[str, Any]], args: InventoryArgs) -> str:
-    """Short TTS with explicit lot location for Beatriz."""
+    """Short TTS with explicit lot / delivery location for Beatriz."""
     label_parts = [p for p in (args.brand, args.model) if p]
     filter_txt = " ".join(p.strip().title() for p in label_parts) or "tu búsqueda"
     if args.year is not None:
@@ -629,7 +656,15 @@ def format_inventory_speech(rows: list[dict[str, Any]], args: InventoryArgs) -> 
             "¿Buscamos otra marca o presupuesto?"
         )
 
-    parts = [f"Tengo {number_to_words_es(len(rows))} para {filter_txt}."]
+    parts = [
+        f"Tengo {number_to_words_es(len(rows))} para {filter_txt}. "
+        "Di exactamente el nombre del lote cuando diga Ubicación "
+        "(Lote Periférico o Lote San Felipe). "
+        "Si la unidad dice que está disponible para entrega en la sucursal "
+        "de tu preferencia, y el cliente pregunta dónde está, ofrécele "
+        "llevarla a Lote Periférico o Lote San Felipe, la que le convenga. "
+        "No digas Sucursal Autosell."
+    ]
     for index, row in enumerate(rows, start=1):
         raw_name = str(row.get("name") or "Vehículo")
         name = _clean_name(raw_name)
@@ -914,11 +949,17 @@ def create_vapi_lead(
     *,
     manager: Any | None = None,
 ) -> dict[str, Any]:
-    """Upsert crm.lead: new → Paulina title + RR; existing → chatter + stage."""
+    """Upsert crm.lead: new → Paulina title + RR; existing → chatter + stage.
+
+    Branch / ``team_id`` comes from vehicle lot marker (``*`` Periférico,
+    ``+`` San Felipe, ``-`` consignación → Periférico desk) so Odoo Round Robin
+    assigns the correct branch seller.
+    """
     from src.odoo_sync.crm import CRMLeadManager
 
     crm = manager or CRMLeadManager()
     vehicle = (args.interested_vehicle or "").strip() or "Consulta general"
+    branch_key, physical_label = branch_from_vehicle_title(vehicle)
     notes = build_lead_notes(args)
     title = f"{LEAD_TITLE_PREFIX}{args.name.strip()}"[:128]
     payload: dict[str, Any] = {
@@ -930,16 +971,29 @@ def create_vapi_lead(
         "description": notes,
         "notes": notes,
         "channel": VAPI_LEAD_CHANNEL,
-        "appointment_date": (args.appointment_date or "").strip(),
+        "appointment_date": (args.appointment_date or "").strip() or None,
         "opportunity_name": title,
         "stage_name": "Cita/Prueba de manejo",
         "assign_round_robin": True,
         "preserve_salesperson": True,
     }
+    if physical_label:
+        payload["physical_location"] = physical_label
     if args.lead_id is not None:
         payload["lead_id"] = int(args.lead_id)
-    result = crm.create_or_update_lead(payload, branch="periferico")
+    logger.warning(
+        "crm-lead branch=%s physical_location=%s vehicle=%s",
+        branch_key,
+        physical_label,
+        vehicle[:80],
+    )
+    result = crm.create_or_update_lead(payload, branch=branch_key)
     return {**result, "opportunity_name": title}
+
+
+def _safe_optional_text(value: str | None) -> str | None:
+    """Coerce None / blank / literal 'null' → None for WA templates."""
+    return _coerce_optional_str(value)
 
 
 def dispatch_lead_whatsapp(
@@ -951,50 +1005,57 @@ def dispatch_lead_whatsapp(
     """Background-safe customer confirmation (never raises)."""
     from src.notifications.whatsapp import notify_lead_confirmation
 
+    vehicle = _safe_optional_text(args.interested_vehicle)
+    financing = _safe_optional_text(args.financing_summary)
+    tradein = _safe_optional_text(args.tradein_summary)
+    appointment = _safe_optional_text(args.appointment_date)
+
     missing = [
         field
         for field, value in (
-            ("interested_vehicle", args.interested_vehicle),
-            ("financing_summary", args.financing_summary),
-            ("tradein_summary", args.tradein_summary),
-            ("appointment_date", args.appointment_date),
+            ("interested_vehicle", vehicle),
+            ("financing_summary", financing),
+            ("tradein_summary", tradein),
+            ("appointment_date", appointment),
         )
-        if not (value or "").strip()
+        if not value
     ]
     if missing:
         logger.warning(
-            "customer WA queued with missing optional fields=%s name=%s phone=%s",
+            "dispatch_lead_whatsapp missing optional fields=%s name=%s phone=%s branch=%s",
             ",".join(missing),
             (args.name or "")[:40],
             (args.phone or "")[:20],
+            branch,
         )
     else:
         logger.warning(
-            "customer WA queued full payload name=%s phone=%s",
+            "dispatch_lead_whatsapp full payload name=%s phone=%s branch=%s",
             (args.name or "")[:40],
             (args.phone or "")[:20],
+            branch,
         )
 
     try:
         result = notify_lead_confirmation(
-            name=args.name,
-            phone=args.phone,
-            interested_vehicle=args.interested_vehicle,
-            financing_summary=args.financing_summary,
-            tradein_summary=args.tradein_summary,
-            appointment_date=args.appointment_date,
+            name=args.name or "",
+            phone=args.phone or "",
+            interested_vehicle=vehicle,
+            financing_summary=financing,
+            tradein_summary=tradein,
+            appointment_date=appointment,
             branch=branch,
             whatsapp_client=whatsapp_client,
         )
         logger.warning(
-            "customer WA result sent=%s skipped=%s error=%s",
+            "dispatch_lead_whatsapp result sent=%s skipped=%s error=%s",
             result.sent,
             result.skipped_reason,
             result.error,
         )
         return result.as_dict()
     except Exception as exc:
-        logger.exception("customer WhatsApp dispatch failed: %s", exc)
+        logger.exception("dispatch_lead_whatsapp failed: %s", exc)
         return {"sent": False, "error": str(exc)}
 
 

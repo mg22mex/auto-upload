@@ -49,11 +49,14 @@ class TestFormatters(unittest.TestCase):
         self.assertIn("Tengo", text)
         self.assertIn("pesos", text)
         self.assertIn("Mazda", text)
-        self.assertIn("Lote Periférico", text)
+        self.assertIn("Ubicación: Lote Periférico", text)
+        self.assertIn("No digas Sucursal Autosell", text)
+        self.assertNotIn("Consignación", text)
         self.assertNotIn("$", text)
 
     def test_location_markers(self):
         from src.voice_gateway.vapi_bridge import (
+            branch_from_vehicle_title,
             branch_marker_from_title,
             location_speech_for_title,
         )
@@ -63,11 +66,40 @@ class TestFormatters(unittest.TestCase):
         self.assertEqual(branch_marker_from_title("Sport - Mazda 2022"), "-")
         self.assertEqual(branch_marker_from_title("Cx 30 IGT *"), "*")
         self.assertIsNone(branch_marker_from_title("Corolla Toyota 2022"))
-        self.assertIn("San Felipe", location_speech_for_title("+ RAV4 Toyota 2021"))
-        self.assertIn("consignación", location_speech_for_title("Sport - Mazda 2022"))
+        self.assertEqual(
+            location_speech_for_title("+ RAV4 Toyota 2021"),
+            "Ubicación: Lote San Felipe",
+        )
+        dash = location_speech_for_title("Sport - Mazda 2022")
+        self.assertEqual(
+            dash,
+            "Disponible para entrega en la sucursal de tu preferencia "
+            "(Periférico o San Felipe)",
+        )
+        self.assertNotIn("Consignación", dash)
+        self.assertNotIn("consignación", dash)
         self.assertIn(
             "consultar disponibilidad",
             location_speech_for_title("Corolla Toyota 2022"),
+        )
+        speech = format_inventory_speech(
+            [{"name": "MX 5 I Sport - Mazda 2022", "list_price": 345000}],
+            InventoryArgs(brand="Mazda"),
+        )
+        self.assertIn("disponible para entrega", speech.lower())
+        self.assertIn("Lote Periférico o Lote San Felipe", speech)
+        self.assertNotIn("Consignación", speech)
+        self.assertEqual(
+            branch_from_vehicle_title("Cx5 * Mazda 2020"),
+            ("periferico", "Periférico"),
+        )
+        self.assertEqual(
+            branch_from_vehicle_title("+ RAV4 Toyota 2021")[0],
+            "san_felipe",
+        )
+        self.assertEqual(
+            branch_from_vehicle_title("Sport - Mazda 2022")[0],
+            "periferico",
         )
 
 
@@ -371,6 +403,10 @@ class TestLead(unittest.TestCase):
         self.assertIn("Cita registrada", resp.results[0].result)
         manager.create_or_update_lead.assert_called_once()
         payload = manager.create_or_update_lead.call_args.args[0]
+        branch_arg = manager.create_or_update_lead.call_args.kwargs.get("branch")
+        if branch_arg is None and len(manager.create_or_update_lead.call_args.args) > 1:
+            branch_arg = manager.create_or_update_lead.call_args.args[1]
+        self.assertEqual(branch_arg, "periferico")
         self.assertIn("Financiamiento:", payload["description"])
         self.assertIn("Cita preferida:", payload["description"])
         self.assertTrue(payload["opportunity_name"].startswith("Llamada Paulina - "))
@@ -383,6 +419,41 @@ class TestLead(unittest.TestCase):
         self.assertEqual(wa_args.args[0], "526149876543")
         self.assertIn("Juan Pérez", wa_args.args[1])
         self.assertIn("Mazda CX-5 2020", wa_args.args[1])
+
+    def test_create_lead_san_felipe_branch_from_marker(self):
+        from src.voice_gateway.vapi_bridge import handle_lead_payload
+
+        manager = MagicMock()
+        manager.create_or_update_lead.return_value = {
+            "status": "created",
+            "lead_id": 77,
+            "branch": "san_felipe",
+            "team_id": 5,
+            "dry_run": False,
+        }
+        wa = MagicMock()
+        handle_lead_payload(
+            {
+                "name": "Ana",
+                "phone": "6141112222",
+                "interested_vehicle": "+ RAV4 Toyota 2021",
+                "appointment_date": "hoy 17",
+                "financing_summary": None,
+                "tradein_summary": None,
+            },
+            manager=manager,
+            whatsapp_client=wa,
+        )
+        payload = manager.create_or_update_lead.call_args.args[0]
+        branch_arg = manager.create_or_update_lead.call_args.kwargs.get(
+            "branch",
+            manager.create_or_update_lead.call_args.args[1]
+            if len(manager.create_or_update_lead.call_args.args) > 1
+            else None,
+        )
+        self.assertEqual(branch_arg, "san_felipe")
+        self.assertEqual(payload.get("physical_location"), "San Felipe")
+        wa.send_text_message.assert_called_once()
 
     def test_update_existing_lead_by_id(self):
         from src.voice_gateway.vapi_bridge import handle_lead_payload
@@ -472,7 +543,7 @@ class TestLead(unittest.TestCase):
         warned = [
             c
             for c in log.warning.call_args_list
-            if c.args and "customer WA queued with missing optional fields" in str(c.args[0])
+            if c.args and "dispatch_lead_whatsapp missing optional fields" in str(c.args[0])
         ]
         self.assertTrue(warned)
         blob = " ".join(str(a) for a in warned[0].args)

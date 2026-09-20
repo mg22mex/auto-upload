@@ -546,6 +546,34 @@ class CRMLeadManager:
                 "source": "payload"
             }
 
+        # Lot markers in vehicle title (* Periférico / + San Felipe / - consignación).
+        # Keep detection local — do not import voice_gateway (FastAPI) from CRM.
+        vehicle_title = str(
+            payload.get("vehicle_info")
+            or payload.get("vehicle_name")
+            or payload.get("interested_vehicle")
+            or ""
+        ).strip()
+        if vehicle_title:
+            from src.config import BRANCH_TAG_MAP
+
+            marker = None
+            text = vehicle_title
+            if text[:1] in BRANCH_TAG_MAP:
+                marker = text[0]
+            elif text[-1:] in BRANCH_TAG_MAP:
+                marker = text[-1]
+            else:
+                for candidate in ("*", "+", "-"):
+                    if f" {candidate} " in f" {text} ":
+                        marker = candidate
+                        break
+            if marker and marker in BRANCH_TAG_MAP:
+                return BRANCH_TAG_MAP[marker], {"source": "vehicle_title_marker"}
+            inferred = infer_physical_location(vehicle_title)
+            if inferred:
+                return inferred, {"source": "vehicle_title_keyword"}
+
         if not (vin or plate or fleet_vehicle_id is not None):
             return None, None
 

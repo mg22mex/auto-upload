@@ -70,10 +70,10 @@ def format_lead_confirmation(
         "",
     ]
 
-    vehicle = (interested_vehicle or "").strip()
-    financing = (financing_summary or "").strip()
-    tradein = (tradein_summary or "").strip()
-    appointment = (appointment_date or "").strip()
+    vehicle = (interested_vehicle or "").strip() if interested_vehicle else ""
+    financing = (financing_summary or "").strip() if financing_summary else ""
+    tradein = (tradein_summary or "").strip() if tradein_summary else ""
+    appointment = (appointment_date or "").strip() if appointment_date else ""
 
     if vehicle:
         lines.append(f"📌 Vehículo de interés: {vehicle}")

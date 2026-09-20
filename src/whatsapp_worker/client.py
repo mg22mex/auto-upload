@@ -182,11 +182,15 @@ class WhatsAppWorkerClient:
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
-            # Evolution uses apikey; open-wa often Authorization Bearer / x-api-key
+            # Evolution accepts ``apikey``; some proxies / older builds also
+            # check Authorization / x-api-key — send all for reliability.
             if self.provider == "openwa":
                 headers["Authorization"] = f"Bearer {self.api_key}"
+                headers["x-api-key"] = self.api_key
             else:
                 headers["apikey"] = self.api_key
+                headers["Authorization"] = f"Bearer {self.api_key}"
+                headers["x-api-key"] = self.api_key
         return headers
 
     def _require_config(self) -> None:
@@ -232,8 +236,11 @@ class WhatsAppWorkerClient:
         if self.api_key:
             if self.provider == "openwa":
                 headers["Authorization"] = f"Bearer {self.api_key}"
+                headers["x-api-key"] = self.api_key
             else:
                 headers["apikey"] = self.api_key
+                headers["Authorization"] = f"Bearer {self.api_key}"
+                headers["x-api-key"] = self.api_key
         with pdf_path.open("rb") as handle:
             files = {file_field: (pdf_path.name, handle, mime)}
             resp = self._session.post(
