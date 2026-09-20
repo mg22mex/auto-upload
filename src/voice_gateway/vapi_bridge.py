@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import threading
 import xmlrpc.client
 from decimal import Decimal
 from pathlib import Path
@@ -42,11 +43,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_ODOO_URL = "https://autosellmx.odoo.com"
 DEFAULT_ODOO_DB = "autosellmx"
 RESULT_LIMIT = 3
-INVENTORY_TIMEOUT_SEC = 2.0
+INVENTORY_TIMEOUT_SEC = 2.8
 INVENTORY_TIMEOUT_SPEECH = (
-    "El sistema de inventario tardó un momento en responder, pero tenemos "
-    "varias unidades en inventario. ¿Te gustaría que agendemos una prueba "
-    "de manejo o te envíe la lista por WhatsApp?"
+    "El inventario tardó un momento. ¿Agendamos una prueba de manejo "
+    "o te envío opciones por WhatsApp?"
 )
 DEFAULT_TERM_MONTHS = 48
 LEAD_TITLE_PREFIX = "Llamada Paulina - "
@@ -63,6 +63,7 @@ T = TypeVar("T")
 
 class InventoryArgs(BaseModel):
     brand: str | None = None
+    model: str | None = None
     max_price: float | None = Field(default=None, ge=0)
     year: int | None = Field(default=None, ge=1950, le=2100)
 
@@ -352,6 +353,7 @@ def _parse_inventory_dict(raw: dict[str, Any]) -> InventoryArgs:
     brand = _coerce_optional_str(
         raw.get("brand") or raw.get("make") or raw.get("marca")
     )
+    model = _coerce_optional_str(raw.get("model") or raw.get("modelo"))
     max_price_raw = raw.get("max_price")
     if max_price_raw is None:
         max_price_raw = raw.get("precio_max")
@@ -365,6 +367,7 @@ def _parse_inventory_dict(raw: dict[str, Any]) -> InventoryArgs:
     try:
         return InventoryArgs(
             brand=brand,
+            model=model,
             max_price=_coerce_optional_float(max_price_raw),
             year=_coerce_optional_year(year_raw),
         )
@@ -493,7 +496,7 @@ def extract_tool_calls(payload: dict[str, Any]) -> list[tuple[str, InventoryArgs
     return extract_typed_tool_calls(
         payload,
         parser=_parse_inventory_dict,
-        flat_keys=("brand", "make", "marca", "max_price", "year", "anio", "año"),
+        flat_keys=("brand", "make", "marca", "model", "modelo", "max_price", "year", "anio", "año"),
     )
 
 
@@ -513,13 +516,20 @@ def _odoo_settings() -> dict[str, str]:
     return {"url": url, "db": db, "user": user, "password": password}
 
 
+_odoo_conn_lock = threading.Lock()
+_odoo_conn_cache: tuple[str, int, Any, str] | None = None
+
+
 def connect_odoo(
     *,
     url: str | None = None,
     db: str | None = None,
     user: str | None = None,
     password: str | None = None,
+    force_refresh: bool = False,
 ) -> tuple[str, int, Any, str]:
+    """Authenticate once per process; reuse uid/proxies for inventory latency."""
+    global _odoo_conn_cache
     cfg = _odoo_settings()
     url = (url or cfg["url"]).rstrip("/")
     db = db or cfg["db"]
@@ -530,12 +540,16 @@ def connect_odoo(
             "Missing Odoo env: need ODOO_URL, ODOO_DB, "
             "ODOO_USER|ODOO_USERNAME, and ODOO_PASS|ODOO_PASSWORD|ODOO_API_KEY"
         )
-    common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common", allow_none=True)
-    uid = common.authenticate(db, user, password, {})
-    if not uid:
-        raise RuntimeError("Odoo authenticate failed (check DB/user/API key)")
-    models = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object", allow_none=True)
-    return db, int(uid), models, password
+    with _odoo_conn_lock:
+        if _odoo_conn_cache is not None and not force_refresh:
+            return _odoo_conn_cache
+        common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common", allow_none=True)
+        uid = common.authenticate(db, user, password, {})
+        if not uid:
+            raise RuntimeError("Odoo authenticate failed (check DB/user/API key)")
+        models = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object", allow_none=True)
+        _odoo_conn_cache = (db, int(uid), models, password)
+        return _odoo_conn_cache
 
 
 def build_domain(args: InventoryArgs) -> list[Any]:
@@ -544,6 +558,7 @@ def build_domain(args: InventoryArgs) -> list[Any]:
 
     return build_inventory_domain(
         brand=args.brand,
+        model=args.model,
         max_price=float(args.max_price) if args.max_price is not None else None,
         year=args.year,
         available_only=True,
@@ -557,36 +572,24 @@ def _clean_name(name: str) -> str:
 
 
 def format_inventory_speech(rows: list[dict[str, Any]], args: InventoryArgs) -> str:
-    filters: list[str] = []
-    if args.brand:
-        filters.append(args.brand.strip().title())
+    """Short TTS — keep under Vapi tool-timeout budget."""
+    label_parts = [p for p in (args.brand, args.model) if p]
+    filter_txt = " ".join(p.strip().title() for p in label_parts) or "tu búsqueda"
     if args.year is not None:
-        filters.append(f"año {number_to_words_es(int(args.year))}")
-    if args.max_price is not None:
-        filters.append(f"hasta {format_price_voice_es(float(args.max_price))}")
-    filter_txt = ", ".join(filters) if filters else "tu búsqueda"
+        filter_txt = f"{filter_txt} {int(args.year)}".strip()
 
     if not rows:
         return (
-            f"No encontré vehículos disponibles para {filter_txt} en este momento. "
-            "¿Quieres que busque con otro presupuesto o marca?"
+            f"No encontré {filter_txt} disponible ahora. "
+            "¿Buscamos otra marca o presupuesto?"
         )
 
-    parts: list[str] = []
-    n = len(rows)
-    if n == 1:
-        parts.append(f"Encontré una opción para {filter_txt}.")
-    else:
-        parts.append(f"Encontré {number_to_words_es(n)} opciones para {filter_txt}.")
+    parts = [f"Tengo {number_to_words_es(len(rows))} para {filter_txt}."]
     for index, row in enumerate(rows, start=1):
         name = _clean_name(str(row.get("name") or "Vehículo"))
         price = format_price_voice_es(float(row.get("list_price") or 0))
-        sku = str(row.get("default_code") or "").strip()
-        sku_bit = f", código {sku}" if sku else ""
-        parts.append(
-            f"Opción {number_to_words_es(index)}: {name}, a {price}{sku_bit}."
-        )
-    parts.append("¿Te interesa alguna de estas opciones?")
+        parts.append(f"{number_to_words_es(index)}: {name}, {price}.")
+    parts.append("¿Cuál te interesa?")
     return " ".join(parts)
 
 
@@ -618,6 +621,7 @@ def search_inventory(
     return query_inventory(
         execute_kw,
         brand=args.brand,
+        model=args.model,
         max_price=float(args.max_price) if args.max_price is not None else None,
         year=args.year,
         limit=min(int(limit), INV_LIMIT),
@@ -637,6 +641,7 @@ async def _search_inventory_cached(args: InventoryArgs) -> list[dict[str, Any]]:
 
     key = cache_key(
         brand=args.brand,
+        model=args.model,
         max_price=float(args.max_price) if args.max_price is not None else None,
         year=args.year,
         limit=INV_LIMIT,

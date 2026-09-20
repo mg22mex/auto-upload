@@ -46,9 +46,9 @@ class TestFormatters(unittest.TestCase):
             [{"name": "CX5 * Mazda 2020", "list_price": 369000, "default_code": "obj705"}],
             InventoryArgs(brand="Mazda", max_price=400000),
         )
-        self.assertIn("Opción uno", text)
+        self.assertIn("Tengo", text)
         self.assertIn("pesos", text)
-        self.assertIn("obj705", text)
+        self.assertIn("Mazda", text)
         self.assertNotIn("$", text)
 
 
@@ -114,8 +114,11 @@ class TestParse(unittest.TestCase):
         self.assertIsNone(args.max_price)
 
     def test_domain(self):
-        domain = build_domain(InventoryArgs(brand="audi", max_price=900000, year=2018))
+        domain = build_domain(
+            InventoryArgs(brand="audi", model="a3", max_price=900000, year=2018)
+        )
         self.assertIn(("name", "ilike", "audi"), domain)
+        self.assertIn(("name", "ilike", "a3"), domain)
         self.assertIn(("list_price", "<=", 900000.0), domain)
         self.assertIn(("name", "ilike", "2018"), domain)
         self.assertIn(("sale_ok", "=", True), domain)
@@ -129,6 +132,25 @@ class TestParse(unittest.TestCase):
                 for term in domain
             )
         )
+
+    def test_model_in_vapi_payload(self):
+        pairs = extract_tool_calls(
+            {
+                "message": {
+                    "toolCalls": [
+                        {
+                            "id": "call_test",
+                            "function": {
+                                "arguments": {"brand": "Toyota", "model": "Corolla"},
+                            },
+                        }
+                    ]
+                }
+            }
+        )
+        args = pairs[0][1]
+        self.assertEqual(args.brand, "Toyota")
+        self.assertEqual(args.model, "Corolla")
 
 
 class TestHandle(unittest.TestCase):

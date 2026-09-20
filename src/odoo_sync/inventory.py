@@ -34,6 +34,7 @@ _cache: dict[tuple[Any, ...], tuple[float, list[dict[str, Any]]]] = {}
 def cache_key(
     *,
     brand: str | None = None,
+    model: str | None = None,
     max_price: float | None = None,
     year: int | None = None,
     query: str | None = None,
@@ -41,9 +42,10 @@ def cache_key(
     available_only: bool = True,
 ) -> tuple[Any, ...]:
     brand_n = (brand or "").strip().lower()
+    model_n = (model or "").strip().lower()
     query_n = (query or "").strip().lower()
     price_n = None if max_price is None else round(float(max_price), 2)
-    return (brand_n, price_n, year, query_n, int(limit), bool(available_only))
+    return (brand_n, model_n, price_n, year, query_n, int(limit), bool(available_only))
 
 
 def cache_get(key: tuple[Any, ...]) -> list[dict[str, Any]] | None:
@@ -89,13 +91,18 @@ def _state_field() -> str:
 def build_inventory_domain(
     *,
     brand: str | None = None,
+    model: str | None = None,
     max_price: float | None = None,
     year: int | None = None,
     query: str | None = None,
     available_only: bool = True,
     state_field: str | None = None,
 ) -> list[Any]:
-    """Domain for ``product.template`` — active saleable SKUs only."""
+    """Domain for ``product.template`` — active saleable SKUs only.
+
+    Names in Odoo look like ``Corolla XLE * Toyota 2022``, so brand and model
+    are separate ``ilike`` terms (AND) rather than a single concatenated phrase.
+    """
     domain: list[Any] = [
         ("sale_ok", "=", True),
         ("active", "=", True),
@@ -104,9 +111,16 @@ def build_inventory_domain(
     if available_only:
         field = (state_field or _state_field()).strip() or "x_studio_state"
         domain.append((field, "in", list(VEHICLE_STATE_AVAILABLE)))
-    text = (query or brand or "").strip()
-    if text:
-        domain.append(("name", "ilike", text))
+    brand_t = (brand or "").strip()
+    model_t = (model or "").strip()
+    query_t = (query or "").strip()
+    if query_t and not brand_t and not model_t:
+        domain.append(("name", "ilike", query_t))
+    else:
+        if brand_t:
+            domain.append(("name", "ilike", brand_t))
+        if model_t:
+            domain.append(("name", "ilike", model_t))
     if max_price is not None:
         domain.append(("list_price", "<=", float(max_price)))
     if year is not None:
@@ -118,6 +132,7 @@ def query_inventory(
     execute_kw: Any,
     *,
     brand: str | None = None,
+    model: str | None = None,
     max_price: float | None = None,
     year: int | None = None,
     query: str | None = None,
@@ -136,6 +151,7 @@ def query_inventory(
     cap = max(1, min(int(limit), RESULT_LIMIT))
     key = cache_key(
         brand=brand,
+        model=model,
         max_price=max_price,
         year=year,
         query=query,
@@ -159,6 +175,7 @@ def query_inventory(
 
     domain = build_inventory_domain(
         brand=brand,
+        model=model,
         max_price=max_price,
         year=year,
         query=query,
@@ -180,6 +197,7 @@ def query_inventory(
         tried.add(field)
         domain = build_inventory_domain(
             brand=brand,
+            model=model,
             max_price=max_price,
             year=year,
             query=query,
@@ -197,6 +215,7 @@ def query_inventory(
     rows = _run(
         build_inventory_domain(
             brand=brand,
+            model=model,
             max_price=max_price,
             year=year,
             query=query,
