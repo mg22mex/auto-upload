@@ -6,6 +6,7 @@ Riley tool calls hit::
     POST /vapi/financing
     POST /vapi/tradein
     POST /vapi/lead
+    POST /vapi/crm-lead   (alias of /vapi/lead)
 
 Run from repo root::
 
@@ -953,8 +954,7 @@ async def vapi_tradein(request: Request) -> VapiToolResponse:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.post("/vapi/lead", response_model=VapiToolResponse)
-async def vapi_lead(
+async def _vapi_lead_handler(
     request: Request,
     background_tasks: BackgroundTasks,
 ) -> VapiToolResponse:
@@ -973,6 +973,23 @@ async def vapi_lead(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/vapi/lead", response_model=VapiToolResponse)
+async def vapi_lead(
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> VapiToolResponse:
+    return await _vapi_lead_handler(request, background_tasks)
+
+
+@app.post("/vapi/crm-lead", response_model=VapiToolResponse)
+async def vapi_crm_lead(
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> VapiToolResponse:
+    """Alias of ``/vapi/lead`` — CRM upsert + Evolution WhatsApp confirmation."""
+    return await _vapi_lead_handler(request, background_tasks)
 
 
 if __name__ == "__main__":

@@ -450,9 +450,16 @@ Standalone FastAPI app: `src/voice_gateway/vapi_bridge.py` — Riley tools:
 | `POST /vapi/inventory` | Odoo `product.template` search (available only, `limit=3`, **2.0s** `asyncio.wait_for` timeout → soft TTS fallback; **15m** in-memory TTL cache for brand queries) |
 | `POST /vapi/financing` | Local Scotiabank-calibrated amortization |
 | `POST /vapi/tradein` | Autométrica Valor Compra estimate |
-| `POST /vapi/lead` | CRM upsert (`lead_id` / phone dedupe) → stage `Cita Agendada` → **background** Evolution WhatsApp confirmation |
+| `POST /vapi/lead` · `/vapi/crm-lead` | CRM upsert (`lead_id` / phone dedupe) → stage `Cita/Prueba de manejo` → **background** Evolution WhatsApp confirmation |
 
-Customer WhatsApp uses `src/notifications/whatsapp.py` → `WhatsAppWorkerClient` (`WHATSAPP_API_URL` / `WHATSAPP_API_KEY` / `WHATSAPP_INSTANCE_*`). Toggle: `VAPI_CUSTOMER_WHATSAPP` (default on). Failures are logged; they never block TTS.
+Customer WhatsApp (`src/notifications/whatsapp.py` → `WhatsAppWorkerClient` / Evolution `sendText`):
+
+- Toggle: `VAPI_CUSTOMER_WHATSAPP` (default on). Failures are logged; they never block TTS.
+- Phone: digits only; 10-digit MX → `52…` (or `521…` via `WHATSAPP_MX_COUNTRY_PREFIX`).
+- Payload: `name`, `phone`, optional `interested_vehicle` / `financing_summary` / `tradein_summary` / `appointment_date`.
+- Message includes vehículo, financiamiento/enganche, avalúo trade-in, and cita when provided.
+
+Ops helpers: `scripts/restart_vapi_bridge.sh`, `scripts/restart_quick_tunnel.sh`, `scripts/start_quick_tunnel.sh`.
 
 | Setting | This host (Arch) | Oracle fb-worker |
 |---------|------------------|------------------|

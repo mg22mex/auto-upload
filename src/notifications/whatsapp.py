@@ -6,14 +6,15 @@ Uses ``WhatsAppWorkerClient`` (``POST …/message/sendText/{instance}``).
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from typing import Any
 
-from src.odoo_sync.quotes import BRANCH_BRANDING, PRIMARY_BRANCH
 from src.whatsapp_worker.client import WhatsAppWorkerClient, normalize_phone_number
 
 ENV_ENABLED = "VAPI_CUSTOMER_WHATSAPP"
-DEFAULT_SITE_URL = "https://www.autosell.mx"
+# Optional: ``52`` (default) or ``521`` for 10-digit MX mobiles (Evolution / WA).
+ENV_MX_PREFIX = "WHATSAPP_MX_COUNTRY_PREFIX"
 
 
 @dataclass
@@ -39,18 +40,15 @@ def customer_whatsapp_enabled() -> bool:
 
 
 def format_customer_phone(phone: str) -> str:
-    """Digits for Evolution ``number`` field (MX 10-digit → ``52…``)."""
-    return normalize_phone_number(phone)
-
-
-def agency_address(branch: str | None = None) -> str:
-    key = (branch or PRIMARY_BRANCH).strip().lower() or PRIMARY_BRANCH
-    branding = BRANCH_BRANDING.get(key) or BRANCH_BRANDING[PRIMARY_BRANCH]
-    return str(branding.get("address") or branding.get("city") or "").strip()
-
-
-def site_url() -> str:
-    return (os.getenv("AUTOSELL_SITE_URL") or DEFAULT_SITE_URL).strip() or DEFAULT_SITE_URL
+    """Digits only; MX 10-digit → ``52…`` or ``521…`` per ``WHATSAPP_MX_COUNTRY_PREFIX``."""
+    prefix = (os.getenv(ENV_MX_PREFIX) or "52").strip() or "52"
+    if prefix not in {"52", "521"}:
+        prefix = "52"
+    digits = re.sub(r"\D", "", phone or "")
+    if len(digits) == 10:
+        return f"{prefix}{digits}"
+    # Already international (52… / 521…) — leave to worker validator.
+    return normalize_phone_number(phone, default_country="52")
 
 
 def format_lead_confirmation(
@@ -62,42 +60,37 @@ def format_lead_confirmation(
     appointment_date: str | None = None,
     branch: str | None = None,
 ) -> str:
-    """Professional ES-MX confirmation for Paulina / Vapi wrap-up."""
+    """Professional ES-MX confirmation after Vapi / Paulina wrap-up."""
+    del branch  # reserved for future branch-specific copy
     client = (name or "Cliente").strip() or "Cliente"
     lines = [
-        f"Hola {client}, ¡gracias por comunicarte con Autosell!",
+        f"Hola {client}, ¡gracias por comunicarte a Autosell! 🚗",
+        "",
+        "Aquí tienes el resumen de tu consulta con nuestro asistente:",
         "",
     ]
 
     vehicle = (interested_vehicle or "").strip()
     financing = (financing_summary or "").strip()
-    if vehicle or financing:
-        lines.append("*Vehículo y financiamiento*")
-        if vehicle:
-            lines.append(f"• Interés: {vehicle}")
-        if financing:
-            lines.append(f"• Cotización: {financing}")
-        lines.append("")
-
     tradein = (tradein_summary or "").strip()
-    if tradein:
-        lines.append("*Auto a cambio*")
-        lines.append(f"• Estimación Autométrica: {tradein}")
-        lines.append("")
-
     appointment = (appointment_date or "").strip()
+
+    if vehicle:
+        lines.append(f"📌 Vehículo de interés: {vehicle}")
+    if financing:
+        lines.append(f"💰 Financiamiento / Enganche: {financing}")
+    if tradein:
+        lines.append(f"🔄 Avalúo Trade-In: {tradein}")
     if appointment:
-        address = agency_address(branch)
-        lines.append("*Cita*")
-        lines.append(f"• Fecha/hora solicitada: {appointment}")
-        if address:
-            lines.append(f"• Agencia: {address}")
+        lines.append(f"📅 Cita Agendada: {appointment}")
+
+    if vehicle or financing or tradein or appointment:
         lines.append("")
 
-    lines += [
-        "Un asesor de Autosell dará seguimiento a tu caso.",
-        f"Más info: {site_url()}",
-    ]
+    lines.append(
+        "Un asesor de nuestra sucursal se pondrá en contacto contigo a la "
+        "brevedad. ¡Quedamos a tus órdenes!"
+    )
     return "\n".join(lines)
 
 
@@ -178,11 +171,10 @@ def notify_lead_confirmation(
 __all__ = [
     "CustomerNotifyResult",
     "ENV_ENABLED",
-    "agency_address",
+    "ENV_MX_PREFIX",
     "customer_whatsapp_enabled",
     "format_customer_phone",
     "format_lead_confirmation",
     "notify_lead_confirmation",
     "send_whatsapp_message",
-    "site_url",
 ]

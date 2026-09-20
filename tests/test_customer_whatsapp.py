@@ -28,17 +28,21 @@ class TestFormatLeadConfirmation(unittest.TestCase):
             appointment_date="viernes 18:00",
             branch="periferico",
         )
-        self.assertIn("Hola María, ¡gracias por comunicarte con Autosell!", text)
-        self.assertIn("Mazda CX-5 2020", text)
-        self.assertIn("Enganche", text)
-        self.assertIn("Corolla 2018", text)
-        self.assertIn("viernes 18:00", text)
-        self.assertIn("Periférico", text)
-        self.assertIn("autosell.mx", text)
+        self.assertIn("Hola María, ¡gracias por comunicarte a Autosell! 🚗", text)
+        self.assertIn("📌 Vehículo de interés: Mazda CX-5 2020", text)
+        self.assertIn("💰 Financiamiento / Enganche:", text)
+        self.assertIn("🔄 Avalúo Trade-In: Corolla 2018", text)
+        self.assertIn("📅 Cita Agendada: viernes 18:00", text)
+        self.assertIn("Quedamos a tus órdenes", text)
+        self.assertNotIn("autosell.mx", text)
 
     def test_phone_normalize_mx10(self):
         self.assertEqual(format_customer_phone("6141234567"), "526141234567")
         self.assertEqual(format_customer_phone("+52 614 123 4567"), "526141234567")
+
+    def test_phone_normalize_mx_521_prefix(self):
+        with patch.dict("os.environ", {"WHATSAPP_MX_COUNTRY_PREFIX": "521"}):
+            self.assertEqual(format_customer_phone("6141234567"), "5216141234567")
 
 
 class TestSendWhatsApp(unittest.TestCase):
@@ -64,6 +68,7 @@ class TestSendWhatsApp(unittest.TestCase):
         self.assertTrue(result.sent)
         self.assertEqual(result.phone, "526141112233")
         self.assertIn("Ana", result.message)
+        self.assertIn("📅 Cita Agendada: mañana 11:00", result.message)
         client.send_text_message.assert_called_once()
 
     def test_notify_failure_soft(self):
