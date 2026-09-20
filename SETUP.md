@@ -447,7 +447,7 @@ Standalone FastAPI app: `src/voice_gateway/vapi_bridge.py` — Riley tools:
 
 | Route | Role |
 |-------|------|
-| `POST /vapi/inventory` | Odoo available-only (`sale_ok` + Studio state Disponible; excludes sold/reserved). `brand`+`model` AND filters; **1.5s** timeout; auth reuse; **15m** TTL. TTS: `Ubicación: Lote Periférico` (`*`) / `Lote San Felipe` (`+`); marker `-` → *Disponible para entrega en la sucursal de tu preferencia (Periférico o San Felipe)* (never say Consignación / Sucursal Autosell). Soft null coercion (no 422). |
+| `POST /vapi/inventory` | Odoo available-only (`sale_ok` + Studio state Disponible; excludes sold/reserved). `brand`+`model` AND filters; **1.5s** timeout; auth reuse; **live Odoo** (`use_cache=False`; `ODOO_INVENTORY_CACHE_TTL_SEC` default **0**). TTS: `Ubicación: Lote Periférico` (`*`) / `Lote San Felipe` (`+`); marker `-` → *Disponible para entrega en la sucursal de tu preferencia (Periférico o San Felipe)* (never say Consignación / Sucursal Autosell). Soft null coercion (no 422). |
 | `POST /vapi/financing` | Local Scotiabank-calibrated amortization |
 | `POST /vapi/tradein` | Autométrica Valor Compra estimate |
 | `POST /vapi/lead` · `/vapi/crm-lead` | CRM upsert → lot marker sets `physical_location` + `team_id` (RR branch) → **background** Evolution WhatsApp (`dispatch_lead_whatsapp`; None-safe optionals) |
@@ -553,6 +553,14 @@ Routes: `GET /health`, `POST /webhook/voice-lead`, `GET|POST /webhook/facebook`.
 ---
 
 ## Local development (any machine)
+
+Unit tests (same as GitHub Actions `test.yml`):
+
+```bash
+python -m unittest discover -s src -p 'test_*.py' -v
+python -m unittest discover -s tests -p 'test_*.py' -v
+# or: pytest   # uses pytest.ini (src + tests only)
+```
 
 Full pipeline (scrape + diff):
 

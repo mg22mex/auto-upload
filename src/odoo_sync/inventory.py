@@ -2,7 +2,10 @@
 
 Prefer indexed scalar fields only (no ``categ_id.name`` relational browse).
 Hard-cap result rows at 3 for voice TTS latency.
-Includes a small in-process TTL cache for repeated brand queries.
+
+In-process TTL cache defaults to **off** (``ODOO_INVENTORY_CACHE_TTL_SEC=0``)
+so ``/vapi/inventory`` always reflects live ``sale_ok`` + Disponible state.
+Set a positive TTL only if you accept brief staleness under load.
 """
 from __future__ import annotations
 
@@ -13,7 +16,18 @@ from typing import Any
 
 # Voice tools must stay under Vapi timeouts — never fetch large result sets.
 RESULT_LIMIT = 3
-CACHE_TTL_SEC = 15 * 60
+
+
+def _cache_ttl_sec() -> float:
+    raw = (os.getenv("ODOO_INVENTORY_CACHE_TTL_SEC") or "0").strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 0.0
+
+
+# Default 0 = no cache (live Odoo). Env override for optional short TTL.
+CACHE_TTL_SEC = _cache_ttl_sec()
 CACHE_MAX_ENTRIES = 128
 
 INVENTORY_FIELDS = ("id", "name", "list_price", "default_code")
@@ -64,6 +78,8 @@ def cache_key(
 
 
 def cache_get(key: tuple[Any, ...]) -> list[dict[str, Any]] | None:
+    if _cache_ttl_sec() <= 0:
+        return None
     now = time.monotonic()
     with _cache_lock:
         hit = _cache.get(key)
@@ -80,9 +96,12 @@ def cache_set(
     key: tuple[Any, ...],
     rows: list[dict[str, Any]],
     *,
-    ttl_sec: float = CACHE_TTL_SEC,
+    ttl_sec: float | None = None,
 ) -> None:
-    expires_at = time.monotonic() + max(1.0, float(ttl_sec))
+    ttl = _cache_ttl_sec() if ttl_sec is None else float(ttl_sec)
+    if ttl <= 0:
+        return
+    expires_at = time.monotonic() + ttl
     payload = [dict(row) for row in rows]
     with _cache_lock:
         if len(_cache) >= CACHE_MAX_ENTRIES:

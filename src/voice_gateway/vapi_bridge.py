@@ -710,6 +710,7 @@ def search_inventory(
         year=args.year,
         limit=min(int(limit), INV_LIMIT),
         available_only=True,
+        use_cache=False,  # always live Odoo for /vapi/inventory
     )
 
 
@@ -718,23 +719,8 @@ def _search_inventory_blocking(args: InventoryArgs) -> list[dict[str, Any]]:
     return search_inventory(args)
 
 
-async def _search_inventory_cached(args: InventoryArgs) -> list[dict[str, Any]]:
-    """Serve TTL cache hits inline; otherwise Odoo RPC in a worker thread."""
-    from src.odoo_sync.inventory import RESULT_LIMIT as INV_LIMIT
-    from src.odoo_sync.inventory import cache_get, cache_key
-
-    key = cache_key(
-        brand=args.brand,
-        model=args.model,
-        max_price=float(args.max_price) if args.max_price is not None else None,
-        year=args.year,
-        limit=INV_LIMIT,
-        available_only=True,
-    )
-    cached = cache_get(key)
-    if cached is not None:
-        logger.debug("inventory cache hit key=%s rows=%s", key[:3], len(cached))
-        return cached
+async def _search_inventory_live(args: InventoryArgs) -> list[dict[str, Any]]:
+    """Live Odoo RPC in a worker thread (no inventory row cache)."""
     return await asyncio.to_thread(_search_inventory_blocking, args)
 
 
@@ -744,7 +730,7 @@ async def handle_inventory_payload(payload: dict[str, Any]) -> VapiToolResponse:
     for call_id, args in calls:
         try:
             rows = await asyncio.wait_for(
-                _search_inventory_cached(args),
+                _search_inventory_live(args),
                 timeout=INVENTORY_TIMEOUT_SEC,
             )
             speech = format_inventory_speech(rows, args)

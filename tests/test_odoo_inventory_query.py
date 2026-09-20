@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -54,14 +54,23 @@ class TestBuildDomain(unittest.TestCase):
         execute_kw = MagicMock(
             return_value=[{"id": 9, "name": "RAV4", "list_price": 1, "default_code": "r"}]
         )
-        first = query_inventory(execute_kw, brand="RAV4")
-        second = query_inventory(execute_kw, brand="RAV4")
+        with patch.dict("os.environ", {"ODOO_INVENTORY_CACHE_TTL_SEC": "900"}):
+            first = query_inventory(execute_kw, brand="RAV4", use_cache=True)
+            second = query_inventory(execute_kw, brand="RAV4", use_cache=True)
+            key = cache_key(brand="RAV4", limit=3)
+            self.assertIsNotNone(cache_get(key))
+            self.assertEqual(cache_get(key)[0]["name"], "RAV4")
         self.assertEqual(first, second)
         self.assertEqual(execute_kw.call_count, 1)
-        key = cache_key(brand="RAV4", limit=3)
-        self.assertIsNotNone(cache_get(key))
-        cache_set(key, first)  # refresh
-        self.assertEqual(cache_get(key)[0]["name"], "RAV4")
+
+    def test_default_ttl_zero_skips_cache(self):
+        execute_kw = MagicMock(
+            return_value=[{"id": 1, "name": "A", "list_price": 1, "default_code": "a"}]
+        )
+        with patch.dict("os.environ", {"ODOO_INVENTORY_CACHE_TTL_SEC": "0"}):
+            query_inventory(execute_kw, brand="A", use_cache=True)
+            query_inventory(execute_kw, brand="A", use_cache=True)
+        self.assertEqual(execute_kw.call_count, 2)
 
 
 if __name__ == "__main__":

@@ -271,9 +271,9 @@ class TestHandle(unittest.TestCase):
         self.assertIn("whatsapp", text)
         self.assertIn("prueba de manejo", text)
 
-    def test_inventory_cache_hit_skips_odoo(self):
+    def test_inventory_live_skips_row_cache(self):
+        """``/vapi/inventory`` ignores TTL row cache — always hits Odoo path."""
         import asyncio
-        import time
 
         from src.odoo_sync import inventory as inv
         from src.voice_gateway import vapi_bridge as vb
@@ -288,15 +288,13 @@ class TestHandle(unittest.TestCase):
             }
         ]
         key = inv.cache_key(brand="RAV4", max_price=None, year=None, limit=3)
-        inv.cache_set(key, rows)
+        inv.cache_set(key, rows, ttl_sec=900)  # would be stale if consulted
 
-        with patch.object(vb, "_search_inventory_blocking") as blocking:
-            t0 = time.perf_counter()
+        with patch.object(vb, "_search_inventory_blocking", return_value=rows) as blocking:
             resp = asyncio.run(handle_inventory_payload({"brand": "RAV4"}))
-            elapsed_ms = (time.perf_counter() - t0) * 1000
-        blocking.assert_not_called()
+        blocking.assert_called_once()
         self.assertIn("RAV4", resp.results[0].result)
-        self.assertLess(elapsed_ms, 50)
+        self.assertNotIn("Consignación", resp.results[0].result)
 
 
 class TestFinancing(unittest.TestCase):
