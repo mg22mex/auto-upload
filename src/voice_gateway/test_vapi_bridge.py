@@ -80,6 +80,39 @@ class TestParse(unittest.TestCase):
         self.assertEqual(pairs[0][0], "call_direct")
         self.assertEqual(pairs[0][1].brand, "Ford")
 
+    def test_soft_empty_and_null_fields(self):
+        pairs = extract_tool_calls(
+            {
+                "brand": "",
+                "max_price": "null",
+                "year": "undefined",
+            }
+        )
+        args = pairs[0][1]
+        self.assertIsNone(args.brand)
+        self.assertIsNone(args.max_price)
+        self.assertIsNone(args.year)
+
+    def test_soft_mistyped_strings(self):
+        pairs = extract_tool_calls(
+            {
+                "brand": "  Mazda ",
+                "max_price": "$450,000",
+                "year": "2020",
+            }
+        )
+        args = pairs[0][1]
+        self.assertEqual(args.brand, "Mazda")
+        self.assertEqual(args.max_price, 450000.0)
+        self.assertEqual(args.year, 2020)
+
+    def test_soft_invalid_year_ignored(self):
+        pairs = extract_tool_calls({"brand": "Ford", "year": "dos mil", "max_price": "abc"})
+        args = pairs[0][1]
+        self.assertEqual(args.brand, "Ford")
+        self.assertIsNone(args.year)
+        self.assertIsNone(args.max_price)
+
     def test_domain(self):
         domain = build_domain(InventoryArgs(brand="audi", max_price=900000, year=2018))
         self.assertIn(("name", "ilike", "audi"), domain)

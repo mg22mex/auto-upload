@@ -36,8 +36,10 @@ rm -f "$UNIT_DST" 2>/dev/null || true
 cp -f "$UNIT_SRC" "$UNIT_DST"
 chmod 644 "$UNIT_DST"
 
-# Stop any ad-hoc quick tunnel leftovers
-pkill -f 'cloudflared tunnel .* --url http://127.0.0.1:8000' 2>/dev/null || true
+# Intentionally does NOT pkill cloudflared — preserves any live quick/named session.
+# Stop ad-hoc quick tunnels manually only when you intend to cut them over:
+#   pgrep -fa 'cloudflared tunnel .* --url'   # inspect
+#   # then systemctl --user restart cloudflared-vapi-bridge
 
 "$SYSTEMCTL" --user daemon-reload
 "$SYSTEMCTL" --user enable cloudflared-vapi-bridge.service

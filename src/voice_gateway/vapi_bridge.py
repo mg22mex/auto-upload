@@ -67,6 +67,66 @@ class InventoryArgs(BaseModel):
     year: int | None = Field(default=None, ge=1950, le=2100)
 
 
+_EMPTY_TOKENS = frozenset(
+    {"", "null", "none", "undefined", "n/a", "na", "-", "unknown", "desconocido"}
+)
+
+
+def _coerce_optional_str(value: Any) -> str | None:
+    if value is None or isinstance(value, bool):
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in _EMPTY_TOKENS:
+        return None
+    return text
+
+
+def _coerce_optional_float(value: Any) -> float | None:
+    """Lenient Vapi numbers: empty/null/junk → None; ``$400,000`` → 400000."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return number if number >= 0 else None
+    text = str(value).strip().lower().replace(",", "")
+    if not text or text in _EMPTY_TOKENS:
+        return None
+    cleaned = re.sub(r"[^\d.]", "", text)
+    if not cleaned or cleaned.count(".") > 1:
+        return None
+    try:
+        number = float(cleaned)
+    except ValueError:
+        return None
+    return number if number >= 0 else None
+
+
+def _coerce_optional_year(value: Any) -> int | None:
+    """Lenient year: empty/null/out-of-range/junk → None."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, float):
+        if not value.is_integer():
+            return None
+        value = int(value)
+    if isinstance(value, int):
+        return value if 1950 <= value <= 2100 else None
+    text = str(value).strip().lower()
+    if not text or text in _EMPTY_TOKENS:
+        return None
+    digits = re.sub(r"\D", "", text)
+    if len(digits) != 4:
+        return None
+    try:
+        year = int(digits)
+    except ValueError:
+        return None
+    return year if 1950 <= year <= 2100 else None
+
+
 class FinancingArgs(BaseModel):
     vehicle_price: float = Field(gt=0)
     term_months: int = Field(default=DEFAULT_TERM_MONTHS, gt=0)
@@ -288,18 +348,29 @@ def extract_typed_tool_calls(
 
 
 def _parse_inventory_dict(raw: dict[str, Any]) -> InventoryArgs:
-    data = {
-        "brand": raw.get("brand") or raw.get("make") or raw.get("marca"),
-        "max_price": raw.get("max_price")
-        if raw.get("max_price") is not None
-        else raw.get("precio_max") or raw.get("maxPrice"),
-        "year": raw.get("year")
-        if raw.get("year") is not None
-        else raw.get("anio") or raw.get("año"),
-    }
-    if isinstance(data["brand"], str) and not data["brand"].strip():
-        data["brand"] = None
-    return InventoryArgs.model_validate(data)
+    """Soft-parse inventory args — never raise on empty/null/mistyped Vapi fields."""
+    brand = _coerce_optional_str(
+        raw.get("brand") or raw.get("make") or raw.get("marca")
+    )
+    max_price_raw = raw.get("max_price")
+    if max_price_raw is None:
+        max_price_raw = raw.get("precio_max")
+    if max_price_raw is None:
+        max_price_raw = raw.get("maxPrice")
+    year_raw = raw.get("year")
+    if year_raw is None:
+        year_raw = raw.get("anio")
+    if year_raw is None:
+        year_raw = raw.get("año")
+    try:
+        return InventoryArgs(
+            brand=brand,
+            max_price=_coerce_optional_float(max_price_raw),
+            year=_coerce_optional_year(year_raw),
+        )
+    except Exception:
+        # Last resort: ignore filters rather than 4xx to Vapi.
+        return InventoryArgs()
 
 
 def _parse_financing_dict(raw: dict[str, Any]) -> FinancingArgs:

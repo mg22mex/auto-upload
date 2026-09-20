@@ -447,7 +447,7 @@ Standalone FastAPI app: `src/voice_gateway/vapi_bridge.py` — Riley tools:
 
 | Route | Role |
 |-------|------|
-| `POST /vapi/inventory` | Odoo `product.template` search (available only, `limit=3`, **2.0s** `asyncio.wait_for` timeout → soft TTS fallback; **15m** in-memory TTL cache for brand queries) |
+| `POST /vapi/inventory` | Odoo `product.template` search (available only, `limit=3`, **2.0s** timeout → soft TTS fallback; **15m** TTL cache). Empty/`null`/mistyped `brand`/`year`/`max_price` from Vapi are coerced to `None` (no 422). |
 | `POST /vapi/financing` | Local Scotiabank-calibrated amortization |
 | `POST /vapi/tradein` | Autométrica Valor Compra estimate |
 | `POST /vapi/lead` · `/vapi/crm-lead` | CRM upsert (`lead_id` / phone dedupe) → stage `Cita/Prueba de manejo` → **background** Evolution WhatsApp confirmation |
@@ -459,7 +459,8 @@ Customer WhatsApp (`src/notifications/whatsapp.py` → `WhatsAppWorkerClient` / 
 - Payload: `name`, `phone`, optional `interested_vehicle` / `financing_summary` / `tradein_summary` / `appointment_date`.
 - Message includes vehículo, financiamiento/enganche, avalúo trade-in, and cita when provided.
 
-Ops helpers: `scripts/restart_vapi_bridge.sh`, `scripts/restart_quick_tunnel.sh`, `scripts/start_quick_tunnel.sh`.
+Ops helpers (tunnel scripts **never** `pkill cloudflared` unless you run `fresh_quick_tunnel.sh` intentionally):
+`scripts/restart_vapi_bridge.sh`, `scripts/start_quick_tunnel.sh` (reuse/start `--url` only), `scripts/restart_quick_tunnel.sh`, `scripts/fresh_quick_tunnel.sh` (explicit clean restart), `scripts/smoke_vapi_inventory.sh`.
 
 | Setting | This host (Arch) | Oracle fb-worker |
 |---------|------------------|------------------|
@@ -485,9 +486,10 @@ curl -fsS http://127.0.0.1:8000/health
 #   bash scripts/apply_token_tunnel.sh
 #   see deploy/cloudflared-named-tunnel.md
 
-# Quick tunnel (ephemeral; stops named unit, prints trycloudflare URL):
+# Quick tunnel (ephemeral; never pkills existing cloudflared — starts or reuses --url):
 #   bash scripts/start_quick_tunnel.sh
-# Restore named: systemctl --user start cloudflared-vapi-bridge
+# Named unit can stay up in parallel; restore focus with:
+#   systemctl --user start cloudflared-vapi-bridge
 
 # Vapi Dashboard tool server URL (named):
 #   https://vapi.autosell.mx/vapi/inventory

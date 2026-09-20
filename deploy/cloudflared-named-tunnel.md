@@ -46,8 +46,8 @@ Stops the named user unit and prints an ephemeral `*.trycloudflare.com` URL:
 bash scripts/start_quick_tunnel.sh
 # → https://….trycloudflare.com
 
-# restore permanent hostname:
-pkill -f 'cloudflared tunnel .* --url' || true
+# restore permanent hostname (do NOT pkill blindly — stop only the --url quick process if needed):
+#   pgrep -fa 'cloudflared tunnel'
 systemctl --user start cloudflared-vapi-bridge
 ```
 
