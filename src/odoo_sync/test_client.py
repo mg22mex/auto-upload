@@ -481,6 +481,11 @@ class TestCrmStageResolve(unittest.TestCase):
 
 
 class TestVehicleInventory(unittest.TestCase):
+    def setUp(self) -> None:
+        from src.odoo_sync.inventory import cache_clear
+
+        cache_clear()
+
     def test_formats_vehicle_matches(self):
         models = MagicMock()
         models.execute_kw.return_value = [

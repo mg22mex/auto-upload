@@ -6,6 +6,7 @@ on:
 jobs:
   fetch-token:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - name: Send Login Request
         id: login

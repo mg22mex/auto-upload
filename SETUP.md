@@ -447,7 +447,7 @@ Standalone FastAPI app: `src/voice_gateway/vapi_bridge.py` — Riley tools:
 
 | Route | Role |
 |-------|------|
-| `POST /vapi/inventory` | Odoo available-only (`sale_ok` + Studio state Disponible; excludes sold/reserved). `brand`+`model` AND filters; **1.5s** timeout; auth reuse; **15m** TTL. TTS: `Ubicación: Lote Periférico` / `Lote San Felipe`; marker `-` → *Disponible para entrega en la sucursal de tu preferencia (Periférico o San Felipe)* (never say Consignación / Sucursal Autosell). Soft null coercion (no 422). |
+| `POST /vapi/inventory` | Odoo available-only (`sale_ok` + Studio state Disponible; excludes sold/reserved). `brand`+`model` AND filters; **1.5s** timeout; auth reuse; **15m** TTL. TTS: `Ubicación: Lote Periférico` (`*`) / `Lote San Felipe` (`+`); marker `-` → *Disponible para entrega en la sucursal de tu preferencia (Periférico o San Felipe)* (never say Consignación / Sucursal Autosell). Soft null coercion (no 422). |
 | `POST /vapi/financing` | Local Scotiabank-calibrated amortization |
 | `POST /vapi/tradein` | Autométrica Valor Compra estimate |
 | `POST /vapi/lead` · `/vapi/crm-lead` | CRM upsert → lot marker sets `physical_location` + `team_id` (RR branch) → **background** Evolution WhatsApp (`dispatch_lead_whatsapp`; None-safe optionals) |

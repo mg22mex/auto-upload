@@ -113,10 +113,10 @@ def _run_http(base: str, verify_token: str) -> int:
 def _run_inprocess(*, skip_odoo: bool) -> int:
     from fastapi.testclient import TestClient
 
-from src.meta_gateway.gateway import MetaWebhookGateway
-from src.odoo_sync.client import OdooCRMClient, QuoteLeadResult
-from src.quote_engine.engine import CalibratedQuoteEngine
-from src.voice_gateway.webhook import create_app
+    from src.meta_gateway.gateway import MetaWebhookGateway
+    from src.odoo_sync.client import OdooCRMClient, QuoteLeadResult
+    from src.quote_engine.engine import CalibratedQuoteEngine
+    from src.voice_gateway.webhook import create_app
 
     verify_token = os.getenv("FB_VERIFY_TOKEN", "").strip() or "local-dev-verify"
     messenger = MagicMock()
