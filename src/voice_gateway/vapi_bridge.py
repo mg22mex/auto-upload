@@ -566,13 +566,58 @@ def build_domain(args: InventoryArgs) -> list[Any]:
 
 
 def _clean_name(name: str) -> str:
+    """Strip lot markers from title for TTS (keep readable model/brand/year)."""
     text = re.sub(r"\s+", " ", (name or "").strip())
-    text = text.replace("*", "").replace("+", "").replace("-", " ")
+    text = re.sub(r"\s*[\*\+]\s*", " ", text)
+    # Mid-title consignment marker " - " only (not hyphens inside words).
+    text = re.sub(r"\s+-\s+", " ", text)
+    if text[:1] in "*-+":
+        text = text[1:].lstrip()
+    if text[-1:] in "*-+":
+        text = text[:-1].rstrip()
     return re.sub(r"\s+", " ", text).strip()
 
 
+# Catalog / Odoo title markers → physical lot (Beatriz must voice this to the caller).
+BRANCH_MARKER_LOCATION: dict[str, str] = {
+    "*": "Lote Periférico",
+    "+": "Lote San Felipe",
+    "-": "consignación (se puede traer a cualquier sucursal a solicitud)",
+}
+
+
+def branch_marker_from_title(title: str) -> str | None:
+    """Detect ``*`` / ``+`` / ``-`` as leading, trailing, or mid-title lot marker.
+
+    Live Odoo titles look like ``Cx5 * Mazda 2020`` or ``Sport - Mazda 2022``.
+    Catalog/Marketplace titles often trail the marker (``… IGT *``).
+    """
+    text = (title or "").strip()
+    if not text:
+        return None
+    if text[0] in BRANCH_MARKER_LOCATION:
+        return text[0]
+    if text[-1] in BRANCH_MARKER_LOCATION:
+        return text[-1]
+    for marker in ("*", "+", "-"):
+        token = f" {marker} "
+        if token in f" {text} ":
+            return marker
+    return None
+
+
+def location_speech_for_title(title: str) -> str:
+    marker = branch_marker_from_title(title)
+    if marker is None:
+        return "ubicado: consultar disponibilidad en sucursal"
+    place = BRANCH_MARKER_LOCATION[marker]
+    if marker == "-":
+        return f"está en {place}"
+    return f"está en {place}"
+
+
 def format_inventory_speech(rows: list[dict[str, Any]], args: InventoryArgs) -> str:
-    """Short TTS — keep under Vapi tool-timeout budget."""
+    """Short TTS with explicit lot location for Beatriz."""
     label_parts = [p for p in (args.brand, args.model) if p]
     filter_txt = " ".join(p.strip().title() for p in label_parts) or "tu búsqueda"
     if args.year is not None:
@@ -586,9 +631,13 @@ def format_inventory_speech(rows: list[dict[str, Any]], args: InventoryArgs) -> 
 
     parts = [f"Tengo {number_to_words_es(len(rows))} para {filter_txt}."]
     for index, row in enumerate(rows, start=1):
-        name = _clean_name(str(row.get("name") or "Vehículo"))
+        raw_name = str(row.get("name") or "Vehículo")
+        name = _clean_name(raw_name)
         price = format_price_voice_es(float(row.get("list_price") or 0))
-        parts.append(f"{number_to_words_es(index)}: {name}, {price}.")
+        loc = location_speech_for_title(raw_name)
+        parts.append(
+            f"{number_to_words_es(index)}: {name}, {price}, {loc}."
+        )
     parts.append("¿Cuál te interesa?")
     return " ".join(parts)
 
@@ -902,6 +951,30 @@ def dispatch_lead_whatsapp(
     """Background-safe customer confirmation (never raises)."""
     from src.notifications.whatsapp import notify_lead_confirmation
 
+    missing = [
+        field
+        for field, value in (
+            ("interested_vehicle", args.interested_vehicle),
+            ("financing_summary", args.financing_summary),
+            ("tradein_summary", args.tradein_summary),
+            ("appointment_date", args.appointment_date),
+        )
+        if not (value or "").strip()
+    ]
+    if missing:
+        logger.warning(
+            "customer WA queued with missing optional fields=%s name=%s phone=%s",
+            ",".join(missing),
+            (args.name or "")[:40],
+            (args.phone or "")[:20],
+        )
+    else:
+        logger.warning(
+            "customer WA queued full payload name=%s phone=%s",
+            (args.name or "")[:40],
+            (args.phone or "")[:20],
+        )
+
     try:
         result = notify_lead_confirmation(
             name=args.name,
@@ -912,6 +985,12 @@ def dispatch_lead_whatsapp(
             appointment_date=args.appointment_date,
             branch=branch,
             whatsapp_client=whatsapp_client,
+        )
+        logger.warning(
+            "customer WA result sent=%s skipped=%s error=%s",
+            result.sent,
+            result.skipped_reason,
+            result.error,
         )
         return result.as_dict()
     except Exception as exc:
@@ -997,6 +1076,7 @@ async def _read_json_object(request: Request) -> dict[str, Any]:
 
 
 @app.get("/health")
+@app.get("/")
 def health() -> dict[str, str]:
     return {"status": "ok", "service": "vapi-bridge"}
 

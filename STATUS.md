@@ -1,6 +1,6 @@
 # Autosell Auto-upload — Status & Roadmap
 
-Last updated: **2026-09-16**
+Last updated: **2026-09-20**
 
 Companion to [README.md](./README.md) and [docs/PROJECT_GUIDE.md](./docs/PROJECT_GUIDE.md).
 
@@ -15,7 +15,9 @@ Companion to [README.md](./README.md) and [docs/PROJECT_GUIDE.md](./docs/PROJECT
 | Catalog scrape + Odoo inventory | **Live** | GitHub Actions `sync.yml` (2× daily) |
 | Listing bump / relist | **Live** | Daily incremental, ≥2d age |
 | Voice quote webhook | **Live** | `/webhook/voice-lead`, `/voice/webhook`, `/voice/stream` |
-| WhatsApp Evolution | **Live** | `autosell_periferico` + `autosell_san_felipe` |
+| **Beatriz Vapi bridge** | **Live on Oracle** | `vapi-bridge.service` `:8000`; inventory lot markers `*`/`+`/`-`; available-only Odoo filter |
+| WhatsApp Evolution | **Live on Oracle** | Docker `deploy/docker-compose.evolution.yml` → `127.0.0.1:8082`; customer WA on `/vapi/crm-lead` |
+| Cloudflare tunnel | **Connector live** | Named token on VPS; **Neubox DNS for `vapi.autosell.mx` still pending** — use quick `*.trycloudflare.com` until CNAME |
 | WhatsApp qualification bot | **Live** | FSM → `HANDOFF_TO_HUMAN` + Odoo |
 | VoIP inbound | **Code live** | `/voice/inbound` — configure `VOICE_DID_*` / forward numbers on VPS |
 | Marketplace `wa.me` CTAs | **Live** | Branch phones in `listing_cta.py` / env overrides |
@@ -74,6 +76,7 @@ Companion to [README.md](./README.md) and [docs/PROJECT_GUIDE.md](./docs/PROJECT
 - **Page timeline posting:** Not in scope of current Marketplace Playwright path. Future expansion would use Graph `/{page-id}/feed` with per-page tokens (separate from Marketplace sessions).
 
 ### 3. Other backlog
+- **DNS:** Neubox CNAME `vapi.autosell.mx` → Cloudflare tunnel hostname (connector already registered on Oracle).
 - Enable `account_3` after clearing old Marketplace inventory.
 - Optional: native Odoo WhatsApp Cloud API once Meta Manager credentials exist.
 - Catalog `Sucursal` field on autosell.mx (improves Marketplace CTA branch accuracy beyond default Periférico).

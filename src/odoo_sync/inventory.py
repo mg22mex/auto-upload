@@ -19,7 +19,22 @@ CACHE_MAX_ENTRIES = 128
 INVENTORY_FIELDS = ("id", "name", "list_price", "default_code")
 
 # Studio / custom selection labels used by inventory sync (EN + ES).
+# Only offer units still marked available — never sold / reserved / pending.
 VEHICLE_STATE_AVAILABLE = ("available", "Available", "Disponible", "disponible")
+VEHICLE_STATE_EXCLUDED = (
+    "sold",
+    "Sold",
+    "Vendido",
+    "vendido",
+    "reserved",
+    "Reserved",
+    "Reservado",
+    "reservado",
+    "pending",
+    "Pending",
+    "Pendiente",
+    "pendiente",
+)
 VEHICLE_STATE_FIELDS = (
     "x_studio_state",
     "x_studio_estatus",
@@ -111,6 +126,8 @@ def build_inventory_domain(
     if available_only:
         field = (state_field or _state_field()).strip() or "x_studio_state"
         domain.append((field, "in", list(VEHICLE_STATE_AVAILABLE)))
+        # Soft exclude known sold/reserved labels when Studio uses free-text variants.
+        domain.append((field, "not in", list(VEHICLE_STATE_EXCLUDED)))
     brand_t = (brand or "").strip()
     model_t = (model or "").strip()
     query_t = (query or "").strip()
@@ -233,6 +250,7 @@ __all__ = [
     "INVENTORY_FIELDS",
     "RESULT_LIMIT",
     "VEHICLE_STATE_AVAILABLE",
+    "VEHICLE_STATE_EXCLUDED",
     "VEHICLE_STATE_FIELDS",
     "build_inventory_domain",
     "cache_clear",

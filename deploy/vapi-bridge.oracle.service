@@ -1,0 +1,31 @@
+[Unit]
+Description=Autosell Vapi inventory bridge (Beatriz / Odoo product.template)
+Documentation=file:///home/ubuntu/auto-upload/SETUP.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+
+WorkingDirectory=/home/ubuntu/auto-upload
+
+# Do NOT EnvironmentFile= the full project .env — JSON REPS_* lines break systemd parsing.
+# vapi_bridge.py loads WorkingDirectory/.env via python-dotenv.
+Environment=PYTHONUNBUFFERED=1
+Environment=VAPI_BRIDGE_HOST=127.0.0.1
+Environment=VAPI_BRIDGE_PORT=8000
+Environment=VAPI_BRIDGE_RELOAD=false
+
+ExecStart=/home/ubuntu/auto-upload/.venv/bin/python -m src.voice_gateway.vapi_bridge
+
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+
+# Bind localhost only; Cloudflare Tunnel is the public ingress.
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

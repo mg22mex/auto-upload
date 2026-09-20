@@ -26,12 +26,21 @@ class TestBuildDomain(unittest.TestCase):
         cache_clear()
 
     def test_available_filter_and_cap_fields(self):
+        from src.odoo_sync.inventory import VEHICLE_STATE_AVAILABLE, VEHICLE_STATE_EXCLUDED
+
         domain = build_inventory_domain(brand="Ford", max_price=500_000, year=2020)
         self.assertIn(("sale_ok", "=", True), domain)
         self.assertIn(("active", "=", True), domain)
         self.assertIn(("default_code", "!=", False), domain)
         self.assertIn(("name", "ilike", "Ford"), domain)
+        self.assertIn(("x_studio_state", "in", list(VEHICLE_STATE_AVAILABLE)), domain)
+        self.assertIn(("x_studio_state", "not in", list(VEHICLE_STATE_EXCLUDED)), domain)
         self.assertEqual(RESULT_LIMIT, 3)
+
+    def test_available_only_false_skips_state(self):
+        domain = build_inventory_domain(brand="Toyota", available_only=False)
+        self.assertIn(("sale_ok", "=", True), domain)
+        self.assertTrue(all(term[0] != "x_studio_state" for term in domain if isinstance(term, tuple)))
 
     def test_query_inventory_limit_three(self):
         execute_kw = MagicMock(return_value=[{"id": 1, "name": "A", "list_price": 1}])

@@ -1,0 +1,22 @@
+[Unit]
+Description=Cloudflare named tunnel for Autosell Vapi inventory bridge
+Documentation=https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/
+After=network-online.target vapi-bridge.service
+Wants=network-online.target
+Requires=vapi-bridge.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+# /etc/cloudflared/vapi-bridge.env (mode 600): TUNNEL_TOKEN=...
+EnvironmentFile=/etc/cloudflared/vapi-bridge.env
+ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate --protocol http2 --edge-ip-version 4 run
+
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

@@ -49,7 +49,26 @@ class TestFormatters(unittest.TestCase):
         self.assertIn("Tengo", text)
         self.assertIn("pesos", text)
         self.assertIn("Mazda", text)
+        self.assertIn("Lote Periférico", text)
         self.assertNotIn("$", text)
+
+    def test_location_markers(self):
+        from src.voice_gateway.vapi_bridge import (
+            branch_marker_from_title,
+            location_speech_for_title,
+        )
+
+        self.assertEqual(branch_marker_from_title("Cx5 * Mazda 2020"), "*")
+        self.assertEqual(branch_marker_from_title("+ RAV4 Toyota 2021"), "+")
+        self.assertEqual(branch_marker_from_title("Sport - Mazda 2022"), "-")
+        self.assertEqual(branch_marker_from_title("Cx 30 IGT *"), "*")
+        self.assertIsNone(branch_marker_from_title("Corolla Toyota 2022"))
+        self.assertIn("San Felipe", location_speech_for_title("+ RAV4 Toyota 2021"))
+        self.assertIn("consignación", location_speech_for_title("Sport - Mazda 2022"))
+        self.assertIn(
+            "consultar disponibilidad",
+            location_speech_for_title("Corolla Toyota 2022"),
+        )
 
 
 class TestParse(unittest.TestCase):
@@ -418,6 +437,48 @@ class TestLead(unittest.TestCase):
         self.assertEqual(len(tasks.tasks), 1)
         tasks.tasks[0].func(*tasks.tasks[0].args, **tasks.tasks[0].kwargs)
         wa.send_text_message.assert_called_once()
+
+    def test_crm_lead_alias_queues_whatsapp(self):
+        """``/vapi/crm-lead`` shares ``handle_lead_payload`` → same WA queue."""
+        from unittest.mock import patch
+
+        from fastapi import BackgroundTasks
+
+        from src.voice_gateway.vapi_bridge import handle_lead_payload
+
+        manager = MagicMock()
+        manager.create_or_update_lead.return_value = {
+            "status": "created",
+            "lead_id": 42,
+            "branch": "periferico",
+            "dry_run": False,
+        }
+        wa = MagicMock()
+        tasks = BackgroundTasks()
+        with patch("src.voice_gateway.vapi_bridge.logger") as log:
+            handle_lead_payload(
+                {
+                    "name": "Ana",
+                    "phone": "6141112222",
+                    "appointment_date": "mañana 10",
+                    # financing / trade-in / vehicle intentionally omitted
+                },
+                manager=manager,
+                background_tasks=tasks,
+                whatsapp_client=wa,
+            )
+            tasks.tasks[0].func(*tasks.tasks[0].args, **tasks.tasks[0].kwargs)
+        wa.send_text_message.assert_called_once()
+        warned = [
+            c
+            for c in log.warning.call_args_list
+            if c.args and "customer WA queued with missing optional fields" in str(c.args[0])
+        ]
+        self.assertTrue(warned)
+        blob = " ".join(str(a) for a in warned[0].args)
+        self.assertIn("interested_vehicle", blob)
+        self.assertIn("financing_summary", blob)
+        self.assertIn("tradein_summary", blob)
 
     def test_context_lead_id_from_variable_values(self):
         from src.voice_gateway.vapi_bridge import handle_lead_payload

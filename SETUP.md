@@ -447,7 +447,7 @@ Standalone FastAPI app: `src/voice_gateway/vapi_bridge.py` — Riley tools:
 
 | Route | Role |
 |-------|------|
-| `POST /vapi/inventory` | Odoo `product.template` search (available only, `limit=3`, **2.8s** timeout → soft TTS fallback; **15m** TTL cache; Odoo auth reused). Accepts `brand` + `model` (AND `ilike`). Empty/`null`/mistyped fields coerced to `None` (no 422). Concise TTS. |
+| `POST /vapi/inventory` | Odoo available-only (`sale_ok` + Studio state Disponible; excludes sold/reserved). `brand`+`model` AND filters; **2.8s** timeout; auth reuse; **15m** TTL. Title markers `*` Periférico / `+` San Felipe / `-` consignación spoken for Beatriz. Soft null coercion (no 422). |
 | `POST /vapi/financing` | Local Scotiabank-calibrated amortization |
 | `POST /vapi/tradein` | Autométrica Valor Compra estimate |
 | `POST /vapi/lead` · `/vapi/crm-lead` | CRM upsert (`lead_id` / phone dedupe) → stage `Cita/Prueba de manejo` → **background** Evolution WhatsApp confirmation |
@@ -457,25 +457,63 @@ Customer WhatsApp (`src/notifications/whatsapp.py` → `WhatsAppWorkerClient` / 
 - Toggle: `VAPI_CUSTOMER_WHATSAPP` (default on). Failures are logged; they never block TTS.
 - Phone: digits only; 10-digit MX → `52…` (or `521…` via `WHATSAPP_MX_COUNTRY_PREFIX`).
 - Payload: `name`, `phone`, optional `interested_vehicle` / `financing_summary` / `tradein_summary` / `appointment_date`.
+- Missing optional fields are logged (`customer WA queued with missing optional fields=…`); dispatch still runs.
 - Message includes vehículo, financiamiento/enganche, avalúo trade-in, and cita when provided.
 
 Ops helpers (tunnel scripts **never** `pkill cloudflared` unless you run `fresh_quick_tunnel.sh` intentionally):
 `scripts/restart_vapi_bridge.sh`, `scripts/start_quick_tunnel.sh` (reuse/start `--url` only), `scripts/restart_quick_tunnel.sh`, `scripts/fresh_quick_tunnel.sh` (explicit clean restart), `scripts/smoke_vapi_inventory.sh`.
 
-| Setting | This host (Arch) | Oracle fb-worker |
-|---------|------------------|------------------|
-| Unit | `deploy/vapi-bridge.service` | same file — edit paths / `User=` |
+| Setting | This host (Arch) | Oracle fb-worker (`ubuntu@` VPS) |
+|---------|------------------|----------------------------------|
+| Unit | `deploy/vapi-bridge.service` | `deploy/vapi-bridge.oracle.service` → `/etc/systemd/system/vapi-bridge.service` |
 | WorkingDirectory | `/Extra/Yandex.Disk/Autosell/Auto-upload` | `/home/ubuntu/auto-upload` |
-| Listen | `127.0.0.1:8000` | `127.0.0.1:8000` |
-| Public HTTPS | named token tunnel → `https://vapi.autosell.mx` (quick `*.trycloudflare.com` for tests) | same |
+| Listen | `127.0.0.1:8000` (`GET /` + `/health`) | `127.0.0.1:8000` |
+| Evolution | `docker compose -f deploy/docker-compose.evolution.yml up -d` → `127.0.0.1:8082` | same on VPS |
+| Named tunnel | user unit + `~/.config/cloudflared-vapi-bridge.env` | system unit `deploy/cloudflared-vapi-bridge.oracle.service` + `/etc/cloudflared/vapi-bridge.env` |
+| Public HTTPS | named → `https://vapi.autosell.mx` (needs Neubox DNS CNAME); quick `*.trycloudflare.com` for tests | same |
 
 **Do not** point systemd `EnvironmentFile=` at the full project `.env` (JSON `REPS_*` lines break the parser). The app loads `.env` via `python-dotenv`.
+
+### Oracle VPS (Beatriz + Evolution)
+
+```bash
+# SSH key (local operator machine — not in git):
+#   ssh -i …/auto-upload-oracle-ssh-key-2026-06-29.key ubuntu@159.54.157.108
+
+cd ~/auto-upload && git pull --ff-only origin main
+sudo systemctl enable --now docker
+docker compose --env-file .env -f deploy/docker-compose.evolution.yml up -d
+# restore data/sessions symlinks if pull replaced them:
+#   ln -snf ~/auto-upload-data/data ~/auto-upload/data
+#   ln -snf ~/auto-upload-data/sessions ~/auto-upload/sessions
+
+sudo cp deploy/vapi-bridge.oracle.service /etc/systemd/system/vapi-bridge.service
+sudo cp deploy/cloudflared-vapi-bridge.oracle.service /etc/systemd/system/cloudflared-vapi-bridge.service
+# token file mode 600:
+sudo install -d -m 755 /etc/cloudflared
+sudo install -m 600 /path/to/cloudflared-vapi-bridge.env /etc/cloudflared/vapi-bridge.env
+sudo systemctl daemon-reload
+sudo systemctl enable --now vapi-bridge cloudflared-vapi-bridge
+curl -fsS http://127.0.0.1:8000/health
+curl -fsS http://127.0.0.1:8082/   # Evolution welcome JSON
+```
+
+**Quick tunnel on Oracle** (ephemeral; named unit can stay up):
+
+```bash
+nohup cloudflared tunnel --no-autoupdate --protocol http2 --edge-ip-version 4 \
+  --url http://localhost:8000 > /tmp/oracle_quick_tunnel.log 2>&1 &
+sleep 4
+grep -Eo 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/oracle_quick_tunnel.log | tail -n 1
+# smoke:
+# curl -fsS -X POST "$URL/vapi/inventory" -H 'Content-Type: application/json' -d '{"brand":"Mazda"}'
+```
 
 ```bash
 cd /Extra/Yandex.Disk/Autosell/Auto-upload   # or ~/auto-upload
 sudo bash deploy/install_vapi_bridge.sh
 
-# Manual equivalent:
+# Manual equivalent (Arch host unit):
 sudo cp deploy/vapi-bridge.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now vapi-bridge
@@ -485,6 +523,7 @@ curl -fsS http://127.0.0.1:8000/health
 #   printf 'TUNNEL_TOKEN=%s\n' '<token>' > cloudflared-vapi-bridge.env && chmod 600 $_
 #   bash scripts/apply_token_tunnel.sh
 #   see deploy/cloudflared-named-tunnel.md
+#   Neubox: CNAME vapi → <tunnel-id>.cfargotunnel.com (or CF nameservers)
 
 # Quick tunnel (ephemeral; never pkills existing cloudflared — starts or reuses --url):
 #   bash scripts/start_quick_tunnel.sh
