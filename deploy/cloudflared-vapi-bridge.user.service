@@ -6,9 +6,13 @@ Requires=vapi-bridge.service
 
 [Service]
 Type=simple
-# Named tunnel → https://vapi.autosell.mx (see ~/.cloudflared/config.yml)
+# Token → https://vapi.autosell.mx
+# ~/.config/cloudflared-vapi-bridge.env (mode 600):
+#   TUNNEL_TOKEN=<Zero Trust tunnel token>
+# cloudflared reads TUNNEL_TOKEN from the environment (keeps token out of `ps`).
+EnvironmentFile=%h/.config/cloudflared-vapi-bridge.env
 # HTTP/2 + IPv4 avoids QUIC/Wi-Fi mid-call drops.
-ExecStart=%h/.local/bin/cloudflared tunnel --no-autoupdate --protocol http2 --edge-ip-version 4 run vapi-bridge
+ExecStart=%h/.local/bin/cloudflared tunnel --no-autoupdate --protocol http2 --edge-ip-version 4 run
 Restart=always
 RestartSec=5
 TimeoutStopSec=20

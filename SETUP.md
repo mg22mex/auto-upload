@@ -459,7 +459,7 @@ Customer WhatsApp uses `src/notifications/whatsapp.py` → `WhatsAppWorkerClient
 | Unit | `deploy/vapi-bridge.service` | same file — edit paths / `User=` |
 | WorkingDirectory | `/Extra/Yandex.Disk/Autosell/Auto-upload` | `/home/ubuntu/auto-upload` |
 | Listen | `127.0.0.1:8000` | `127.0.0.1:8000` |
-| Public HTTPS | `cloudflared` quick tunnel (`*.trycloudflare.com`) | named tunnel recommended |
+| Public HTTPS | named token tunnel → `https://vapi.autosell.mx` (quick `*.trycloudflare.com` for tests) | same |
 
 **Do not** point systemd `EnvironmentFile=` at the full project `.env` (JSON `REPS_*` lines break the parser). The app loads `.env` via `python-dotenv`.
 
@@ -473,17 +473,14 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now vapi-bridge
 curl -fsS http://127.0.0.1:8000/health
 
-# Tunnel — prefer named (stable https://vapi.autosell.mx); else quick tunnel:
-
-# Named (after cloudflared tunnel login + create + DNS route):
+# Named tunnel (permanent https://vapi.autosell.mx):
+#   printf 'TUNNEL_TOKEN=%s\n' '<token>' > cloudflared-vapi-bridge.env && chmod 600 $_
+#   bash scripts/apply_token_tunnel.sh
 #   see deploy/cloudflared-named-tunnel.md
-#   systemctl --user restart cloudflared-vapi-bridge
-#   Vapi base URL: https://vapi.autosell.mx
 
-# Quick tunnel fallback (ephemeral URL; forces HTTP/2 + IPv4):
-systemctl --user daemon-reload
-systemctl --user enable --now cloudflared-vapi-bridge
-journalctl --user -u cloudflared-vapi-bridge -n 50 --no-pager | grep -E 'trycloudflare|protocol=|Registered'
+# Quick tunnel (ephemeral; stops named unit, prints trycloudflare URL):
+#   bash scripts/start_quick_tunnel.sh
+# Restore named: systemctl --user start cloudflared-vapi-bridge
 
 # Vapi Dashboard tool server URL (named):
 #   https://vapi.autosell.mx/vapi/inventory
@@ -491,8 +488,8 @@ journalctl --user -u cloudflared-vapi-bridge -n 50 --no-pager | grep -E 'tryclou
 #   https://<id>.trycloudflare.com/vapi/inventory
 ```
 
-Foreground tunnel (no systemd):  
-`cloudflared tunnel --no-autoupdate --protocol http2 --edge-ip-version 4 --url http://127.0.0.1:8000`
+Foreground named tunnel (token via env, not argv):  
+`set -a; source ~/.config/cloudflared-vapi-bridge.env; set +a; cloudflared tunnel --no-autoupdate --protocol http2 --edge-ip-version 4 run`
 
 **Ops:**
 

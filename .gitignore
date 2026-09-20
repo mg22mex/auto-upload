@@ -1,4 +1,6 @@
 .env
+.cloudflared-runtime/
+**/cloudflared-vapi-bridge.env
 .venv/
 venv/
 __pycache__/

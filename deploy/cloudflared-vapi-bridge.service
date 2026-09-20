@@ -10,9 +10,9 @@ Type=simple
 User=root
 Group=root
 
-# Named tunnel → https://vapi.autosell.mx
-# Requires /root/.cloudflared/config.yml + credentials (or run as user unit).
-ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate --protocol http2 --edge-ip-version 4 run vapi-bridge
+# /etc/cloudflared/vapi-bridge.env (mode 600): TUNNEL_TOKEN=...
+EnvironmentFile=/etc/cloudflared/vapi-bridge.env
+ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate --protocol http2 --edge-ip-version 4 run
 
 Restart=always
 RestartSec=5
