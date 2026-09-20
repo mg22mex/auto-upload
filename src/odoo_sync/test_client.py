@@ -482,20 +482,34 @@ class TestCrmStageResolve(unittest.TestCase):
 
 class TestVehicleInventory(unittest.TestCase):
     def setUp(self) -> None:
-        from src.odoo_sync.inventory import cache_clear
+        from src.odoo_sync.inventory import cache_clear, reset_state_field_cache
 
         cache_clear()
+        reset_state_field_cache()
 
     def test_formats_vehicle_matches(self):
+        from src.odoo_sync.inventory import cache_clear, reset_state_field_cache
+
+        cache_clear()
+        reset_state_field_cache()
+
         models = MagicMock()
-        models.execute_kw.return_value = [
-            {
-                "id": 638,
-                "name": "MAZDA CX3 2020",
-                "list_price": 289000.0,
-                "default_code": "obj638",
-            }
-        ]
+
+        def execute_kw(db, uid, key, model, method, args, kwargs=None):
+            if model == "product.template" and method == "fields_get":
+                return {"x_studio_state": {"type": "selection"}}
+            if model == "product.template" and method == "search_read":
+                return [
+                    {
+                        "id": 638,
+                        "name": "MAZDA CX3 2020",
+                        "list_price": 289000.0,
+                        "default_code": "obj638",
+                    }
+                ]
+            raise AssertionError(f"unexpected {model}.{method}")
+
+        models.execute_kw.side_effect = execute_kw
         client = _mock_client(models)
         client.uid = 7
 
@@ -506,42 +520,61 @@ class TestVehicleInventory(unittest.TestCase):
         self.assertEqual(vehicles[0]["name"], "MAZDA CX3 2020")
         self.assertEqual(vehicles[0]["list_price"], 289000.0)
         self.assertEqual(vehicles[0]["default_code"], "obj638")
-        domain = models.execute_kw.call_args.args[5][0]
+        domain = None
+        opts = None
+        for call in models.execute_kw.call_args_list:
+            if call.args[4] == "search_read":
+                domain = call.args[5][0]
+                opts = call.args[6]
+        assert domain is not None and opts is not None
         self.assertIn(("name", "ilike", "Mazda"), domain)
         self.assertIn(("active", "=", True), domain)
         self.assertIn(("sale_ok", "=", True), domain)
-        opts = models.execute_kw.call_args.args[6]
         self.assertEqual(opts["limit"], 3)
         self.assertNotIn("categ_id", opts["fields"])
         self.assertNotIn("qty_available", opts["fields"])
 
-    def test_soft_fallback_when_state_field_missing(self):
+    def test_missing_state_field_uses_published_stock_only(self):
+        """No Studio state field → sale_ok+active+SKU; never widen to sold."""
+        from src.odoo_sync.inventory import cache_clear, reset_state_field_cache
+
+        cache_clear()
+        reset_state_field_cache()
+
         models = MagicMock()
-        models.execute_kw.side_effect = [
-            Exception("Invalid field x_studio_state"),
-            Exception("Invalid field x_studio_estatus"),
-            Exception("Invalid field x_vehicle_state"),
-            Exception("Invalid field state"),
-            [
-                {
-                    "id": 10,
-                    "name": "Mazda",
-                    "list_price": 1.0,
-                    "default_code": "m1",
-                }
-            ],
-        ]
+
+        def execute_kw(db, uid, key, model, method, args, kwargs=None):
+            if model == "product.template" and method == "fields_get":
+                return {}  # no x_studio_state / siblings
+            if model == "product.template" and method == "search_read":
+                return [
+                    {
+                        "id": 10,
+                        "name": "Mazda",
+                        "list_price": 289000.0,
+                        "default_code": "m1",
+                    }
+                ]
+            raise AssertionError(f"unexpected {model}.{method}")
+
+        models.execute_kw.side_effect = execute_kw
         client = _mock_client(models)
 
         vehicles = client.search_vehicle_inventory("Mazda")
 
         self.assertEqual(len(vehicles), 1)
         self.assertEqual(vehicles[0]["id"], 10)
-        self.assertGreaterEqual(models.execute_kw.call_count, 2)
-        final_domain = models.execute_kw.call_args.args[5][0]
+        final_domain = None
+        for call in models.execute_kw.call_args_list:
+            if call.args[4] == "search_read":
+                final_domain = call.args[5][0]
+        assert final_domain is not None
+        self.assertIn(("sale_ok", "=", True), final_domain)
+        self.assertIn(("active", "=", True), final_domain)
+        self.assertIn(("default_code", "!=", False), final_domain)
         self.assertFalse(
             any(
-                isinstance(t, (list, tuple)) and len(t) == 3 and t[1] == "in"
+                isinstance(t, (list, tuple)) and len(t) == 3 and t[0] == "x_studio_state"
                 for t in final_domain
             )
         )

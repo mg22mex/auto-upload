@@ -447,7 +447,7 @@ Standalone FastAPI app: `src/voice_gateway/vapi_bridge.py` — Riley tools:
 
 | Route | Role |
 |-------|------|
-| `POST /vapi/inventory` | Odoo available-only (`sale_ok` + Studio state Disponible; excludes sold/reserved). `brand`+`model` AND filters; **1.5s** timeout; auth reuse; **live Odoo** (`use_cache=False`; `ODOO_INVENTORY_CACHE_TTL_SEC` default **0**). TTS: `Ubicación: Lote Periférico` (`*`) / `Lote San Felipe` (`+`); marker `-` → *Disponible para entrega en la sucursal de tu preferencia (Periférico o San Felipe)* (never say Consignación / Sucursal Autosell). Soft null coercion (no 422). |
+| `POST /vapi/inventory` | Live Odoo published stock only: `sale_ok` + `active` + SKU (`default_code`) + `list_price` ≥ min; if Studio state field exists → Disponible/available only (**never** soft-widen to sold/archived; **never** mock vehicles). Empty → TTS “No encontré…”. `brand`+`model` AND; **1.5s** timeout; `use_cache=False`; `ODOO_INVENTORY_CACHE_TTL_SEC` default **0**. TTS lots `*`/`+`; `-` → flexible delivery (never Consignación). Soft null coercion (no 422). |
 | `POST /vapi/financing` | Local Scotiabank-calibrated amortization |
 | `POST /vapi/tradein` | Autométrica Valor Compra estimate |
 | `POST /vapi/lead` · `/vapi/crm-lead` | CRM upsert → lot marker sets `physical_location` + `team_id` (RR branch) → **background** Evolution WhatsApp (`dispatch_lead_whatsapp`; None-safe optionals) |
