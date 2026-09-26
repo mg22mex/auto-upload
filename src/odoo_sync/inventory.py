@@ -314,8 +314,21 @@ def query_inventory(
         available_only=available_only,
         state_field=state_field if available_only else None,
     )
+    logger.info(
+        "inventory XML-RPC domain model=product.template state_field=%s "
+        "available_only=%s limit=%s domain=%s",
+        state_field,
+        available_only,
+        cap,
+        domain,
+    )
     rows = list(
         execute_kw("product.template", "search_read", [domain], opts) or []
+    )
+    logger.info(
+        "inventory Odoo raw rows n=%s: %s",
+        len(rows),
+        [{k: r.get(k) for k in ("id", "name", "list_price", "default_code")} for r in rows],
     )
     if use_cache:
         cache_set(key, rows)

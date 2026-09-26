@@ -39,11 +39,17 @@ _ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(_ROOT / ".env")
 
 logger = logging.getLogger(__name__)
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s:%(name)s:%(message)s",
+    )
+logger.setLevel(logging.INFO)
 
 DEFAULT_ODOO_URL = "https://autosellmx.odoo.com"
 DEFAULT_ODOO_DB = "autosellmx"
 RESULT_LIMIT = 3
-INVENTORY_TIMEOUT_SEC = 1.5
+INVENTORY_TIMEOUT_SEC = float(os.getenv("VAPI_INVENTORY_TIMEOUT_SEC") or "5.0")
 INVENTORY_TIMEOUT_SPEECH = (
     "El inventario tardó un momento. ¿Agendamos una prueba de manejo "
     "o te envío opciones por WhatsApp?"
@@ -728,10 +734,31 @@ async def handle_inventory_payload(payload: dict[str, Any]) -> VapiToolResponse:
     calls = extract_tool_calls(payload)
     results: list[VapiToolResult] = []
     for call_id, args in calls:
+        logger.info(
+            "inventory toolCallId=%s args brand=%r model=%r year=%r max_price=%r",
+            call_id,
+            args.brand,
+            args.model,
+            args.year,
+            args.max_price,
+        )
         try:
             rows = await asyncio.wait_for(
                 _search_inventory_live(args),
                 timeout=INVENTORY_TIMEOUT_SEC,
+            )
+            logger.info(
+                "inventory toolCallId=%s pre-TTS rows=%s",
+                call_id,
+                [
+                    {
+                        "id": r.get("id"),
+                        "name": r.get("name"),
+                        "list_price": r.get("list_price"),
+                        "default_code": r.get("default_code"),
+                    }
+                    for r in rows
+                ],
             )
             speech = format_inventory_speech(rows, args)
         except asyncio.TimeoutError:
@@ -750,7 +777,12 @@ async def handle_inventory_payload(payload: dict[str, Any]) -> VapiToolResponse:
                 call_id,
             )
         results.append(VapiToolResult(toolCallId=call_id, result=speech))
-    return VapiToolResponse(results=results)
+    response = VapiToolResponse(results=results)
+    logger.info(
+        "inventory final response: %s",
+        response.model_dump() if hasattr(response, "model_dump") else response,
+    )
+    return response
 
 
 # --- Financing -------------------------------------------------------------------
@@ -1128,9 +1160,26 @@ def health() -> dict[str, str]:
     return {"status": "ok", "service": "vapi-bridge"}
 
 
+def _safe_request_headers(request: Request) -> dict[str, str]:
+    """Loggable headers — strip Authorization / Cookie secrets."""
+    redact = {"authorization", "cookie", "x-api-key", "proxy-authorization"}
+    out: dict[str, str] = {}
+    for key, value in request.headers.items():
+        if key.lower() in redact:
+            out[key] = "***"
+        else:
+            out[key] = value
+    return out
+
+
 @app.post("/vapi/inventory", response_model=VapiToolResponse)
 async def vapi_inventory(request: Request) -> VapiToolResponse:
     payload = await _read_json_object(request)
+    logger.info(
+        "POST /vapi/inventory headers=%s body=%s",
+        _safe_request_headers(request),
+        json.dumps(payload, ensure_ascii=False, default=str)[:4000],
+    )
     try:
         return await handle_inventory_payload(payload)
     except ValueError as exc:
