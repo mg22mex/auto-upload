@@ -1,0 +1,40 @@
+[Unit]
+Description=Cloudflare quick tunnel (trycloudflare) + Vapi tool URL sync
+Documentation=file:///home/ubuntu/auto-upload/SETUP.md
+After=network-online.target vapi-bridge.service
+Wants=network-online.target
+Wants=vapi-bridge.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/auto-upload
+
+Environment=QUICK_TUNNEL_LOG=/tmp/oracle_quick_tunnel.log
+Environment=QUICK_TUNNEL_ORIGIN=http://127.0.0.1:8000
+Environment=VAPI_BRIDGE_ROOT=/home/ubuntu/auto-upload
+Environment=VAPI_SYNC_WAIT_SEC=90
+Environment=PYTHONUNBUFFERED=1
+Environment=CLOUDFLARED_BIN=/usr/local/bin/cloudflared
+
+# Do NOT EnvironmentFile= the full project .env (JSON REPS_* breaks systemd).
+# sync_vapi_tool_urls.py loads WorkingDirectory/.env via python-dotenv.
+
+ExecStart=/home/ubuntu/auto-upload/scripts/run_quick_tunnel.sh
+
+# Poll log for new hostname, then PATCH all four Vapi tool server.urls.
+# Leading "-" = do not fail the tunnel if Vapi API is briefly unreachable.
+ExecStartPost=-/home/ubuntu/auto-upload/scripts/wait_and_sync_vapi_urls.sh
+
+Restart=always
+RestartSec=5
+TimeoutStartSec=120
+TimeoutStopSec=20
+
+# Keep stdout/stderr on journal for unit status; tunnel URL lives in QUICK_TUNNEL_LOG.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

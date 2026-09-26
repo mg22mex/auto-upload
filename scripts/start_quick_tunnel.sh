@@ -5,6 +5,7 @@ export HOME="${HOME:-/home/mg}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 export PATH="/usr/bin:/bin:${HOME}/.local/bin:${PATH:-}"
 
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LOG="${QUICK_TUNNEL_LOG:-/tmp/vapi_quick_tunnel.log}"
 
 # Reuse an already-running quick tunnel (--url) if present.
@@ -46,3 +47,12 @@ if [[ -z "$URL" ]]; then
   exit 1
 fi
 echo "$URL"
+# Optional: push new hostname into Vapi tool server.urls (needs VAPI_API_KEY|VAPI_TOKEN).
+if [[ "${VAPI_SYNC_ON_QUICK_TUNNEL:-1}" == "1" ]]; then
+  PY="${ROOT}/.venv/bin/python"
+  SYNC="${ROOT}/scripts/sync_vapi_tool_urls.py"
+  if [[ -x "$PY" && -f "$SYNC" ]]; then
+    "$PY" "$SYNC" --base-url "$URL" >&2 || \
+      echo "WARN: Vapi tool URL sync failed (tunnel still up: $URL)" >&2
+  fi
+fi

@@ -498,16 +498,30 @@ curl -fsS http://127.0.0.1:8000/health
 curl -fsS http://127.0.0.1:8082/   # Evolution welcome JSON
 ```
 
-**Quick tunnel on Oracle** (ephemeral; named unit can stay up):
+**Quick tunnel on Oracle** (ephemeral hostname; auto-PATCHes Vapi tool `server.url`):
 
 ```bash
-nohup cloudflared tunnel --no-autoupdate --protocol http2 --edge-ip-version 4 \
-  --url http://localhost:8000 > /tmp/oracle_quick_tunnel.log 2>&1 &
-sleep 4
+# Preferred: systemd unit (ExecStartPost → scripts/wait_and_sync_vapi_urls.sh)
+sudo cp deploy/cloudflared-quick-tunnel.oracle.service \
+  /etc/systemd/system/cloudflared-quick-tunnel.service
+sudo chmod +x scripts/wait_and_sync_vapi_urls.sh scripts/sync_vapi_tool_urls.py
+# Requires VAPI_API_KEY or VAPI_TOKEN in /home/ubuntu/auto-upload/.env
+sudo systemctl daemon-reload
+sudo systemctl enable --now cloudflared-quick-tunnel.service
+journalctl -u cloudflared-quick-tunnel -n 40 --no-pager
 grep -Eo 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/oracle_quick_tunnel.log | tail -n 1
-# smoke:
-# curl -fsS -X POST "$URL/vapi/inventory" -H 'Content-Type: application/json' -d '{"brand":"Mazda"}'
+
+# Manual one-shot sync (any live base URL):
+#   .venv/bin/python scripts/sync_vapi_tool_urls.py --from-log /tmp/oracle_quick_tunnel.log
+#   .venv/bin/python scripts/sync_vapi_tool_urls.py --base-url https://….trycloudflare.com
+
+# Ad-hoc (no systemd): also syncs when VAPI_SYNC_ON_QUICK_TUNNEL=1 (default)
+#   bash scripts/start_quick_tunnel.sh
 ```
+
+Do **not** `pkill cloudflared` blindly — that also kills the named connector
+(`cloudflared-vapi-bridge.service`). Stop only the quick unit:
+`sudo systemctl stop cloudflared-quick-tunnel`.
 
 ```bash
 cd /Extra/Yandex.Disk/Autosell/Auto-upload   # or ~/auto-upload
