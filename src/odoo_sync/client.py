@@ -226,6 +226,7 @@ class OdooCRMClient(WhatsAppMixin, FleetMixin, DocumentsMixin, OdooClient):
             "type": "consu",
             "is_storable": True,
             "active": True,
+            "sale_ok": True,
             "x_studio_state": "available",
         }
         if categ_id is not None:
@@ -245,6 +246,14 @@ class OdooCRMClient(WhatsAppMixin, FleetMixin, DocumentsMixin, OdooClient):
                     "type",
                     "description_sale",
                     "x_studio_state",
+                    "sale_ok",
+                ),
+                (
+                    "is_storable",
+                    "type",
+                    "description_sale",
+                    "x_studio_state",
+                    "sale_ok",
                     "active",
                 ),
             ):
@@ -389,6 +398,121 @@ class OdooCRMClient(WhatsAppMixin, FleetMixin, DocumentsMixin, OdooClient):
             )
         return products
 
+    def list_saleable_web_products(
+        self,
+        *,
+        categ_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """``sale_ok`` + ``active`` templates with SKU (Vapi / Beatriz pool)."""
+        domain: list[Any] = [
+            ("sale_ok", "=", True),
+            ("active", "=", True),
+            ("default_code", "!=", False),
+        ]
+        if categ_id is not None:
+            domain.append(("categ_id", "=", int(categ_id)))
+        rows = self.execute_kw(
+            "product.template",
+            "search_read",
+            [domain],
+            {
+                "fields": [
+                    "id",
+                    "name",
+                    "default_code",
+                    "list_price",
+                    "description_sale",
+                    "description",
+                ],
+                "limit": 5000,
+            },
+        )
+        out: list[dict[str, Any]] = []
+        for row in rows or []:
+            code = str(row.get("default_code") or "").strip()
+            if not code:
+                continue
+            out.append(
+                {
+                    "id": int(row["id"]),
+                    "name": str(row.get("name") or ""),
+                    "default_code": code,
+                    "list_price": float(row.get("list_price") or 0),
+                    "description_sale": row.get("description_sale") or "",
+                    "description": row.get("description") or "",
+                }
+            )
+        return out
+
+    DEPRECATION_MARKER = "[DESACTIVADO AUTOMÁTICAMENTE - REMOVIDO DE AUTOSELL.MX]"
+
+    def deprecate_web_missing_product(
+        self,
+        product: dict[str, Any],
+        *,
+        note_date: str | None = None,
+    ) -> dict[str, Any]:
+        """Hide from sales/Vapi: ``sale_ok=False`` + deprecation note. No invoices.
+
+        Does **not** create ``account.move`` / sale orders. Leaves ``active=True``
+        so the template remains visible in the Odoo back office.
+        """
+        from datetime import date as date_cls
+
+        product_id = int(product["id"])
+        stamp = (note_date or date_cls.today().isoformat()).strip()
+        marker_line = f"{self.DEPRECATION_MARKER} ({stamp})"
+        existing = str(
+            product.get("description_sale")
+            or product.get("description")
+            or ""
+        ).strip()
+        if self.DEPRECATION_MARKER in existing:
+            new_note = existing
+        else:
+            new_note = f"{existing}\n{marker_line}".strip() if existing else marker_line
+
+        # Prefer description_sale; fall back to description if field rejected.
+        last_exc: BaseException | None = None
+        for field in ("description_sale", "description"):
+            vals = {"sale_ok": False, field: new_note}
+            try:
+                self.execute_kw(
+                    "product.template",
+                    "write",
+                    [[product_id], vals],
+                )
+                return {
+                    "id": product_id,
+                    "default_code": str(product.get("default_code") or ""),
+                    "name": str(product.get("name") or ""),
+                    "sale_ok": False,
+                    "note_field": field,
+                    "note": marker_line,
+                }
+            except Exception as exc:
+                last_exc = exc
+                continue
+        # Last resort: sale_ok only.
+        try:
+            self.execute_kw(
+                "product.template",
+                "write",
+                [[product_id], {"sale_ok": False}],
+            )
+            return {
+                "id": product_id,
+                "default_code": str(product.get("default_code") or ""),
+                "name": str(product.get("name") or ""),
+                "sale_ok": False,
+                "note_field": None,
+                "note": marker_line,
+            }
+        except Exception as exc:
+            raise OdooCRMError(
+                f"deprecate failed id={product_id}: {exc or last_exc}"
+            ) from exc
+
     def archive_orphan_vehicles(
         self,
         active_default_codes: set[str] | list[str],
@@ -411,6 +535,15 @@ class OdooCRMClient(WhatsAppMixin, FleetMixin, DocumentsMixin, OdooClient):
                 inventory_status="sold",
                 active=False,
             )
+            # Also hide from Vapi sale_ok filter (best-effort; ignore field errors).
+            try:
+                self.execute_kw(
+                    "product.template",
+                    "write",
+                    [[int(product["id"])], {"sale_ok": False}],
+                )
+            except Exception:
+                pass
             archived.append(
                 {
                     **product,

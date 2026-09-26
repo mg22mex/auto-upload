@@ -1,0 +1,20 @@
+[Unit]
+Description=Autosell web catalog → Odoo sale_ok deprecation sync
+Documentation=file:///home/ubuntu/auto-upload/SETUP.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/auto-upload
+Environment=PYTHONUNBUFFERED=1
+# Do NOT EnvironmentFile= full .env (JSON REPS_* breaks systemd).
+# Script loads WorkingDirectory/.env via python-dotenv.
+ExecStart=/home/ubuntu/auto-upload/.venv/bin/python scripts/sync_web_inventory_to_odoo.py
+Nice=10
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target

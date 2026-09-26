@@ -1,0 +1,13 @@
+[Unit]
+Description=Run Odoo web-inventory deprecation sync every 2 hours
+Documentation=file:///home/ubuntu/auto-upload/SETUP.md
+
+[Timer]
+# Every 2 hours on the clock (UTC on Oracle).
+OnCalendar=*-*-* 00/2:00:00
+AccuracySec=5min
+Persistent=true
+Unit=odoo-inventory-sync.service
+
+[Install]
+WantedBy=timers.target

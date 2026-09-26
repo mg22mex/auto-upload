@@ -385,6 +385,7 @@ class TestArchiveOrphans(unittest.TestCase):
                 },
             ],
             True,  # write sold + active=False via x_studio_state
+            True,  # sale_ok=False best-effort
         ]
         client = _mock_client(models)
         archived = client.archive_orphan_vehicles({"obj100"}, categ_id=8)
@@ -400,6 +401,35 @@ class TestArchiveOrphans(unittest.TestCase):
             write.args[5],
             [[2], {"active": False, "x_studio_state": "sold"}],
         )
+        sale_ok_write = models.execute_kw.call_args_list[2]
+        self.assertEqual(
+            sale_ok_write.args[5],
+            [[2], {"sale_ok": False}],
+        )
+
+    def test_deprecate_web_missing_sets_sale_ok_false(self):
+        models = MagicMock()
+        models.execute_kw.return_value = True
+        client = _mock_client(models)
+        result = client.deprecate_web_missing_product(
+            {
+                "id": 77,
+                "default_code": "obj999",
+                "name": "Gone Versa",
+                "description_sale": "old note",
+            },
+            note_date="2026-09-26",
+        )
+        self.assertEqual(result["sale_ok"], False)
+        self.assertEqual(result["note_field"], "description_sale")
+        self.assertIn("DESACTIVADO AUTOMÁTICAMENTE", result["note"])
+        write = models.execute_kw.call_args
+        self.assertEqual(write.args[3], "product.template")
+        self.assertEqual(write.args[4], "write")
+        vals = write.args[5][1]
+        self.assertEqual(vals["sale_ok"], False)
+        self.assertIn("DESACTIVADO AUTOMÁTICAMENTE", vals["description_sale"])
+        self.assertIn("old note", vals["description_sale"])
 
     def test_relist_resets_sold_to_available(self):
         models = MagicMock()

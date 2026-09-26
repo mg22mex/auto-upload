@@ -523,6 +523,23 @@ Do **not** `pkill cloudflared` blindly — that also kills the named connector
 (`cloudflared-vapi-bridge.service`). Stop only the quick unit:
 `sudo systemctl stop cloudflared-quick-tunnel`.
 
+**Odoo web deprecation sync (Oracle, every 2h):** hides Vapi/Beatriz stock when a
+SKU leaves `autosell.mx` (`sale_ok=False` + note; no invoices).
+
+```bash
+# On Oracle VPS:
+sudo cp deploy/odoo-inventory-sync.service deploy/odoo-inventory-sync.timer \
+  /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now odoo-inventory-sync.timer
+systemctl list-timers odoo-inventory-sync.timer --no-pager
+# Dry-run:
+#   .venv/bin/python scripts/sync_web_inventory_to_odoo.py --dry-run
+# One-shot live:
+#   sudo systemctl start odoo-inventory-sync.service
+#   journalctl -u odoo-inventory-sync.service -n 80 --no-pager
+```
+
 ```bash
 cd /Extra/Yandex.Disk/Autosell/Auto-upload   # or ~/auto-upload
 sudo bash deploy/install_vapi_bridge.sh

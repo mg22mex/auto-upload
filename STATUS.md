@@ -12,7 +12,7 @@ Companion to [README.md](./README.md) and [docs/PROJECT_GUIDE.md](./docs/PROJECT
 |------|-------|-------|
 | FB Marketplace sync | **Live** | `account_1` + `account_2`; Playwright on `fb-worker`; create URL `/marketplace/create/vehicle` |
 | Slot allocator | **Live** | `max_listings_per_account: 40`; `enforce_overflow_removals: true`; **FIFO waitlist rotation** (≤15 yields/account/run) |
-| Catalog scrape + Odoo inventory | **Live** | GitHub Actions `sync.yml` (2× daily) |
+| Catalog scrape + Odoo inventory | **Live** | GitHub Actions `sync.yml` (2× daily) + Oracle `odoo-inventory-sync.timer` (every 2h: `sale_ok=False` for web-missing SKUs) |
 | Listing bump / relist | **Live** | Daily incremental, ≥2d age |
 | Voice quote webhook | **Live** | `/webhook/voice-lead`, `/voice/webhook`, `/voice/stream` |
 | **Beatriz Vapi bridge** | **Live on Oracle** | `:8000`; published-stock only; audit logs; timeout **5s**; quick tunnel + **auto Vapi tool URL sync** (`scripts/sync_vapi_tool_urls.py` / `cloudflared-quick-tunnel.service`); TTS lots `*`/`+`; CRM lot→`team_id` RR |
