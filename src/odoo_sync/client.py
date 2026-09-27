@@ -1261,12 +1261,30 @@ class OdooCRMClient(WhatsAppMixin, FleetMixin, DocumentsMixin, OdooClient):
         return user_id
 
     def assign_lead_advisor(self, lead_id: int, user_id: int) -> bool:
-        """Set crm.lead user_id (salesperson)."""
+        """Set crm.lead user_id (salesperson). Skips missing/inactive users."""
+        uid = int(user_id)
+        try:
+            rows = self.execute_kw(
+                "res.users",
+                "search_read",
+                [[["id", "=", uid], ["active", "=", True]]],
+                {"fields": ["id"], "limit": 1},
+            )
+        except Exception as exc:
+            print(f"WARN assign_lead_advisor user lookup id={uid}: {exc}", flush=True)
+            rows = []
+        if not rows:
+            print(
+                f"WARN assign_lead_advisor: res.users({uid}) missing/inactive; "
+                f"skip write on lead={lead_id}",
+                flush=True,
+            )
+            return False
         return bool(
             self.execute_kw(
                 "crm.lead",
                 "write",
-                [[int(lead_id)], {"user_id": int(user_id)}],
+                [[int(lead_id)], {"user_id": uid}],
             )
         )
 

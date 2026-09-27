@@ -267,13 +267,13 @@ def main() -> int:
     if qual_note:
         print(f"NOTE: {qual_note}")
     print(
-        "NOTE: CRM vehicle on this cita is Corolla sticky — Mustang 2024 trade-in "
-        "lived on autosell_periferico session, not written into SF handoff card."
+        "NOTE: sticky vehicle / trade-in overwrite fixed in session_vehicle + "
+        "vapi_chat (_tradein_meta_fields no longer sets interested_vehicle)."
     )
     if assign_fail:
         print(
-            "NOTE: REPS_SAN_FELIPE[0] odoo_id=20 (San Felipe Desk) is NOT a real "
-            "res.users row — Odoo assign failed; WA still went to Desk phone."
+            "NOTE: desk/phone-only REPS entries must omit odoo_id "
+            "(invalid ids like 20 cause assign_lead_advisor Fault)."
         )
     print("\n--- Roster REPS_SAN_FELIPE ---")
     for i, r in enumerate(reps):

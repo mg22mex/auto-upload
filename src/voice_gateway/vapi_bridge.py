@@ -210,6 +210,7 @@ class LeadArgs(BaseModel):
     tradein_summary: str | None = None
     appointment_date: str | None = None
     lead_id: int | None = None
+    branch: str | None = None
 
 
 class VapiToolResult(BaseModel):
@@ -705,6 +706,9 @@ def _parse_lead_dict(raw: dict[str, Any]) -> LeadArgs:
     lead_id = _optional_lead_id(
         raw.get("lead_id") or raw.get("odoo_lead_id") or raw.get("crm_lead_id")
     )
+    branch = _coerce_optional_str(
+        raw.get("branch") or raw.get("sucursal") or raw.get("branch_key")
+    )
     return LeadArgs.model_validate(
         {
             "name": name,
@@ -714,6 +718,7 @@ def _parse_lead_dict(raw: dict[str, Any]) -> LeadArgs:
             "tradein_summary": tradein,
             "appointment_date": appointment,
             "lead_id": lead_id,
+            "branch": branch,
         }
     )
 
@@ -1698,7 +1703,10 @@ def persist_tradein_session(
     *,
     phone: str | None = None,
 ) -> str:
-    """Save tradein_summary + Valor Compra into qualification / Vapi meta."""
+    """Save tradein_summary + Valor Compra into qualification / Vapi meta.
+
+    Does **not** overwrite ``interested_vehicle`` (inventory unit stays sticky).
+    """
     speech = format_tradein_speech(args, valuation)
     amount = float(getattr(valuation, "net_equity", 0) or 0)
     summary = speech
@@ -1706,7 +1714,6 @@ def persist_tradein_session(
     if not digits:
         return summary
     try:
-        from src.voice_gateway.session_vehicle import remember_interested_vehicle
         from src.whatsapp_worker.inbound import QualificationStore
 
         label = (
@@ -1716,7 +1723,6 @@ def persist_tradein_session(
         for sess in store.list_by_phone(digits):
             sess.trade_in_vehicle = label
             sess.down_payment = f"{amount:.2f}"
-            # Keep notes-style summary available via vehicle label + down_payment.
             store.save(sess)
         try:
             from src.voice_gateway.vapi_chat import get_chat_store
@@ -1728,10 +1734,13 @@ def persist_tradein_session(
                 valor_compra=amount,
                 net_trade_in_equity=amount,
                 trade_in_label=label,
+                tradein_make=args.brand.strip(),
+                tradein_model=args.model.strip(),
+                tradein_year=int(args.year),
+                tradein_mileage_km=int(args.mileage or 0),
             )
         except Exception:
             logger.exception("tradein vapi meta persist failed")
-        remember_interested_vehicle(label, phone=digits)
     except Exception:
         logger.exception("persist_tradein_session failed phone=%s", digits)
     return summary
@@ -1833,15 +1842,19 @@ def create_vapi_lead(
 ) -> dict[str, Any]:
     """Upsert crm.lead: new → Paulina title + RR; existing → chatter + stage.
 
-    Branch / ``team_id`` comes from vehicle lot marker (``*`` Periférico,
-    ``+`` San Felipe, ``-`` consignación → Periférico desk) so Odoo Round Robin
-    assigns the correct branch seller.
+    Branch / ``team_id`` prefers explicit ``args.branch`` (Evolution WA instance),
+    else vehicle lot marker (``*`` Periférico, ``+`` San Felipe, ``-`` consignación).
     """
-    from src.odoo_sync.crm import CRMLeadManager
+    from src.config import BRANCH_LABELS
+    from src.odoo_sync.crm import CRMLeadManager, normalize_crm_branch
 
     crm = manager or CRMLeadManager()
     vehicle = (args.interested_vehicle or "").strip() or "Consulta general"
-    branch_key, physical_label = branch_from_vehicle_title(vehicle)
+    if (args.branch or "").strip():
+        branch_key = normalize_crm_branch(args.branch)
+        physical_label = BRANCH_LABELS.get(branch_key)
+    else:
+        branch_key, physical_label = branch_from_vehicle_title(vehicle)
     notes = build_lead_notes(args)
     title = f"{LEAD_TITLE_PREFIX}{args.name.strip()}"[:128]
     stage = resolve_beatriz_stage(
@@ -1989,6 +2002,7 @@ def dispatch_appointment_rep_alert(
             interested_vehicle=_safe_optional_text(args.interested_vehicle),
             appointment_date=appointment,
             financing_summary=_safe_optional_text(args.financing_summary),
+            tradein_summary=_safe_optional_text(args.tradein_summary),
             stage_name=stage,
             lead_id=lead_id,
             assignment=pick,
@@ -2033,18 +2047,25 @@ def handle_lead_payload(
             "appointment_date",
             "lead_id",
             "odoo_lead_id",
+            "branch",
+            "sucursal",
         ),
     )
     results: list[VapiToolResult] = []
     for call_id, args in calls:
         if args.lead_id is None and context_lead_id is not None:
             args = args.model_copy(update={"lead_id": context_lead_id})
-        # Appointment / CRM must bind to LAST session vehicle, not a stale LLM arg.
+        # Appointment / CRM bind LAST inventory vehicle from session.
+        # Trade-in must never occupy interested_vehicle (see persist_tradein /
+        # _tradein_meta_fields) so sticky Corolla cannot beat Mustang.
         try:
             from src.voice_gateway.session_vehicle import resolve_interested_vehicle
+            from src.voice_gateway.vapi_chat import get_chat_store
 
             wa_ctx = extract_whatsapp_context(payload)
             phone = (args.phone or wa_ctx.get("phone") or "").strip()
+            digits = re.sub(r"\D", "", phone)
+            updates: dict[str, Any] = {}
             last_vehicle = resolve_interested_vehicle(
                 phone,
                 fallback=args.interested_vehicle,
@@ -2055,7 +2076,31 @@ def handle_lead_payload(
                 or last_vehicle.casefold()
                 != (args.interested_vehicle or "").strip().casefold()
             ):
-                args = args.model_copy(update={"interested_vehicle": last_vehicle})
+                updates["interested_vehicle"] = last_vehicle
+            if not (args.branch or "").strip() and wa_ctx.get("branch"):
+                updates["branch"] = str(wa_ctx["branch"]).strip()
+            if not (args.tradein_summary or "").strip() and digits:
+                try:
+                    meta = get_chat_store().get_meta(digits, "")
+                    summary = str(meta.get("tradein_summary") or "").strip()
+                    label = str(meta.get("trade_in_label") or "").strip()
+                    amount = meta.get("valor_compra") or meta.get("net_trade_in_equity")
+                    if summary:
+                        updates["tradein_summary"] = summary
+                    elif label and amount not in (None, ""):
+                        try:
+                            amt = float(amount)
+                            updates["tradein_summary"] = (
+                                f"{label} · Autométrica ~${amt:,.0f}"
+                            )
+                        except (TypeError, ValueError):
+                            updates["tradein_summary"] = label
+                    elif label:
+                        updates["tradein_summary"] = label
+                except Exception:
+                    logger.exception("lead tradein meta hydrate failed")
+            if updates:
+                args = args.model_copy(update=updates)
         except Exception:
             logger.exception("lead interested_vehicle session bind failed")
         try:

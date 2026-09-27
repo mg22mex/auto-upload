@@ -1301,6 +1301,7 @@ def handoff_appointment_to_rep(
     valuation_amount: str = "",
     monthly_payment: str = "",
     vehicle_of_interest: str = "",
+    tradein_summary: str = "",
 ) -> AppointmentHandoffResult:
     """Move lead to Cita stage, round-robin a rep, and WhatsApp the alert."""
     from src.notifications.whatsapp_rep import notify_rep
@@ -1325,8 +1326,10 @@ def handoff_appointment_to_rep(
             stage_updated = update_lead_stage(client, int(lead_id), STAGE_CITA)
             if assignment.odoo_id:
                 try:
-                    client.assign_lead_advisor(int(lead_id), int(assignment.odoo_id))
-                    advisor_assigned = True
+                    assigned = client.assign_lead_advisor(
+                        int(lead_id), int(assignment.odoo_id)
+                    )
+                    advisor_assigned = bool(assigned)
                 except Exception as exc:
                     print(
                         f"WARN lead_routing: assign advisor failed lead={lead_id}: {exc}",
@@ -1346,6 +1349,8 @@ def handoff_appointment_to_rep(
                 note_bits.append(
                     f"Interés: {vehicle_of_interest or vehicle_interest}"
                 )
+            if tradein_summary:
+                note_bits.append(f"Auto a cambio: {tradein_summary}")
             if valuation_amount:
                 note_bits.append(f"Valor auto a cambio: {valuation_amount}")
             if monthly_payment:
@@ -1369,6 +1374,7 @@ def handoff_appointment_to_rep(
         appointment_time=when or None,
         valuation_amount=valuation_amount or None,
         monthly_payment=monthly_payment or None,
+        tradein_summary=tradein_summary or None,
     )
 
     return AppointmentHandoffResult(

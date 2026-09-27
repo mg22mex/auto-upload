@@ -74,6 +74,7 @@ def format_rep_notification(
     appointment_time: str | None = None,
     valuation_amount: str | None = None,
     monthly_payment: str | None = None,
+    tradein_summary: str | None = None,
 ) -> str:
     """Spanish handoff card sent 1-on-1 to the rep."""
     lines = [
@@ -83,8 +84,13 @@ def format_rep_notification(
         f"💳 *Modalidad:* {payment_label(payment_method)}",
         f"📍 *Sucursal:* {branch_name or 'Periférico'}",
     ]
+    tradein = (tradein_summary or "").strip()
+    if tradein:
+        lines.append(f"🔄 *Auto a cambio:* {tradein}")
     if valuation_amount:
-        lines.append(f"💵 *Valor auto a cambio:* {valuation_amount}")
+        val = str(valuation_amount).strip()
+        if not tradein or val not in tradein:
+            lines.append(f"💵 *Valor auto a cambio:* {val}")
     if monthly_payment:
         lines.append(f"📅 *Mensualidad estimada:* {monthly_payment}")
     if appointment_time:
@@ -101,6 +107,8 @@ def format_appointment_lead_alert(
     branch_name: str = "",
     appointment_date: str | None = None,
     financing_summary: str | None = None,
+    tradein_summary: str | None = None,
+    valuation_amount: str | None = None,
     stage_name: str | None = None,
 ) -> str:
     """Instant WhatsApp alert when Beatriz registers a lead / cita."""
@@ -121,6 +129,12 @@ def format_appointment_lead_alert(
     fin = (financing_summary or "").strip()
     if fin:
         lines.append(f"• Financiamiento: {fin}")
+    tradein = (tradein_summary or "").strip()
+    if tradein:
+        lines.append(f"• Auto a cambio: {tradein}")
+    valuation = (valuation_amount or "").strip()
+    if valuation and (not tradein or valuation not in tradein):
+        lines.append(f"• Valor Autométrica: {valuation}")
     return "\n".join(lines)
 
 
@@ -138,6 +152,7 @@ def notify_rep(
     appointment_time: str | None = None,
     valuation_amount: str | None = None,
     monthly_payment: str | None = None,
+    tradein_summary: str | None = None,
 ) -> RepNotifyResult:
     """Round-robin a rep for the branch and WhatsApp them the lead card."""
     if not rep_notifications_enabled():
@@ -162,6 +177,7 @@ def notify_rep(
         appointment_time=appointment_time,
         valuation_amount=valuation_amount,
         monthly_payment=monthly_payment,
+        tradein_summary=tradein_summary,
     )
 
     client = whatsapp_client
@@ -203,6 +219,8 @@ def notify_appointment_rep(
     interested_vehicle: str | None = None,
     appointment_date: str | None = None,
     financing_summary: str | None = None,
+    tradein_summary: str | None = None,
+    valuation_amount: str | None = None,
     stage_name: str | None = None,
     lead_id: int | None = None,
     assignment: RepAssignment | None = None,
@@ -229,6 +247,8 @@ def notify_appointment_rep(
         branch_name=branch_label(pick.branch),
         appointment_date=appointment_date,
         financing_summary=financing_summary,
+        tradein_summary=tradein_summary,
+        valuation_amount=valuation_amount,
         stage_name=stage_name,
     )
 

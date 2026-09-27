@@ -62,8 +62,13 @@ def remember_interested_vehicle(
     vehicle_year: int | None = None,
     qualification_store: Any | None = None,
     chat_store: Any | None = None,
+    clear_tradein: bool = False,
 ) -> str:
-    """Write *vehicle* into qualification.db + vapi chat meta. Returns stored label."""
+    """Write *vehicle* into qualification.db + vapi chat meta. Returns stored label.
+
+    When ``clear_tradein`` is True (new inventory evaluation / session reset),
+    wipes sticky Autométrica trade-in fields so they cannot override the unit.
+    """
     label = normalize_vehicle_label(vehicle)
     if not label:
         return ""
@@ -72,6 +77,19 @@ def remember_interested_vehicle(
         "vehicle_name": label,
         "interested_vehicle": label,
     }
+    if clear_tradein:
+        meta.update(
+            {
+                "tradein_summary": "",
+                "trade_in_label": "",
+                "valor_compra": "",
+                "net_trade_in_equity": "",
+                "tradein_make": "",
+                "tradein_model": "",
+                "tradein_year": "",
+                "tradein_mileage_km": "",
+            }
+        )
     if price is not None:
         try:
             meta["vehicle_price"] = float(price)
@@ -105,16 +123,26 @@ def remember_interested_vehicle(
                 if matched:
                     sessions = matched
             for sess in sessions:
-                if (sess.vehicle_interest or "").strip() == label:
-                    continue
-                sess.vehicle_interest = label
-                store.save(sess)
-                logger.info(
-                    "session vehicle_interest phone=%s instance=%s → %r",
-                    digits,
-                    sess.instance,
-                    label,
-                )
+                changed = False
+                if (sess.vehicle_interest or "").strip() != label:
+                    sess.vehicle_interest = label
+                    changed = True
+                if clear_tradein and (
+                    (sess.trade_in_vehicle or "").strip()
+                    or (sess.down_payment or "").strip()
+                ):
+                    sess.trade_in_vehicle = ""
+                    sess.down_payment = ""
+                    changed = True
+                if changed:
+                    store.save(sess)
+                    logger.info(
+                        "session vehicle_interest phone=%s instance=%s → %r clear_tradein=%s",
+                        digits,
+                        sess.instance,
+                        label,
+                        clear_tradein,
+                    )
         except Exception:
             logger.exception(
                 "remember_interested_vehicle qualification update failed phone=%s",

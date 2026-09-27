@@ -655,6 +655,7 @@ def _prior_tradein_from_meta(meta: dict[str, Any]) -> Any | None:
 
 
 def _tradein_meta_fields(details: dict[str, Any], speech: str) -> dict[str, Any]:
+    """Persist Autométrica trade-in only — never overwrite inventory interest."""
     out: dict[str, Any] = {"tradein_summary": speech}
     if details.get("make"):
         out["tradein_make"] = details["make"]
@@ -679,8 +680,7 @@ def _tradein_meta_fields(details: dict[str, Any], speech: str) -> dict[str, Any]
         f"{details.get('make', '')} {details.get('model', '')} {details.get('year', '')}"
     ).strip()
     if label:
-        out["vehicle_name"] = label
-        out["interested_vehicle"] = label
+        # trade_in_label only — interested_vehicle stays the inventory unit.
         out["trade_in_label"] = label
     return out
 
@@ -824,18 +824,14 @@ def _finish_forced_tradein(
         session.update_meta(phone, instance, **meta_update)
     except Exception:
         pass
-    vehicle_label = str(meta_update.get("interested_vehicle") or "").strip()
-    if vehicle_label:
-        try:
-            from src.voice_gateway.session_vehicle import remember_interested_vehicle
-
-            remember_interested_vehicle(
-                vehicle_label,
-                phone=phone,
-                instance=instance,
-            )
-        except Exception:
-            pass
+    # Keep inventory interest sticky; expose trade-in separately.
+    try:
+        existing = session.get_meta(phone, instance)
+        inventory = str(
+            existing.get("interested_vehicle") or existing.get("vehicle_name") or ""
+        ).strip()
+    except Exception:
+        inventory = ""
     reply = rewrite_reply_keep_interactive(speech, branch=branch)
     return VapiChatResult(
         reply_text=reply,
@@ -843,8 +839,8 @@ def _finish_forced_tradein(
         tradein_sent=True,
         tradein_forced=True,
         tools_called=["get_tradein_valuation"],
-        vehicle_name=vehicle_label or None,
-        interested_vehicle=vehicle_label or None,
+        vehicle_name=inventory or None,
+        interested_vehicle=inventory or None,
         tradein_summary=speech,
     )
 
@@ -871,7 +867,7 @@ def force_book_appointment(
     appt = detect_appointment_intent(text)
     when = (appt.when_text or "").strip() or "el horario que prefieras"
     meta = meta or {}
-    label = ""
+    trade_label = ""
     if prior_tradein is not None:
         bits = [
             str(getattr(prior_tradein, "make", "") or "").strip(),
@@ -879,15 +875,22 @@ def force_book_appointment(
             str(getattr(prior_tradein, "year", "") or "").strip(),
             str(getattr(prior_tradein, "version", "") or "").strip(),
         ]
-        label = " ".join(b for b in bits if b).strip()
-    if not label:
-        label = str(
-            meta.get("trade_in_label")
-            or meta.get("interested_vehicle")
-            or meta.get("vehicle_name")
-            or vehicle_interest
-            or ""
-        ).strip()
+        trade_label = " ".join(b for b in bits if b).strip()
+    if not trade_label:
+        trade_label = str(meta.get("trade_in_label") or "").strip()
+    inventory = str(
+        meta.get("interested_vehicle")
+        or meta.get("vehicle_name")
+        or vehicle_interest
+        or ""
+    ).strip()
+    # If sticky meta still equals trade-in (legacy), treat as trade-in-only.
+    if (
+        inventory
+        and trade_label
+        and inventory.casefold() == trade_label.casefold()
+    ):
+        inventory = ""
     amount = meta.get("valor_compra") or meta.get("net_trade_in_equity")
     try:
         amount_f = float(amount) if amount not in (None, "") else None
@@ -902,22 +905,28 @@ def force_book_appointment(
             except ValueError:
                 amount_f = None
 
-    if label and amount_f is not None:
+    if trade_label and amount_f is not None:
         tradein_note = (
-            f"Cita para valuación física / prueba de manejo - {label} "
-            f"(Trade-in toma a cuenta: ${amount_f:,.0f})"
+            f"{trade_label} · Autométrica ~${amount_f:,.0f} "
+            f"(valuación física / prueba de manejo)"
         )
-        vehicle_for_crm = label
-    elif label:
-        tradein_note = (
-            f"Cita para valuación física / prueba de manejo - {label}"
-        )
-        vehicle_for_crm = label
+    elif trade_label:
+        tradein_note = f"{trade_label} (valuación física / prueba de manejo)"
+    elif amount_f is not None:
+        tradein_note = f"Auto a cambio · Autométrica ~${amount_f:,.0f}"
     else:
-        tradein_note = "Cita para valuación física / prueba de manejo (Trade-In Inspection)"
-        vehicle_for_crm = "Trade-In Inspection"
+        tradein_note = str(meta.get("tradein_summary") or "").strip() or None
 
-    branch_key = (branch or "periferico").strip().lower() or "periferico"
+    if inventory:
+        vehicle_for_crm = inventory
+    elif trade_label:
+        vehicle_for_crm = trade_label
+    else:
+        vehicle_for_crm = "Consulta general"
+
+    from src.odoo_sync.crm import normalize_crm_branch
+
+    branch_key = normalize_crm_branch(branch)
     name = (customer_name or "Cliente").strip() or "Cliente"
     args = LeadArgs(
         name=name,
@@ -925,6 +934,7 @@ def force_book_appointment(
         interested_vehicle=vehicle_for_crm,
         tradein_summary=tradein_note,
         appointment_date=when,
+        branch=branch_key,
     )
     crm: dict[str, Any] = {}
     try:
@@ -1056,12 +1066,15 @@ def chat_with_beatriz(
     session = store or get_chat_store()
     label = branch_label(branch)
 
-    # Session reset — wipe Vapi thread + return ack (qualification cleared upstream).
+    # Session reset — wipe Vapi thread + qualification sticky vehicle/trade-in.
     if detect_session_reset(message):
         try:
-            session.clear_phone(phone, instance or None)
+            clear_wa_session_context(phone, instance=instance or None)
         except Exception:
-            pass
+            try:
+                session.clear_phone(phone, instance or None)
+            except Exception:
+                pass
         return VapiChatResult(
             reply_text=SESSION_RESET_REPLY,
             tools_called=["session_reset"],
@@ -1388,8 +1401,7 @@ def chat_with_beatriz(
                 details = forced_ti.get("details") if isinstance(forced_ti, dict) else {}
                 if isinstance(details, dict):
                     meta_update.update(_tradein_meta_fields(details, forced_speech))
-                    if meta_update.get("interested_vehicle"):
-                        vehicle_name = str(meta_update["interested_vehicle"])
+                    # Do not overwrite inventory vehicle_name with trade-in.
         except Exception as exc:
             print(
                 f"WARN force_get_tradein_valuation failed phone={phone}: {exc}",

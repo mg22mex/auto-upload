@@ -1009,9 +1009,24 @@ def notify_rep_on_handoff(
     interest = (
         session.vehicle_interest
         or session.initial_message
-        or session.trade_in_vehicle
         or ""
     )
+    tradein_label = (session.trade_in_vehicle or "").strip()
+    valuation_raw = (session.down_payment or "").strip()
+    tradein_summary = ""
+    valuation_amount = ""
+    if tradein_label and valuation_raw:
+        try:
+            amt = float(valuation_raw.replace(",", "").replace("$", ""))
+            tradein_summary = f"{tradein_label} · Autométrica ~${amt:,.0f}"
+            valuation_amount = f"${amt:,.0f}"
+        except ValueError:
+            tradein_summary = f"{tradein_label} · {valuation_raw}"
+            valuation_amount = valuation_raw
+    elif tradein_label:
+        tradein_summary = tradein_label
+    elif valuation_raw:
+        valuation_amount = valuation_raw
 
     if turn.appointment_handoff:
         from src.lead_routing import detect_appointment_intent, handoff_appointment_to_rep
@@ -1038,6 +1053,8 @@ def notify_rep_on_handoff(
             client_name=session.contact_name,
             odoo=odoo,
             whatsapp_client=whatsapp_client,
+            valuation_amount=valuation_amount,
+            tradein_summary=tradein_summary,
         )
         payload = result.as_dict()
         turn.handoff_result = payload
@@ -1050,6 +1067,7 @@ def notify_rep_on_handoff(
                 "advisor_assigned": payload.get("advisor_assigned"),
                 "assignment": payload.get("assignment"),
                 "error": payload.get("error"),
+                "tradein_summary": tradein_summary or None,
             }
         )
         return notice
@@ -1064,6 +1082,8 @@ def notify_rep_on_handoff(
         lead_id=session.lead_id,
         whatsapp_client=whatsapp_client,
         appointment_time=session.appointment_time or None,
+        valuation_amount=valuation_amount or None,
+        tradein_summary=tradein_summary or None,
     )
     return result.as_dict()
 

@@ -128,6 +128,18 @@ class TestMessageFormat(RepNotifyTestCase):
         self.assertIn("• Sucursal: Periférico", text)
         self.assertIn("• Fecha/Hora Cita: mañana 11:00", text)
         self.assertIn("• Financiamiento: 48 meses / $12,000", text)
+        text2 = format_appointment_lead_alert(
+            customer_name="Ana",
+            phone="6140001111",
+            interested_vehicle="+ Mustang Ford 2024",
+            branch_name="San Felipe",
+            tradein_summary="Toyota Corolla 2020 · Autométrica ~$201,200",
+            valuation_amount="$201,200",
+            stage_name="Beatriz Cita",
+        )
+        self.assertIn("• Auto a cambio: Toyota Corolla 2020", text2)
+        self.assertIn("San Felipe", text2)
+        self.assertIn("Mustang", text2)
 
 
 class TestNotifyAppointmentRep(RepNotifyTestCase):
