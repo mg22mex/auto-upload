@@ -1074,7 +1074,10 @@ def dispatch_financing_whatsapp(
 ) -> dict[str, Any]:
     """Generate CrediAuto PDF and send text + document to the customer."""
     from src.notifications.whatsapp import notify_financing_quote
-    from src.pdf_engine.generator import generate_financing_quote_pdf
+    from src.pdf_engine.generator import (
+        generate_financing_quote_pdf,
+        sanitize_vehicle_title,
+    )
 
     phone = (args.phone or "").strip()
     if not phone:
@@ -1083,7 +1086,11 @@ def dispatch_financing_whatsapp(
     try:
         pdf_path = generate_financing_quote_pdf(
             quote,
-            vehicle_data={"name": (args.vehicle_name or "Vehículo").strip() or "Vehículo"},
+            vehicle_data={
+                "name": sanitize_vehicle_title(
+                    (args.vehicle_name or "Vehículo").strip() or "Vehículo"
+                )
+            },
             customer_name=args.customer_name,
             contact={"branch_label": (args.branch or "Autosell").strip() or "Autosell"},
             filename="financing_quote.pdf",

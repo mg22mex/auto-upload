@@ -122,15 +122,36 @@ class TestGenerateVehicleQuotePdf(unittest.TestCase):
 @unittest.skipUnless(_HAS_REPORTLAB, "reportlab not installed")
 class TestFinancingQuotePdf(unittest.TestCase):
     def test_amortization_pdf_named_financing_quote(self):
-        from src.pdf_engine.generator import generate_financing_quote_pdf
+        from src.pdf_engine.generator import (
+            generate_financing_quote_pdf,
+            sanitize_vehicle_title,
+        )
         from src.quote_engine.engine import CalibratedQuoteEngine
+
+        self.assertEqual(
+            sanitize_vehicle_title(
+                "Hola, quiero cotizar una Ford Ranger XLT 2021 por favor"
+            ),
+            "Ford Ranger XLT 2021",
+        )
+        self.assertEqual(
+            sanitize_vehicle_title(
+                "chat noise",
+                make="Ford",
+                model="Ranger XLT",
+                year=2021,
+            ),
+            "Ford Ranger XLT 2021",
+        )
 
         quote = CalibratedQuoteEngine().calculate(450000, 48, down_payment=90000)
         with tempfile.TemporaryDirectory() as tmp:
             path = generate_financing_quote_pdf(
                 quote,
                 output_dir=tmp,
-                vehicle_data={"name": "Toyota Corolla 2022"},
+                vehicle_data={
+                    "name": "Hola, quiero cotizar una Ford Ranger XLT 2021"
+                },
                 customer_name="Luis",
                 filename="financing_quote.pdf",
             )
@@ -142,6 +163,14 @@ class TestFinancingQuotePdf(unittest.TestCase):
             self.assertIn("amortizaci", text.lower())
             self.assertIn("CrediAuto", text)
             self.assertIn("Calendario", text)
+            self.assertIn("Ford Ranger XLT 2021", text)
+            self.assertNotIn("Hola, quiero cotizar", text)
+            self.assertIn("IMPORTANTE", text)
+            self.assertIn("estimaci", text.lower())
+            self.assertIn("aprobaci", text.lower())
+            self.assertIn("instituci", text.lower())
+            # Disclaimer is rendered twice (under summary + footer block).
+            self.assertGreaterEqual(text.count("IMPORTANTE"), 2)
 
 
 if __name__ == "__main__":

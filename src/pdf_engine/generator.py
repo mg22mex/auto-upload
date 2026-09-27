@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import re
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
@@ -36,6 +37,29 @@ class PdfEngineError(RuntimeError):
     """Raised when PDF generation fails."""
 
 
+FINANCING_ESTIMATE_DISCLAIMER = (
+    "IMPORTANTE: Esta cotización es únicamente una estimación informativa. "
+    "Los montos reales, tasa de interés, comisiones y mensualidad final serán "
+    "calculados y confirmados en el momento de la solicitud formal, sujetos a "
+    "aprobación crediticia y políticas vigentes de la institución financiera."
+)
+
+_CHAT_LEAD_IN_RE = re.compile(
+    r"^(?:"
+    r"(?:hola|buen[oa]s?(?:\s+(?:d[ií]as|tardes|noches))?)[,!]?\s+|"
+    r"(?:quiero|quisiera|me\s+gustar[ií]a|busco|necesito|deseo)\s+"
+    r"(?:cotizar|informaci[oó]n(?:\s+(?:de|sobre))?|info(?:\s+(?:de|sobre))?|"
+    r"saber(?:\s+(?:de|sobre))?|una\s+cotizaci[oó]n\s+(?:de|para))?\s*"
+    r"(?:una?|el|la|unos?)?\s*"
+    r")+",
+    re.IGNORECASE,
+)
+_CHAT_TRAIL_RE = re.compile(
+    r"\s*(?:,?\s*)?(?:por\s+favor|gracias|pls|please)\s*[.!]?\s*$",
+    re.IGNORECASE,
+)
+
+
 def _require_reportlab() -> None:
     if not _HAS_REPORTLAB:
         raise PdfEngineError(
@@ -60,6 +84,69 @@ def _text(value: Any, default: str = "—") -> str:
     if value is None or value == "":
         return default
     return str(value).strip() or default
+
+
+def sanitize_vehicle_title(
+    raw: str | None,
+    *,
+    make: str | None = None,
+    model: str | None = None,
+    year: int | str | None = None,
+    default: str = "Vehículo",
+) -> str:
+    """Prefer structured inventory name; strip chat greetings from free text.
+
+    Examples:
+      ``Hola, quiero cotizar una Ford Ranger XLT 2021`` → ``Ford Ranger XLT 2021``
+      make/model/year kwargs always win when provided.
+    """
+    make_s = _text(make, "").strip()
+    model_s = _text(model, "").strip()
+    year_s = _text(year, "").strip()
+    if make_s and model_s:
+        parts = [make_s, model_s]
+        if year_s and year_s != "—":
+            parts.append(year_s)
+        return " ".join(parts)
+
+    text = (raw or "").strip()
+    if not text:
+        return default
+
+    cleaned = _CHAT_LEAD_IN_RE.sub("", text).strip(" ,.-:")
+    cleaned = _CHAT_TRAIL_RE.sub("", cleaned).strip(" ,.-:")
+    # Drop trailing chat clauses after the vehicle name.
+    cleaned = re.split(
+        r"[.!?]|\s+con\s+enganche|\s+a\s+\d|\s+por\s+favor",
+        cleaned,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0].strip(" ,.-:")
+    # Collapse whitespace; cap length for the PDF label column.
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if len(cleaned) > 80:
+        cleaned = cleaned[:77].rsplit(" ", 1)[0].rstrip(",.-") + "…"
+    # Still looks like a full chat sentence → too noisy.
+    if len(cleaned) > 70 and cleaned.lower().startswith(("hola", "buenas", "quiero")):
+        return default
+    return cleaned or default
+
+
+def resolve_vehicle_title(vehicle_data: dict[str, Any] | None) -> str:
+    """Pick the cleanest vehicle label from a vehicle_data dict."""
+    data = vehicle_data or {}
+    return sanitize_vehicle_title(
+        _text(
+            data.get("name")
+            or data.get("vehicle_name")
+            or data.get("title")
+            or data.get("display_name"),
+            "",
+        ),
+        make=data.get("make") or data.get("brand"),
+        model=data.get("model"),
+        year=data.get("year"),
+    )
 
 
 def _styles() -> dict[str, ParagraphStyle]:
@@ -100,6 +187,18 @@ def _styles() -> dict[str, ParagraphStyle]:
             fontSize=8,
             textColor=colors.HexColor("#555555"),
             alignment=TA_CENTER,
+        ),
+        "disclaimer": ParagraphStyle(
+            "Disclaimer",
+            parent=base["Normal"],
+            fontSize=8.5,
+            leading=11,
+            textColor=colors.HexColor("#6B1D1D"),
+            backColor=colors.HexColor("#F8EFEF"),
+            borderPadding=6,
+            spaceBefore=8,
+            spaceAfter=8,
+            alignment=TA_LEFT,
         ),
         "right": ParagraphStyle(
             "Right",
@@ -237,12 +336,7 @@ def build_quote_pdf_bytes(
             author="Autosell MX",
         )
 
-        vehicle_name = _text(
-            vehicle_data.get("name")
-            or vehicle_data.get("vehicle_name")
-            or vehicle_data.get("title"),
-            "Vehículo",
-        )
+        vehicle_name = resolve_vehicle_title(vehicle_data)
         features = vehicle_data.get("features") or vehicle_data.get("key_features") or []
         if isinstance(features, str):
             feature_text = features
@@ -521,12 +615,7 @@ def build_financing_quote_pdf_bytes(
         )
         issued = date.today()
         expires = issued + timedelta(days=max(1, int(valid_days)))
-        vehicle_name = _text(
-            vehicle_data.get("name")
-            or vehicle_data.get("vehicle_name")
-            or vehicle_data.get("title"),
-            "Vehículo",
-        )
+        vehicle_name = resolve_vehicle_title(vehicle_data)
         profile = _text(quote_data.get("profile_name"), "Scotiabank CrediAuto")
         client = _text(customer_name, "")
 
@@ -561,7 +650,14 @@ def build_financing_quote_pdf_bytes(
             ]
         )
         story.append(_kv_table(summary_rows))
-        story.append(Spacer(1, 0.12 * inch))
+        story.append(Spacer(1, 0.1 * inch))
+        story.append(
+            Paragraph(
+                f"<b>{FINANCING_ESTIMATE_DISCLAIMER}</b>",
+                styles["disclaimer"],
+            )
+        )
+        story.append(Spacer(1, 0.08 * inch))
         story.append(Paragraph("Desglose financiero", styles["h2"]))
         story.append(_finance_table(quote_data))
 
@@ -572,6 +668,13 @@ def build_financing_quote_pdf_bytes(
             story.append(_amortization_table(list(schedule)))
 
         story.append(Spacer(1, 0.2 * inch))
+        story.append(
+            Paragraph(
+                f"<b>{FINANCING_ESTIMATE_DISCLAIMER}</b>",
+                styles["disclaimer"],
+            )
+        )
+        story.append(Spacer(1, 0.08 * inch))
         story.append(
             Paragraph(
                 f"Cotización emitida: {issued.isoformat()} · Vigencia hasta: "
