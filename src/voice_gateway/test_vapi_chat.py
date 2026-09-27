@@ -69,6 +69,85 @@ class TestDownPaymentDetect(unittest.TestCase):
             200000.0,
         )
 
+    def test_mileage_mil_km_not_enganche(self):
+        self.assertIsNone(
+            detect_down_payment_amount(
+                "¿En cuánto me valúan un Corolla 2020 con 50 mil km?"
+            )
+        )
+
+    def test_tradein_phrase_blocks_enganche(self):
+        self.assertIsNone(
+            detect_down_payment_amount(
+                "Cuanto me estimas un corolla 2020 con 50 mil kilometros"
+            )
+        )
+
+
+class TestSessionResetDetect(unittest.TestCase):
+    def test_phrases(self):
+        from src.voice_gateway.vapi_chat import detect_session_reset
+
+        for text in ("reiniciar", "reset", "empezar de nuevo", "nueva conversación"):
+            with self.subTest(text=text):
+                self.assertTrue(detect_session_reset(text), text)
+        self.assertFalse(detect_session_reset("cuanto cuesta el mustang"))
+
+
+class TestTradeinOverridesMustangContext(unittest.TestCase):
+    def test_tradein_short_circuits_before_vapi(self):
+        from src.voice_gateway import vapi_chat as vc
+
+        forced = {
+            "ok": True,
+            "tool": "get_tradein_valuation",
+            "speech": (
+                "Estimación de toma a cuenta para Toyota Corolla 2020 LE (50,000 km): "
+                "~$201,200 MXN (Sujeto a inspección física y mecánica en sucursal)."
+            ),
+            "details": {
+                "make": "Toyota",
+                "model": "Corolla",
+                "year": 2020,
+                "version": "LE",
+                "mileage_km": 50000,
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            store = VapiChatSessionStore(Path(tmp) / "chats.db")
+            store.set_chat_id(
+                "6143231198",
+                "prev-mustang",
+                meta={
+                    "vehicle_price": 890000,
+                    "vehicle_name": "Ford Mustang GT 2025",
+                    "interested_vehicle": "Ford Mustang GT 2025",
+                },
+            )
+            with patch.object(vc, "_api_key", return_value="k"), patch.object(
+                vc, "_assistant_id", return_value="asst"
+            ), patch.object(vc, "_http_json") as http, patch.object(
+                vc, "force_get_tradein_valuation", return_value=forced
+            ) as force_ti, patch.object(
+                vc, "force_calculate_financing"
+            ) as force_fin:
+                result = vc.chat_with_beatriz(
+                    text="¿En cuánto me valúan un Corolla 2020 con 50 mil km?",
+                    phone="6143231198",
+                    customer_name="Test",
+                    branch="periferico",
+                    vehicle_interest="Ford Mustang GT 2025",
+                    store=store,
+                )
+        http.assert_not_called()
+        force_fin.assert_not_called()
+        force_ti.assert_called_once()
+        self.assertTrue(result.tradein_forced)
+        self.assertIn("get_tradein_valuation", result.tools_called)
+        self.assertIn("201,200", result.reply_text)
+        self.assertNotIn("Mustang", result.reply_text)
+        self.assertIn("Corolla", result.interested_vehicle or "")
+
 
 class TestTermMonthsDetect(unittest.TestCase):
     def test_60_meses(self):

@@ -56,9 +56,34 @@ _MONEY_CONTEXT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# "50 mil km" / "50,000 kilómetros" is mileage, not engache.
+_MILEAGE_AMOUNT_RE = re.compile(
+    r"(\d{1,3}(?:[,\s]\d{3})+|\d{4,7}|\d{1,3}\s*mil|\d{1,3}\s*k)\s*"
+    r"(?:km|kms|kil[oó]metros?)\b",
+    re.IGNORECASE,
+)
+
+_SESSION_RESET_RE = re.compile(
+    r"\b("
+    r"reiniciar|reset|restart|"
+    r"empezar\s+de\s+nuevo|"
+    r"nueva\s+conversaci[oó]n|"
+    r"borrar\s+(?:sesi[oó]n|contexto)|"
+    r"limpiar\s+(?:sesi[oó]n|contexto)|"
+    r"olvidar\s+(?:el\s+)?contexto"
+    r")\b",
+    re.IGNORECASE,
+)
+
 _TERM_MONTHS_RE = re.compile(
     r"(?:a|plazo|financiar|financiamiento)?\s*(?:de\s*)?(\d{1,2})\s*meses",
     re.IGNORECASE,
+)
+
+SESSION_RESET_REPLY = (
+    "Listo, reinicié la conversación. "
+    "¿En qué te puedo ayudar? Puedo buscar inventario, cotizar financiamiento "
+    "o valuar tu auto a cuenta."
 )
 
 
@@ -206,13 +231,21 @@ def parse_tool_result_blobs(chat_payload: dict[str, Any]) -> list[dict[str, Any]
 
 
 def detect_down_payment_amount(text: str) -> float | None:
-    """Extract engache amount from user text (e.g. ``$200,000``, ``200 mil``)."""
+    """Extract engache amount from user text (e.g. ``$200,000``, ``200 mil``).
+
+    Mileage figures (``50 mil km``) are ignored so trade-in appraisals do not
+    trigger ``calculate_financing``.
+    """
     raw = (text or "").strip()
     if not raw:
         return None
-    # Prefer amounts near financing keywords; else any large money figure.
+    # Appraisal / toma a cuenta never carries an engache in the same phrase.
+    if detect_tradein_intent(raw):
+        return None
+    # Mask mileage spans so "50 mil km" is not parsed as $50,000 engache.
+    masked = _MILEAGE_AMOUNT_RE.sub(" ", raw)
     candidates: list[float] = []
-    for match in _DOWN_PAYMENT_RE.finditer(raw):
+    for match in _DOWN_PAYMENT_RE.finditer(masked):
         if match.group(2):
             amount = float(match.group(2)) * 1000.0
         elif match.group(3):
@@ -232,6 +265,11 @@ def detect_down_payment_amount(text: str) -> float | None:
     # Bare large number (≥ 50k) treated as engache in financing threads.
     big = [c for c in candidates if c >= 50000]
     return max(big) if big else None
+
+
+def detect_session_reset(text: str) -> bool:
+    """True when the user asks to wipe conversation / vehicle context."""
+    return bool(_SESSION_RESET_RE.search(text or ""))
 
 
 def branch_label(branch: str | None) -> str:
@@ -484,6 +522,44 @@ class VapiChatSessionStore:
         chat_id = self.get_chat_id(phone, instance) or ""
         self.set_chat_id(phone, chat_id or "pending", instance, meta=fields)
 
+    def clear_phone(self, phone: str, instance: str | None = None) -> int:
+        """Drop Vapi previousChatId + meta for *phone* (all instances if None)."""
+        digits = re.sub(r"\D", "", phone or "")
+        if not digits and not (phone or "").strip():
+            return 0
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    "SELECT phone, instance FROM vapi_wa_chats"
+                ).fetchall()
+                deleted = 0
+                for row_phone, row_inst in rows:
+                    row_digits = re.sub(r"\D", "", str(row_phone or ""))
+                    match_phone = str(row_phone or "") == phone or (
+                        digits
+                        and (
+                            row_digits == digits
+                            or (
+                                len(digits) >= 10
+                                and row_digits.endswith(digits[-10:])
+                            )
+                        )
+                    )
+                    if not match_phone:
+                        continue
+                    if instance is not None and str(row_inst or "") != instance:
+                        continue
+                    conn.execute(
+                        "DELETE FROM vapi_wa_chats WHERE phone=? AND instance=?",
+                        (row_phone, row_inst or ""),
+                    )
+                    deleted += 1
+                conn.commit()
+            finally:
+                conn.close()
+        return deleted
+
 
 _STORE: VapiChatSessionStore | None = None
 _STORE_LOCK = threading.Lock()
@@ -502,6 +578,33 @@ def detect_tradein_intent(text: str) -> bool:
     from src.lead_routing import parse_payment_intent
 
     return bool(parse_payment_intent(text).trade_in)
+
+
+def clear_wa_session_context(
+    phone: str,
+    *,
+    instance: str | None = None,
+) -> dict[str, Any]:
+    """Wipe qualification + Vapi chat memory for clean test / user reset."""
+    cleared_q: list[dict[str, Any]] = []
+    try:
+        from src.whatsapp_worker.inbound import QualificationStore
+
+        cleared_q = QualificationStore().clear_conversation(
+            phone, instance=instance
+        )
+    except Exception as exc:
+        cleared_q = [{"error": str(exc)}]
+    chat_deleted = 0
+    try:
+        chat_deleted = get_chat_store().clear_phone(phone, instance)
+    except Exception:
+        chat_deleted = 0
+    return {
+        "phone": phone,
+        "qualification": cleared_q,
+        "vapi_chats_deleted": chat_deleted,
+    }
 
 
 def force_get_tradein_valuation(
@@ -690,6 +793,82 @@ def chat_with_beatriz(
         return VapiChatResult(reply_text="", error="empty message")
 
     session = store or get_chat_store()
+    label = branch_label(branch)
+
+    # Session reset — wipe Vapi thread + return ack (qualification cleared upstream).
+    if detect_session_reset(message):
+        try:
+            session.clear_phone(phone, instance or None)
+        except Exception:
+            pass
+        return VapiChatResult(
+            reply_text=SESSION_RESET_REPLY,
+            tools_called=["session_reset"],
+        )
+
+    # Trade-in / valuation takes strict precedence over sticky financing context.
+    # Short-circuit BEFORE Vapi so previousChatId (e.g. Mustang) cannot fire PDF.
+    if detect_tradein_intent(message):
+        try:
+            forced_ti = force_get_tradein_valuation(text=message, phone=phone)
+            speech = str(forced_ti.get("speech") or "").strip()
+            if speech:
+                meta_update: dict[str, Any] = {"tradein_summary": speech}
+                details = (
+                    forced_ti.get("details") if isinstance(forced_ti, dict) else None
+                )
+                vehicle_label = ""
+                if isinstance(details, dict):
+                    vehicle_label = (
+                        f"{details.get('make', '')} {details.get('model', '')} "
+                        f"{details.get('year', '')}"
+                    ).strip()
+                    amount_m = re.search(r"~\$([0-9,]+)", speech)
+                    if amount_m:
+                        try:
+                            amount = float(amount_m.group(1).replace(",", ""))
+                            meta_update["valor_compra"] = amount
+                            meta_update["net_trade_in_equity"] = amount
+                        except ValueError:
+                            pass
+                if vehicle_label:
+                    meta_update["vehicle_name"] = vehicle_label
+                    meta_update["interested_vehicle"] = vehicle_label
+                try:
+                    session.update_meta(phone, instance, **meta_update)
+                except Exception:
+                    pass
+                if vehicle_label:
+                    try:
+                        from src.voice_gateway.session_vehicle import (
+                            remember_interested_vehicle,
+                        )
+
+                        remember_interested_vehicle(
+                            vehicle_label,
+                            phone=phone,
+                            instance=instance,
+                        )
+                    except Exception:
+                        pass
+                reply = rewrite_reply_keep_interactive(speech, branch=branch)
+                return VapiChatResult(
+                    reply_text=reply,
+                    previous_chat_id=previous_chat_id
+                    or session.get_chat_id(phone, instance),
+                    tradein_sent=True,
+                    tradein_forced=True,
+                    tools_called=["get_tradein_valuation"],
+                    vehicle_name=vehicle_label or None,
+                    interested_vehicle=vehicle_label or None,
+                    tradein_summary=speech,
+                )
+        except Exception as exc:
+            print(
+                f"WARN force_get_tradein_valuation (early) failed phone={phone}: {exc}",
+                flush=True,
+            )
+
     prev = previous_chat_id or session.get_chat_id(phone, instance)
     meta = session.get_meta(phone, instance)
     from src.pdf_engine.generator import sanitize_vehicle_title
@@ -712,7 +891,6 @@ def chat_with_beatriz(
 
     down = detect_down_payment_amount(message)
     term_from_msg = detect_term_months(message)
-    label = branch_label(branch)
 
     context_bits = [
         f"[whatsapp_phone={phone}]",
@@ -741,8 +919,9 @@ def chat_with_beatriz(
     instructions = (
         "Eres Beatriz de Autosell en WhatsApp. "
         "Si el cliente pide valuación / avalúo / 'cuánto me dan por' / 'a cuenta' / "
-        "'estimas', DEBES llamar get_tradein_valuation (o estimate_tradein) con "
-        "brand, model, year, mileage y version si la da. "
+        "'estimas' / 'toman', DEBES llamar get_tradein_valuation (o estimate_tradein) "
+        "con brand, model, year, mileage y version si la da — "
+        "NUNCA reutilices calculate_financing ni el vehículo anterior (Mustang, etc.). "
         "Si el cliente da un enganche/cantidad, DEBES llamar calculate_financing "
         + financing_hint
         + "USA el year del inventario (vehicle_year) en calculate_financing. "
@@ -845,9 +1024,11 @@ def chat_with_beatriz(
     )
     forced_speech = ""
     tradein_summary: str | None = None
-    term_for_quote = term_from_msg or int(meta.get("last_term_months") or 0) or DEFAULT_TERM_MONTHS
+    term_for_quote = (
+        term_from_msg or int(meta.get("last_term_months") or 0) or DEFAULT_TERM_MONTHS
+    )
 
-    # Appraisal / toma a cuenta → force Autométrica (before financing).
+    # Fallback trade-in force (early path above is preferred).
     if detect_tradein_intent(message) and not tradein_sent:
         try:
             forced_ti = force_get_tradein_valuation(text=message, phone=phone)
@@ -871,13 +1052,13 @@ def chat_with_beatriz(
                             ]
                         except ValueError:
                             pass
-                    label = (
+                    ti_label = (
                         f"{d.get('make', '')} {d.get('model', '')} {d.get('year', '')}"
                     ).strip()
-                    if label:
-                        meta_update["vehicle_name"] = label
-                        meta_update["interested_vehicle"] = label
-                        vehicle_name = label
+                    if ti_label:
+                        meta_update["vehicle_name"] = ti_label
+                        meta_update["interested_vehicle"] = ti_label
+                        vehicle_name = ti_label
         except Exception as exc:
             print(
                 f"WARN force_get_tradein_valuation failed phone={phone}: {exc}",
@@ -960,14 +1141,18 @@ def chat_with_beatriz(
     )
 
 
+
 __all__ = [
     "CITA_FOLLOWUP",
     "DEFAULT_ASSISTANT_ID",
     "ENV_ENABLED",
+    "SESSION_RESET_REPLY",
     "VapiChatResult",
     "VapiChatSessionStore",
     "chat_with_beatriz",
+    "clear_wa_session_context",
     "detect_down_payment_amount",
+    "detect_session_reset",
     "detect_term_months",
     "detect_tradein_intent",
     "extract_assistant_text",

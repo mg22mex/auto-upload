@@ -446,6 +446,33 @@ def process_qualification_turn(
         if physical_location:
             session.physical_location = physical_location
 
+    # Explicit session wipe (reiniciar / reset / empezar de nuevo).
+    try:
+        from src.voice_gateway.vapi_chat import (
+            SESSION_RESET_REPLY,
+            clear_wa_session_context,
+            detect_session_reset,
+        )
+
+        if detect_session_reset(event.text):
+            clear_wa_session_context(event.phone, instance=event.instance or None)
+            session.vehicle_interest = ""
+            session.trade_in_vehicle = ""
+            session.down_payment = ""
+            session.payment_method = ""
+            session.appointment_time = ""
+            session.initial_message = ""
+            session.state = STATE_AI_ACTIVE
+            session.handling_agent = AGENT_AI
+            session.updated_at = now
+            return QualificationTurnResult(
+                session=session,
+                reply_text=SESSION_RESET_REPLY,
+                routing={"brain": "session_reset", "tools_called": ["session_reset"]},
+            )
+    except Exception:
+        pass
+
     try:
         from src.voice_gateway.vapi_chat import vapi_wa_text_first_enabled
 
@@ -1202,6 +1229,51 @@ class QualificationStore:
                 if sess is not None:
                     out.append(sess)
         return out
+
+    def clear_conversation(
+        self,
+        phone: str,
+        *,
+        instance: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Wipe vehicle / payment / trade-in context; keep phone + branch + lead_id."""
+        from src.lead_routing import AGENT_AI
+
+        targets = self.list_by_phone(phone)
+        if instance is not None:
+            targets = [s for s in targets if s.instance == instance]
+        updated: list[dict[str, Any]] = []
+        for sess in targets:
+            before = {
+                "state": sess.state,
+                "vehicle_interest": sess.vehicle_interest,
+                "trade_in_vehicle": sess.trade_in_vehicle,
+                "down_payment": sess.down_payment,
+            }
+            sess.state = STATE_AI_ACTIVE
+            sess.handling_agent = AGENT_AI
+            sess.vehicle_interest = ""
+            sess.trade_in_vehicle = ""
+            sess.down_payment = ""
+            sess.payment_method = ""
+            sess.appointment_time = ""
+            sess.initial_message = ""
+            sess.updated_at = _utc_now()
+            self.save(sess)
+            updated.append(
+                {
+                    "phone": sess.phone,
+                    "instance": sess.instance,
+                    "before": before,
+                    "after": {
+                        "state": sess.state,
+                        "vehicle_interest": sess.vehicle_interest,
+                        "trade_in_vehicle": sess.trade_in_vehicle,
+                        "down_payment": sess.down_payment,
+                    },
+                }
+            )
+        return updated
 
     def reset_to_ai_active(
         self,
