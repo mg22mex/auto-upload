@@ -1,0 +1,13 @@
+[Unit]
+Description=Poll marketing@ IMAP for Autosell.mx web leads every 2 minutes
+Documentation=file:///home/ubuntu/auto-upload/SETUP.md
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+AccuracySec=30s
+Persistent=true
+Unit=web-leads-imap.service
+
+[Install]
+WantedBy=timers.target

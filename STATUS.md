@@ -24,6 +24,7 @@ Companion to [README.md](./README.md) and [docs/PROJECT_GUIDE.md](./docs/PROJECT
 | Odoo CRM attribution | **Live** | Tag `MG Quote Lead` + UTM medium/source by channel |
 | CrediAuto year term caps | **Live** | `term_limits.py`: ≥Y−2→60m, Y−3/Y−4→48m, ≤Y−5→36m; Beatriz note + PDF Plazo |
 | Session `interested_vehicle` | **Live** | Inventory/financing overwrite `wa_qualification.vehicle_interest` + Vapi chat meta; cita binds last vehicle |
+| Webform email ingest | **Code live** | IMAP `scripts/parse_web_leads.py` + `web-leads-imap.timer` (2 min); needs `WEB_LEADS_IMAP_*` on Oracle |
 | Meta Messenger | **Paused** | Code complete; awaiting Fanpage admin |
 | Native Odoo WA templates | **Paused** | `ODOO_WA_ACCOUNT_*` unset until Meta Manager |
 | FB Page feed posts | **Not started** | Marketplace only today (no Graph `/{page}/feed`) |
@@ -78,6 +79,7 @@ Companion to [README.md](./README.md) and [docs/PROJECT_GUIDE.md](./docs/PROJECT
 - **Page timeline posting:** Not in scope of current Marketplace Playwright path. Future expansion would use Graph `/{page-id}/feed` with per-page tokens (separate from Marketplace sessions).
 
 ### 3. Other backlog
+- **Web leads IMAP:** set `WEB_LEADS_IMAP_*` on Oracle and `systemctl enable --now web-leads-imap.timer`.
 - **DNS:** Neubox CNAME `vapi.autosell.mx` → Cloudflare tunnel hostname (connector already registered on Oracle).
 - Enable `account_3` after clearing old Marketplace inventory.
 - Optional: native Odoo WhatsApp Cloud API once Meta Manager credentials exist.

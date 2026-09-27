@@ -778,6 +778,22 @@ def create_app(
             },
         )
 
+    @app.post("/webhook/web-lead-email")
+    @app.post("/webhook/webform-email")
+    async def web_lead_email_webhook(request: Request) -> JSONResponse:
+        """Mailgun / SendGrid / generic JSON → Odoo web lead + Beatriz WA."""
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"invalid JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="JSON object required")
+        from src.web_leads.pipeline import ingest_webhook_payload
+
+        result = ingest_webhook_payload(payload)
+        code = 200 if result.status in {"ok", "dry_run", "skipped"} else 502
+        return JSONResponse(result.as_dict(), status_code=code)
+
     app.state.gateway = state  # type: ignore[attr-defined]
     return app
 

@@ -7,6 +7,7 @@ Sync [autosell.mx](https://www.autosell.mx) public catalog to **Facebook Marketp
 - **AI Voice & lead webhook:** Live. FastAPI `POST /webhook/voice-lead` (also `/voice/webhook`, `/voice/stream`) → intent/STT → quote → Odoo lead (`MG Quote Lead` + UTM) + 24h follow-up → optional test-drive calendar → PDF → TTS text.
 - **Inbound VoIP:** Live in code. `POST /voice/inbound` parses caller/DID → branch team (`ODOO_TEAM_*`) → CRM upsert + **Llamada Entrante** activity → TwiML/JSON forward.
 - **WhatsApp (Evolution):** Live. Dual instances `autosell_periferico` / `autosell_san_felipe` → qualification state machine → Odoo handoff (`HANDOFF_TO_HUMAN`) + branch auto-reply.
+- **Webform leads:** IMAP poll of `marketing@autosell.mx` (`scripts/parse_web_leads.py` / `web-leads-imap.timer`) or `POST /webhook/web-lead-email` → Odoo `Website` attribution + Beatriz WA + rep notify.
 - **Marketplace WhatsApp CTAs:** Live in description builder. Branch-mapped `wa.me` links appended to every FB listing text.
 - **Meta Messenger webhook:** `[WIP - Paused awaiting Fanpage Administrator permissions]`. Code complete; Page token / webhook subscription pending Fanpage admin.
 - **Scrape, diff & FB posting:** Live (`DRY_RUN=false`) for **account_1** and **account_2**. **account_3** excluded until old listings cleared. Slot allocator: **40 listings/account**, overflow removals on, **FIFO waitlist rotation** (oldest sticky yields when full).

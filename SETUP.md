@@ -544,6 +544,38 @@ systemctl list-timers odoo-inventory-sync.timer --no-pager
 #   journalctl -u odoo-inventory-sync.service -n 80 --no-pager
 ```
 
+**Webform leads (marketing@ IMAP → Odoo + Beatriz WA, every 2 min):**
+
+Blackbox CMS has no webhook API, so notification emails to `marketing@autosell.mx`
+are polled over IMAP, parsed, then:
+
+1. `crm.lead` create/update (`channel=Website`, stage `Nuevo / Web Lead`, RR assign)
+2. Beatriz WhatsApp to the customer
+3. Rep WhatsApp card to the assigned asesor
+
+```bash
+# On Oracle VPS — add IMAP secrets to /home/ubuntu/auto-upload/.env first:
+#   WEB_LEADS_IMAP_HOST=imap.gmail.com
+#   WEB_LEADS_IMAP_PORT=993
+#   WEB_LEADS_IMAP_USER=marketing@autosell.mx
+#   WEB_LEADS_IMAP_PASSWORD=...
+#   WEB_LEAD_STAGE_NAME=Nuevo / Web Lead
+
+sudo cp deploy/web-leads-imap.service deploy/web-leads-imap.timer \
+  /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now web-leads-imap.timer
+systemctl list-timers web-leads-imap.timer --no-pager
+
+# Dry-run / single .eml:
+#   .venv/bin/python scripts/parse_web_leads.py --dry-run
+#   .venv/bin/python scripts/parse_web_leads.py --file /tmp/sample.eml --dry-run
+
+# Optional Mailgun/SendGrid push (instead of IMAP):
+#   POST https://<gateway>/webhook/web-lead-email
+#   {"subject":"...","body":"Nombre: ...\nTeléfono: ...","from":"..."}
+```
+
 ```bash
 cd /Extra/Yandex.Disk/Autosell/Auto-upload   # or ~/auto-upload
 sudo bash deploy/install_vapi_bridge.sh
