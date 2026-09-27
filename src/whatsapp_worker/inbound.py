@@ -675,20 +675,24 @@ def _process_ai_turn(
         )
         if vapi.ok:
             # Sync qualification.db to the vehicle Beatriz just worked on.
+            def _as_text(value: Any) -> str:
+                return value.strip() if isinstance(value, str) else ""
+
             active = (
-                (vapi.interested_vehicle or vapi.vehicle_name or "").strip()
+                _as_text(getattr(vapi, "interested_vehicle", None))
+                or _as_text(getattr(vapi, "vehicle_name", None))
             )
             if active:
                 session.vehicle_interest = active
-            if (vapi.tradein_summary or "").strip():
+            tradein_summary = _as_text(getattr(vapi, "tradein_summary", None))
+            if tradein_summary:
                 session.trade_in_vehicle = (
-                    (vapi.vehicle_name or session.trade_in_vehicle or "").strip()
+                    _as_text(getattr(vapi, "vehicle_name", None))
                     or session.trade_in_vehicle
+                    or active
                 )
                 # Extract amount for down_payment engache reuse.
-                amount_m = re.search(
-                    r"~\$([0-9,]+)", vapi.tradein_summary or ""
-                )
+                amount_m = re.search(r"~\$([0-9,]+)", tradein_summary)
                 if amount_m:
                     session.down_payment = amount_m.group(1).replace(",", "")
             routing = {
@@ -697,11 +701,11 @@ def _process_ai_turn(
                 "brain": "vapi_chat",
                 "financing_sent": vapi.financing_sent,
                 "financing_forced": vapi.financing_forced,
-                "tradein_sent": getattr(vapi, "tradein_sent", False),
-                "tradein_forced": getattr(vapi, "tradein_forced", False),
+                "tradein_sent": bool(getattr(vapi, "tradein_sent", False)),
+                "tradein_forced": bool(getattr(vapi, "tradein_forced", False)),
                 "tools_called": list(vapi.tools_called or []),
                 "interested_vehicle": session.vehicle_interest,
-                "tradein_summary": getattr(vapi, "tradein_summary", None),
+                "tradein_summary": tradein_summary or None,
             }
             # Stay AI-active after financing PDF — handoff only on explicit cita.
             if appointment.requested:

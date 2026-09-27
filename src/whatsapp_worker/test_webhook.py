@@ -69,6 +69,17 @@ class TestWhatsAppWorkerWebhook(unittest.TestCase):
         self.store = QualificationStore(":memory:")
         self.odoo = _FakeOdoo()
         self.whatsapp = _FakeWhatsApp()
+        self._env = patch.dict(
+            "os.environ",
+            {
+                "AI_MG_QUOTE_LEADS": "true",
+                "VAPI_WA_TEXT_FIRST": "false",
+                "WHATSAPP_QUALIFICATION": "true",
+            },
+            clear=False,
+        )
+        self._env.start()
+        self.addCleanup(self._env.stop)
         self.client = TestClient(
             create_app(
                 qualification_store=self.store,

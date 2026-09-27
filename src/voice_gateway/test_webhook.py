@@ -363,6 +363,8 @@ class TestVoiceWebhookHTTP(unittest.TestCase):
                 "WHATSAPP_INSTANCE_SAN_FELIPE": "autosell_san_felipe",
                 "ODOO_TEAM_SAN_FELIPE": "5",
                 "AI_MG_QUOTE_LEADS": "true",
+                # Keep local AI scripts — do not call live Vapi Chat.
+                "VAPI_WA_TEXT_FIRST": "false",
                 "REPS_SAN_FELIPE": (
                     '[{"odoo_id": 21, "phone": "+526142417711", "name": "Francisco"}]'
                 ),

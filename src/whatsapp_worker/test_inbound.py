@@ -384,6 +384,11 @@ class TestVapiTextFirstBypassesHandoff(unittest.TestCase):
         fake.chat_id = "chat-1"
         fake.financing_sent = False
         fake.financing_forced = False
+        fake.tradein_sent = False
+        fake.tradein_forced = False
+        fake.tradein_summary = None
+        fake.vehicle_name = None
+        fake.interested_vehicle = None
         fake.tools_called = ["query_inventory"]
         fake.error = None
         with patch(

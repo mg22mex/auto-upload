@@ -503,6 +503,22 @@ class TestTradeIn(unittest.TestCase):
 
 
 class TestLead(unittest.TestCase):
+    def setUp(self) -> None:
+        # Isolate from local/session DB leftovers so appointment binding
+        # uses the payload vehicle (or stays empty), matching clean CI.
+        def _fallback_only(phone, fallback=None, **_kwargs):
+            del phone
+            return (fallback or "").strip() or None
+
+        self._resolve_patch = patch(
+            "src.voice_gateway.session_vehicle.resolve_interested_vehicle",
+            side_effect=_fallback_only,
+        )
+        self._resolve_patch.start()
+
+    def tearDown(self) -> None:
+        self._resolve_patch.stop()
+
     def test_lead_speech(self):
         from src.voice_gateway.vapi_bridge import LeadArgs, format_lead_speech
 

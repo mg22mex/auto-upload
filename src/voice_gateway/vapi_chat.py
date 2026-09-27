@@ -573,6 +573,13 @@ def get_chat_store() -> VapiChatSessionStore:
         return _STORE
 
 
+def reset_chat_store_for_tests() -> None:
+    """Drop the process-wide store singleton (unit tests only)."""
+    global _STORE
+    with _STORE_LOCK:
+        _STORE = None
+
+
 def detect_tradein_intent(text: str) -> bool:
     """True when the user asks for trade-in / appraisal / toma a cuenta."""
     from src.lead_routing import parse_payment_intent
@@ -1161,6 +1168,7 @@ __all__ = [
     "force_calculate_financing",
     "force_get_tradein_valuation",
     "get_chat_store",
+    "reset_chat_store_for_tests",
     "rewrite_reply_keep_interactive",
     "vapi_wa_text_first_enabled",
 ]

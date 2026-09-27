@@ -138,6 +138,9 @@ class TestCarAThenCarBThenAppointment(unittest.TestCase):
         vapi_result.chat_id = "c2"
         vapi_result.financing_sent = False
         vapi_result.financing_forced = False
+        vapi_result.tradein_sent = False
+        vapi_result.tradein_forced = False
+        vapi_result.tradein_summary = None
         vapi_result.tools_called = []
         vapi_result.vehicle_name = "Toyota Corolla 2022"
         vapi_result.interested_vehicle = "Toyota Corolla 2022"
