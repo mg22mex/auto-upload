@@ -33,6 +33,7 @@ except ImportError:  # pragma: no cover
         return False
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -50,9 +51,25 @@ DEFAULT_ODOO_URL = "https://autosellmx.odoo.com"
 DEFAULT_ODOO_DB = "autosellmx"
 RESULT_LIMIT = 3
 INVENTORY_TIMEOUT_SEC = float(os.getenv("VAPI_INVENTORY_TIMEOUT_SEC") or "5.0")
+# Brand+model (specific) queries aim for sub-second JSON; keep a tight ceiling.
+INVENTORY_SPECIFIC_TIMEOUT_SEC = float(
+    os.getenv("VAPI_INVENTORY_SPECIFIC_TIMEOUT_SEC") or "1.5"
+)
 INVENTORY_TIMEOUT_SPEECH = (
     "El inventario tardó un momento. ¿Agendamos una prueba de manejo "
     "o te envío opciones por WhatsApp?"
+)
+INVENTORY_NEXT_PROMPT = (
+    "Ofrece los detalles del vehículo al cliente y pregúntale si le "
+    "gustaría agendar una cita para verlo o probarlo."
+)
+INVENTORY_NEXT_PROMPT_EMPTY = (
+    "Indica que no hay coincidencias disponibles ahora y ofrece buscar "
+    "otra marca, modelo o presupuesto."
+)
+INVENTORY_NEXT_PROMPT_TIMEOUT = (
+    "El inventario tardó; ofrece agendar prueba de manejo o enviar "
+    "opciones por WhatsApp sin inventar precios."
 )
 DEFAULT_TERM_MONTHS = 48
 LEAD_TITLE_PREFIX = "Llamada Paulina - "
@@ -63,6 +80,16 @@ app = FastAPI(
     version="1.2.0",
     description="Inventory / financing / trade-in / CRM lead tools for Vapi Riley",
 )
+
+
+@app.on_event("startup")
+def _warm_odoo_connection() -> None:
+    """Prime XML-RPC auth so the first /vapi/inventory avoids cold-start lag."""
+    try:
+        connect_odoo()
+        logger.info("odoo connection warmed at startup")
+    except Exception as exc:  # noqa: BLE001 — bridge must still boot without Odoo
+        logger.warning("odoo warm skipped: %s", exc)
 
 T = TypeVar("T")
 
@@ -649,6 +676,65 @@ def branch_from_vehicle_title(title: str) -> tuple[str, str | None]:
     return PRIMARY_BRANCH, None
 
 
+def format_price_compact_mxn(amount: float | int | None) -> str:
+    """Compact price for Vapi JSON tools: ``$285,000 MXN``."""
+    pesos = int(round(float(amount or 0)))
+    if pesos <= 0:
+        return "precio no disponible"
+    return f"${pesos:,} MXN"
+
+
+def location_compact_for_title(title: str) -> str:
+    """Compact lot label for JSON (e.g. ``Sucursal Periférico (*)``)."""
+    marker = branch_marker_from_title(title)
+    if marker == "*":
+        return "Sucursal Periférico (*)"
+    if marker == "+":
+        return "Sucursal San Felipe (+)"
+    if marker == "-":
+        return "Entrega en Periférico o San Felipe (preferencia del cliente)"
+    return "Sucursal por confirmar"
+
+
+def is_specific_inventory_query(args: InventoryArgs) -> bool:
+    """Brand + model both present → targeted indexed ``name`` ilike query."""
+    return bool((args.brand or "").strip() and (args.model or "").strip())
+
+
+def format_inventory_payload(
+    rows: list[dict[str, Any]],
+    args: InventoryArgs,
+    *,
+    timed_out: bool = False,
+) -> dict[str, Any]:
+    """Compact JSON for Vapi ``query_inventory`` (no long TTS essay)."""
+    if timed_out:
+        return {
+            "found": False,
+            "count": 0,
+            "vehicles": [],
+            "next_prompt": INVENTORY_NEXT_PROMPT_TIMEOUT,
+        }
+    vehicles: list[dict[str, str]] = []
+    for row in rows:
+        raw_name = str(row.get("name") or "Vehículo")
+        vehicles.append(
+            {
+                "model": _clean_name(raw_name),
+                "price": format_price_compact_mxn(row.get("list_price")),
+                "location": location_compact_for_title(raw_name),
+                "code": str(row.get("default_code") or "").strip() or "",
+            }
+        )
+    found = bool(vehicles)
+    return {
+        "found": found,
+        "count": len(vehicles),
+        "vehicles": vehicles,
+        "next_prompt": INVENTORY_NEXT_PROMPT if found else INVENTORY_NEXT_PROMPT_EMPTY,
+    }
+
+
 def format_inventory_speech(rows: list[dict[str, Any]], args: InventoryArgs) -> str:
     """Short TTS with explicit lot / delivery location for Beatriz."""
     label_parts = [p for p in (args.brand, args.model) if p]
@@ -734,18 +820,27 @@ async def handle_inventory_payload(payload: dict[str, Any]) -> VapiToolResponse:
     calls = extract_tool_calls(payload)
     results: list[VapiToolResult] = []
     for call_id, args in calls:
+        specific = is_specific_inventory_query(args)
+        timeout_sec = (
+            INVENTORY_SPECIFIC_TIMEOUT_SEC if specific else INVENTORY_TIMEOUT_SEC
+        )
         logger.info(
-            "inventory toolCallId=%s args brand=%r model=%r year=%r max_price=%r",
+            "inventory toolCallId=%s specific=%s timeout=%.2fs "
+            "args brand=%r model=%r year=%r max_price=%r",
             call_id,
+            specific,
+            timeout_sec,
             args.brand,
             args.model,
             args.year,
             args.max_price,
         )
+        timed_out = False
+        rows: list[dict[str, Any]] = []
         try:
             rows = await asyncio.wait_for(
                 _search_inventory_live(args),
-                timeout=INVENTORY_TIMEOUT_SEC,
+                timeout=timeout_sec,
             )
             logger.info(
                 "inventory toolCallId=%s pre-TTS rows=%s",
@@ -760,23 +855,21 @@ async def handle_inventory_payload(payload: dict[str, Any]) -> VapiToolResponse:
                     for r in rows
                 ],
             )
-            speech = format_inventory_speech(rows, args)
         except asyncio.TimeoutError:
+            timed_out = True
             logger.warning(
-                "inventory search timed out after %.1fs for %s — returning fallback",
-                INVENTORY_TIMEOUT_SEC,
+                "inventory search timed out after %.1fs for %s — returning empty JSON",
+                timeout_sec,
                 call_id,
             )
-            speech = INVENTORY_TIMEOUT_SPEECH
-        except Exception as exc:
+        except Exception:
+            timed_out = True
             logger.exception("inventory search failed for %s", call_id)
-            speech = INVENTORY_TIMEOUT_SPEECH
-            logger.warning(
-                "inventory error %s for %s — using timeout fallback speech",
-                type(exc).__name__,
-                call_id,
-            )
-        results.append(VapiToolResult(toolCallId=call_id, result=speech))
+
+        payload_out = format_inventory_payload(rows, args, timed_out=timed_out)
+        # Vapi tool result is a string — compact JSON for the LLM (no long TTS).
+        result_text = json.dumps(payload_out, ensure_ascii=False, separators=(",", ":"))
+        results.append(VapiToolResult(toolCallId=call_id, result=result_text))
     response = VapiToolResponse(results=results)
     logger.info(
         "inventory final response: %s",
@@ -1172,8 +1265,9 @@ def _safe_request_headers(request: Request) -> dict[str, str]:
     return out
 
 
-@app.post("/vapi/inventory", response_model=VapiToolResponse)
-async def vapi_inventory(request: Request) -> VapiToolResponse:
+@app.post("/vapi/inventory")
+async def vapi_inventory(request: Request) -> JSONResponse:
+    """Live Odoo inventory for Vapi — compact JSON tool result, no background work."""
     payload = await _read_json_object(request)
     logger.info(
         "POST /vapi/inventory headers=%s body=%s",
@@ -1181,9 +1275,15 @@ async def vapi_inventory(request: Request) -> VapiToolResponse:
         json.dumps(payload, ensure_ascii=False, default=str)[:4000],
     )
     try:
-        return await handle_inventory_payload(payload)
+        body = await handle_inventory_payload(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # Immediate JSON close — no BackgroundTasks / secondary awaits on this path.
+    return JSONResponse(
+        content=body.model_dump(),
+        media_type="application/json",
+        headers={"Connection": "close", "Cache-Control": "no-store"},
+    )
 
 
 @app.post("/vapi/financing", response_model=VapiToolResponse)

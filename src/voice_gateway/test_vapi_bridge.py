@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
@@ -11,12 +12,15 @@ from src.voice_gateway.vapi_bridge import (
     build_domain,
     extract_tool_calls,
     format_financing_speech,
+    format_inventory_payload,
     format_inventory_speech,
+    format_price_compact_mxn,
     format_price_voice_es,
     format_tradein_speech,
     handle_financing_payload,
     handle_inventory_payload,
     handle_tradein_payload,
+    is_specific_inventory_query,
     number_to_words_es,
 )
 
@@ -53,6 +57,31 @@ class TestFormatters(unittest.TestCase):
         self.assertIn("No digas Sucursal Autosell", text)
         self.assertNotIn("Consignación", text)
         self.assertNotIn("$", text)
+
+    def test_compact_inventory_json(self):
+        payload = format_inventory_payload(
+            [
+                {
+                    "name": "Corolla XLE * Toyota 2020",
+                    "list_price": 285000,
+                    "default_code": "obj042",
+                }
+            ],
+            InventoryArgs(brand="Toyota", model="Corolla"),
+        )
+        self.assertTrue(payload["found"])
+        self.assertEqual(payload["count"], 1)
+        vehicle = payload["vehicles"][0]
+        self.assertEqual(vehicle["model"], "Corolla XLE Toyota 2020")
+        self.assertEqual(vehicle["price"], "$285,000 MXN")
+        self.assertEqual(vehicle["location"], "Sucursal Periférico (*)")
+        self.assertEqual(vehicle["code"], "obj042")
+        self.assertIn("agendar", payload["next_prompt"].lower())
+        self.assertTrue(
+            is_specific_inventory_query(InventoryArgs(brand="Toyota", model="Corolla"))
+        )
+        self.assertFalse(is_specific_inventory_query(InventoryArgs(brand="Nissan")))
+        self.assertEqual(format_price_compact_mxn(285000), "$285,000 MXN")
 
     def test_location_markers(self):
         from src.voice_gateway.vapi_bridge import (
@@ -239,7 +268,12 @@ class TestHandle(unittest.TestCase):
             )
         self.assertEqual(len(resp.results), 1)
         self.assertEqual(resp.results[0].toolCallId, "tc1")
-        self.assertIn("CX5 Mazda 2020", resp.results[0].result)
+        data = json.loads(resp.results[0].result)
+        self.assertTrue(data["found"])
+        self.assertEqual(data["count"], 1)
+        self.assertEqual(data["vehicles"][0]["model"], "CX5 Mazda 2020")
+        self.assertEqual(data["vehicles"][0]["price"], "$369,000 MXN")
+        self.assertEqual(data["vehicles"][0]["code"], "obj705")
         models.execute_kw.assert_called()
         call_kw = models.execute_kw.call_args
         # execute_kw(db, uid, password, model, method, [domain], opts)
@@ -267,9 +301,12 @@ class TestHandle(unittest.TestCase):
                 handle_inventory_payload({"brand": "Mazda", "max_price": 400000})
             )
         text = resp.results[0].result.lower()
-        self.assertIn("tardó un momento", text)
-        self.assertIn("whatsapp", text)
-        self.assertIn("prueba de manejo", text)
+        data = json.loads(resp.results[0].result)
+        self.assertFalse(data["found"])
+        self.assertEqual(data["count"], 0)
+        self.assertEqual(data["vehicles"], [])
+        self.assertIn("whatsapp", data["next_prompt"].lower())
+        self.assertIn("inventario", text)
 
     def test_inventory_live_skips_row_cache(self):
         """``/vapi/inventory`` ignores TTL row cache — always hits Odoo path."""

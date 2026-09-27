@@ -447,7 +447,8 @@ Standalone FastAPI app: `src/voice_gateway/vapi_bridge.py` — Riley tools:
 
 | Route | Role |
 |-------|------|
-| `POST /vapi/inventory` | Live Odoo published stock only: `sale_ok` + `active` + SKU (`default_code`) + `list_price` ≥ min; if Studio state field exists → Disponible/available only (**never** soft-widen to sold/archived; **never** mock vehicles). Empty → TTS “No encontré…”. `brand`+`model` AND; timeout default **5s** (`VAPI_INVENTORY_TIMEOUT_SEC`); audit logs request/domain/raw/response; `use_cache=False`; `ODOO_INVENTORY_CACHE_TTL_SEC` default **0**. TTS lots `*`/`+`; `-` → flexible delivery (never Consignación). Soft null coercion (no 422). |
+| `POST /vapi/inventory` | Live Odoo published stock; compact JSON tool result `{found,count,vehicles[{model,price,location,code}],next_prompt}` (no long TTS). Brand+model → specific timeout default **1.5s** (`VAPI_INVENTORY_SPECIFIC_TIMEOUT_SEC`). Immediate `application/json` + `Connection: close` (no BackgroundTasks). Domain: `sale_ok`+`active`+SKU+min price on indexed `name`/`default_code`. |
+
 | `POST /vapi/financing` | Local Scotiabank-calibrated amortization |
 | `POST /vapi/tradein` | Autométrica Valor Compra estimate |
 | `POST /vapi/lead` · `/vapi/crm-lead` | CRM upsert → lot marker sets `physical_location` + `team_id` (RR branch) → **background** Evolution WhatsApp (`dispatch_lead_whatsapp`; None-safe optionals) |
