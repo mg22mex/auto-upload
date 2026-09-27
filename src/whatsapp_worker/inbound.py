@@ -369,6 +369,31 @@ def process_qualification_turn(
             updated_at=now,
         )
 
+    try:
+        from src.voice_gateway.vapi_chat import vapi_wa_text_first_enabled
+
+        text_first = vapi_wa_text_first_enabled()
+    except Exception:
+        text_first = False
+
+    # Text-first (Beatriz): every inbound message → Vapi. Never emit the legacy
+    # sticky "Tu solicitud ya está con un asesor …" auto-reply.
+    if text_first:
+        session.state = STATE_AI_ACTIVE
+        session.handling_agent = AGENT_AI
+        return _process_ai_turn(
+            event,
+            session,
+            now=now,
+            tags=tags,
+            detect_appointment_intent=detect_appointment_intent,
+            format_ai_reply=format_ai_reply,
+            route_inbound_lead=route_inbound_lead,
+            stage_primer=STAGE_PRIMER_CONTACTO,
+            stage_cita=STAGE_CITA,
+            agent_ai=AGENT_AI,
+        )
+
     use_ai = False
     if ai_mg_quote_enabled():
         if session.handling_agent == AGENT_AI or session.state == STATE_AI_ACTIVE:
@@ -380,6 +405,16 @@ def process_qualification_turn(
             from src.lead_routing import has_mg_quote_tag
 
             use_ai = has_mg_quote_tag(tags)
+
+    # MG Quote (non–text-first): reopen AI unless a cita was already booked.
+    if (
+        session.state == STATE_HANDOFF_TO_HUMAN
+        and ai_mg_quote_enabled()
+        and not (session.appointment_time or "").strip()
+    ):
+        session.state = STATE_AI_ACTIVE
+        session.handling_agent = AGENT_AI
+        use_ai = True
 
     if use_ai and session.state != STATE_HANDOFF_TO_HUMAN:
         return _process_ai_turn(
@@ -526,9 +561,8 @@ def _process_ai_turn(
     if (
         _use_vapi
         and chat_with_beatriz is not None
-        and session.state != STATE_HANDOFF_TO_HUMAN
     ):
-        if session.state == STATE_NEW_LEAD:
+        if session.state in {STATE_NEW_LEAD, STATE_HANDOFF_TO_HUMAN}:
             session.state = STATE_AI_ACTIVE
             session.handling_agent = agent_ai
             if not session.vehicle_interest:
@@ -934,6 +968,25 @@ class QualificationStore:
             (phone, instance or ""),
         ).fetchone()
         if row is None:
+            # Evolution may change JID formatting / instance label — fall back.
+            matches = self.list_by_phone(phone)
+            if instance:
+                for sess in matches:
+                    if sess.instance == (instance or ""):
+                        return sess
+            if len(matches) == 1:
+                # Re-key to the live instance so subsequent saves stay consistent.
+                sess = matches[0]
+                if (instance or "") and sess.instance != (instance or ""):
+                    sess.instance = instance or ""
+                return sess
+            if matches:
+                # Prefer the most recently updated row.
+                matches.sort(key=lambda s: s.updated_at or "", reverse=True)
+                sess = matches[0]
+                if instance is not None:
+                    sess.instance = instance or ""
+                return sess
             return None
         keys = set(row.keys())
         return QualificationSession(
@@ -1000,3 +1053,88 @@ class QualificationStore:
             ),
         )
         self._conn.commit()
+
+    def list_by_phone(self, phone: str) -> list[QualificationSession]:
+        """All sessions whose phone matches (raw or digit-normalized)."""
+        digits = re.sub(r"\D", "", phone or "")
+        rows = self._conn.execute(
+            "SELECT phone, instance FROM wa_qualification"
+        ).fetchall()
+        out: list[QualificationSession] = []
+        for row in rows:
+            row_phone = str(row["phone"] or "")
+            row_digits = re.sub(r"\D", "", row_phone)
+            if not row_phone:
+                continue
+            if row_phone == phone or (
+                digits
+                and (
+                    row_digits == digits
+                    or (len(digits) >= 10 and row_digits.endswith(digits[-10:]))
+                )
+            ):
+                sess = self.get(row_phone, str(row["instance"] or ""))
+                if sess is not None:
+                    out.append(sess)
+        return out
+
+    def reset_to_ai_active(
+        self,
+        phone: str,
+        *,
+        instance: str | None = None,
+        clear_appointment: bool = True,
+        create_if_missing: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Force ``AI_ACTIVE`` for matching phone (all instances unless scoped)."""
+        from src.lead_routing import AGENT_AI
+
+        targets = self.list_by_phone(phone)
+        if instance is not None:
+            targets = [s for s in targets if s.instance == instance]
+        updated: list[dict[str, Any]] = []
+        for sess in targets:
+            before = sess.state
+            sess.state = STATE_AI_ACTIVE
+            sess.handling_agent = AGENT_AI
+            if clear_appointment:
+                sess.appointment_time = ""
+            sess.updated_at = _utc_now()
+            self.save(sess)
+            updated.append(
+                {
+                    "phone": sess.phone,
+                    "instance": sess.instance,
+                    "before": before,
+                    "after": sess.state,
+                    "handling_agent": sess.handling_agent,
+                    "created": False,
+                }
+            )
+        if updated or not create_if_missing:
+            return updated
+
+        digits = re.sub(r"\D", "", phone or "")
+        if not digits:
+            return updated
+        inst = instance if instance is not None else ""
+        sess = QualificationSession(
+            phone=digits,
+            instance=inst,
+            state=STATE_AI_ACTIVE,
+            handling_agent=AGENT_AI,
+            appointment_time="",
+            updated_at=_utc_now(),
+        )
+        self.save(sess)
+        updated.append(
+            {
+                "phone": sess.phone,
+                "instance": sess.instance,
+                "before": None,
+                "after": sess.state,
+                "handling_agent": sess.handling_agent,
+                "created": True,
+            }
+        )
+        return updated

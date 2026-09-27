@@ -7,6 +7,7 @@ Riley tool calls hit::
     POST /vapi/tradein
     POST /vapi/lead
     POST /vapi/crm-lead   (alias of /vapi/lead)
+    POST /vapi/reset-chat (?phone=…)  — ops: clear HANDOFF → AI_ACTIVE
 
 Run from repo root::
 
@@ -1783,6 +1784,76 @@ async def vapi_crm_lead(
 ) -> VapiToolResponse:
     """Alias of ``/vapi/lead`` — CRM upsert + Evolution WhatsApp confirmation."""
     return await _vapi_lead_handler(request, background_tasks)
+
+
+@app.post("/vapi/reset-chat")
+async def vapi_reset_chat(request: Request) -> dict[str, Any]:
+    """Clear HANDOFF / force ``AI_ACTIVE`` for a WhatsApp phone (ops / testing).
+
+    Query: ``?phone=5216...`` (required). Optional ``instance=``, ``clear_appointment=1``.
+    Body JSON may also supply ``phone`` / ``instance``.
+    """
+    payload: dict[str, Any] = {}
+    try:
+        raw = await request.json()
+        if isinstance(raw, dict):
+            payload = raw
+    except Exception:
+        payload = {}
+
+    phone = str(
+        request.query_params.get("phone")
+        or payload.get("phone")
+        or payload.get("whatsapp_phone")
+        or ""
+    ).strip()
+    if not phone:
+        raise HTTPException(status_code=400, detail="phone is required")
+
+    instance_raw = request.query_params.get("instance")
+    if instance_raw is None:
+        instance_raw = payload.get("instance")
+    instance = None if instance_raw is None else str(instance_raw)
+
+    clear_raw = (
+        request.query_params.get("clear_appointment")
+        if "clear_appointment" in request.query_params
+        else payload.get("clear_appointment", True)
+    )
+    if isinstance(clear_raw, str):
+        clear_appointment = clear_raw.strip().lower() not in {"0", "false", "no", "off"}
+    else:
+        clear_appointment = bool(clear_raw)
+
+    from src.whatsapp_worker.inbound import QualificationStore
+
+    store = QualificationStore()
+    try:
+        updated = store.reset_to_ai_active(
+            phone,
+            instance=instance,
+            clear_appointment=clear_appointment,
+            create_if_missing=True,
+        )
+    finally:
+        store.close()
+
+    logger.info(
+        "POST /vapi/reset-chat phone=%s instance=%s updated=%s",
+        phone,
+        instance,
+        len(updated),
+    )
+    return {
+        "ok": True,
+        "phone": phone,
+        "instance": instance,
+        "updated": updated,
+        "vapi_wa_text_first": (
+            os.getenv("VAPI_WA_TEXT_FIRST") or ""
+        ).strip().lower()
+        in {"1", "true", "yes", "on"},
+    }
 
 
 if __name__ == "__main__":

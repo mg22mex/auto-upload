@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from src.whatsapp_worker.inbound import (
     PAYMENT_FINANCING,
@@ -15,6 +15,7 @@ from src.whatsapp_worker.inbound import (
     STATE_AWAITING_TRADE_IN,
     STATE_HANDOFF_TO_HUMAN,
     WA_CHANNEL,
+    QualificationSession,
     QualificationStore,
     WhatsAppInboundEvent,
     build_qualification_notes,
@@ -232,7 +233,10 @@ class TestQualificationFlow(unittest.TestCase):
 class TestAiMgQuoteFlow(unittest.TestCase):
     def setUp(self) -> None:
         self.store = QualificationStore(":memory:")
-        self._ai = patch.dict(os.environ, {"AI_MG_QUOTE_LEADS": "true"})
+        self._ai = patch.dict(
+            os.environ,
+            {"AI_MG_QUOTE_LEADS": "true", "VAPI_WA_TEXT_FIRST": "false"},
+        )
         self._ai.start()
         self.addCleanup(self._ai.stop)
 
@@ -285,6 +289,90 @@ class TestAiMgQuoteFlow(unittest.TestCase):
         self.assertEqual(t2.odoo_stage, "Beatriz Cita")
         self.assertIn("mañana", t2.session.appointment_time.lower())
         self.assertIn("asesor", t2.reply_text.lower())
+
+    def test_handoff_without_cita_reopens_ai(self):
+        t1 = self._turn("Me interesa una camioneta")
+        t1.session.state = STATE_HANDOFF_TO_HUMAN
+        t1.session.appointment_time = ""
+        self.store.save(t1.session)
+        t2 = self._turn(
+            "¿Cuánto engache necesito?",
+            self.store.get("5216141234567", "autosell_san_felipe"),
+        )
+        self.assertEqual(t2.session.state, STATE_AI_ACTIVE)
+        self.assertNotIn("ya está con un asesor", t2.reply_text.lower())
+
+    def test_handoff_with_cita_stays_sticky(self):
+        t1 = self._turn("Me interesa una camioneta")
+        t1.session.state = STATE_HANDOFF_TO_HUMAN
+        t1.session.appointment_time = "mañana 11am"
+        t2 = self._turn("¿y ahora?", t1.session)
+        self.assertEqual(t2.session.state, STATE_HANDOFF_TO_HUMAN)
+        self.assertIn("asesor", t2.reply_text.lower())
+
+    def test_reset_to_ai_active(self):
+        t1 = self._turn("Hola")
+        t1.session.state = STATE_HANDOFF_TO_HUMAN
+        t1.session.appointment_time = "hoy 4pm"
+        self.store.save(t1.session)
+        updated = self.store.reset_to_ai_active("5216141234567")
+        self.assertEqual(len(updated), 1)
+        self.assertEqual(updated[0]["after"], STATE_AI_ACTIVE)
+        sess = self.store.get("5216141234567", "autosell_san_felipe")
+        assert sess is not None
+        self.assertEqual(sess.state, STATE_AI_ACTIVE)
+        self.assertEqual(sess.appointment_time, "")
+
+
+class TestVapiTextFirstBypassesHandoff(unittest.TestCase):
+    """VAPI_WA_TEXT_FIRST=true must never emit the sticky asesor auto-reply."""
+
+    def setUp(self) -> None:
+        self.store = QualificationStore(":memory:")
+        self._env = patch.dict(
+            os.environ,
+            {"AI_MG_QUOTE_LEADS": "true", "VAPI_WA_TEXT_FIRST": "true"},
+        )
+        self._env.start()
+        self.addCleanup(self._env.stop)
+
+    def tearDown(self) -> None:
+        self.store.close()
+
+    def test_handoff_session_routes_to_vapi_not_sticky(self):
+        session = QualificationSession(
+            phone="5216141234567",
+            instance="autosell_periferico",
+            state=STATE_HANDOFF_TO_HUMAN,
+            contact_name="Marco",
+            branch="periferico",
+            physical_location="Periférico",
+            appointment_time="mañana 11am",
+            handling_agent="human_rep",
+        )
+        fake = MagicMock()
+        fake.ok = True
+        fake.reply_text = "Claro, busco una Sierra disponible para ti."
+        fake.chat_id = "chat-1"
+        fake.financing_sent = False
+        fake.financing_forced = False
+        fake.tools_called = ["query_inventory"]
+        fake.error = None
+        with patch(
+            "src.voice_gateway.vapi_chat.chat_with_beatriz",
+            return_value=fake,
+        ) as mock_chat:
+            turn = process_qualification_turn(
+                _event("Busco una sierra", name="Marco"),
+                session,
+                branch="periferico",
+                physical_location="Periférico",
+            )
+        mock_chat.assert_called_once()
+        self.assertEqual(turn.session.state, STATE_AI_ACTIVE)
+        self.assertIn("Sierra", turn.reply_text)
+        self.assertNotIn("ya está con un asesor", turn.reply_text.lower())
+        self.assertEqual(turn.routing.get("brain"), "vapi_chat")
 
 
 if __name__ == "__main__":
