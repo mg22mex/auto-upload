@@ -542,13 +542,20 @@ def _process_ai_turn(
             customer_name=session.contact_name or event.name,
             instance=event.instance or "",
             branch=session.branch,
+            vehicle_interest=session.vehicle_interest
+            or session.initial_message
+            or "",
         )
         if vapi.ok:
             routing = {
                 **decision.as_dict(),
                 "vapi_chat_id": vapi.chat_id,
                 "brain": "vapi_chat",
+                "financing_sent": vapi.financing_sent,
+                "financing_forced": vapi.financing_forced,
+                "tools_called": list(vapi.tools_called or []),
             }
+            # Stay AI-active after financing PDF — handoff only on explicit cita.
             if appointment.requested:
                 session.state = STATE_HANDOFF_TO_HUMAN
                 session.handling_agent = "human_rep"

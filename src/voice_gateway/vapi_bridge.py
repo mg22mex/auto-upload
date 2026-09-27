@@ -77,6 +77,17 @@ VAPI_LEAD_CHANNEL = "Voice"
 # Odoo Beatriz pipeline (see src.lead_routing STAGE_BEATRIZ_*).
 STAGE_BEATRIZ_LEAD = "Beatriz Lead"
 STAGE_BEATRIZ_CITA = "Beatriz Cita"
+CITA_FOLLOWUP_PROMPT = (
+    "¿Te gustaría agendar una cita en sucursal {branch} "
+    "para ver la unidad o realizar prueba de manejo?"
+)
+_WA_PHONE_RE = re.compile(
+    r"\[whatsapp_phone=([+\d][\d\s-]{7,20})\]", re.IGNORECASE
+)
+_WA_NAME_RE = re.compile(r"\[customer_name=([^\]]+)\]", re.IGNORECASE)
+_WA_BRANCH_RE = re.compile(r"\[branch=([^\]]+)\]", re.IGNORECASE)
+_WA_VEHICLE_RE = re.compile(r"\[vehicle_name=([^\]]+)\]", re.IGNORECASE)
+_WA_PRICE_RE = re.compile(r"\[vehicle_price=([0-9.]+)\]", re.IGNORECASE)
 
 app = FastAPI(
     title="Autosell Vapi Bridge",
@@ -443,6 +454,7 @@ def _parse_financing_dict(raw: dict[str, Any]) -> FinancingArgs:
         or raw.get("mobile")
         or raw.get("telefono")
         or raw.get("customer_phone")
+        or raw.get("whatsapp_phone")
     )
     send_flag = raw.get("send_whatsapp")
     if send_flag is None:
@@ -474,6 +486,31 @@ def _parse_financing_dict(raw: dict[str, Any]) -> FinancingArgs:
             "send_whatsapp": send_whatsapp,
         }
     )
+
+
+def _merge_wa_context_into_financing(
+    args: FinancingArgs, ctx: dict[str, Any]
+) -> FinancingArgs:
+    """Fill missing financing fields from WhatsApp chat markers."""
+    updates: dict[str, Any] = {}
+    if not (args.phone or "").strip() and ctx.get("phone"):
+        updates["phone"] = str(ctx["phone"])
+        updates["send_whatsapp"] = True
+    elif (args.phone or "").strip() and not args.send_whatsapp and ctx.get("phone"):
+        updates["send_whatsapp"] = True
+    if not (args.customer_name or "").strip() and ctx.get("customer_name"):
+        updates["customer_name"] = str(ctx["customer_name"])
+    if not (args.vehicle_name or "").strip() and ctx.get("vehicle_name"):
+        updates["vehicle_name"] = str(ctx["vehicle_name"])
+    if not (args.branch or "").strip() and ctx.get("branch"):
+        updates["branch"] = str(ctx["branch"])
+    # WhatsApp text-first: always deliver PDF when we resolved a phone.
+    phone = updates.get("phone") or args.phone
+    if phone and not args.send_whatsapp and "send_whatsapp" not in updates:
+        updates["send_whatsapp"] = True
+    if not updates:
+        return args
+    return args.model_copy(update=updates)
 
 
 def _parse_tradein_dict(raw: dict[str, Any]) -> TradeInArgs:
@@ -917,6 +954,70 @@ async def handle_inventory_payload(payload: dict[str, Any]) -> VapiToolResponse:
 # --- Financing -------------------------------------------------------------------
 
 
+def extract_whatsapp_context(payload: dict[str, Any]) -> dict[str, Any]:
+    """Pull ``[whatsapp_phone=…]`` markers from Vapi chat artifact / body text."""
+    chunks: list[str] = []
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, str):
+            chunks.append(node)
+            return
+        if isinstance(node, dict):
+            for key in (
+                "message",
+                "content",
+                "input",
+                "text",
+                "result",
+            ):
+                val = node.get(key)
+                if isinstance(val, str):
+                    chunks.append(val)
+                elif isinstance(val, list):
+                    for item in val:
+                        _walk(item)
+            for key in ("artifact", "messages", "messagesOpenAIFormatted"):
+                if key in node:
+                    _walk(node[key])
+            msg = node.get("message")
+            if isinstance(msg, dict):
+                _walk(msg)
+            return
+        if isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(payload)
+    blob = "\n".join(chunks)
+    out: dict[str, Any] = {}
+    m = _WA_PHONE_RE.search(blob)
+    if m:
+        out["phone"] = re.sub(r"\D", "", m.group(1))
+    m = _WA_NAME_RE.search(blob)
+    if m:
+        out["customer_name"] = m.group(1).strip()
+    m = _WA_BRANCH_RE.search(blob)
+    if m:
+        out["branch"] = m.group(1).strip()
+    m = _WA_VEHICLE_RE.search(blob)
+    if m:
+        out["vehicle_name"] = m.group(1).strip()
+    m = _WA_PRICE_RE.search(blob)
+    if m:
+        try:
+            out["vehicle_price"] = float(m.group(1))
+        except ValueError:
+            pass
+    return out
+
+
+def branch_label_for_prompt(branch: str | None) -> str:
+    key = (branch or "").strip().lower()
+    if key in {"san_felipe", "san felipe", "+"}:
+        return "San Felipe"
+    return "Periférico"
+
+
 def resolve_beatriz_stage(
     *,
     appointment_date: str | None = None,
@@ -933,18 +1034,18 @@ def format_financing_speech(args: FinancingArgs, quote: Any) -> str:
     down = format_price_voice_es(quote.down_payment)
     months = format_months_voice_es(quote.term_months)
     monthly = format_price_voice_es(quote.estimated_monthly_payment)
+    branch = branch_label_for_prompt(args.branch)
+    cita = CITA_FOLLOWUP_PROMPT.format(branch=branch)
     base = (
         f"Con un enganche de {down} a {months}, tu mensualidad estimada "
         f"con Scotiabank sería de {monthly}."
     )
     if args.send_whatsapp and (args.phone or "").strip():
         return (
-            f"{base} Te envié el resumen y la tabla de amortización por WhatsApp."
+            f"{base} Te envié el resumen y la tabla de amortización por WhatsApp. "
+            f"{cita}"
         )
-    return (
-        f"{base} "
-        "¿Te interesa que te enviemos la cotización formal por WhatsApp?"
-    )
+    return f"{base} {cita}"
 
 
 def run_financing_quote(args: FinancingArgs) -> Any:
@@ -1090,6 +1191,7 @@ def handle_financing_payload(
     whatsapp_client: Any | None = None,
     manager: Any | None = None,
 ) -> VapiToolResponse:
+    wa_ctx = extract_whatsapp_context(payload)
     calls = extract_typed_tool_calls(
         payload,
         parser=_parse_financing_dict,
@@ -1113,6 +1215,7 @@ def handle_financing_payload(
     )
     results: list[VapiToolResult] = []
     for call_id, args in calls:
+        args = _merge_wa_context_into_financing(args, wa_ctx)
         quote: Any | None = None
         try:
             quote = run_financing_quote(args)
@@ -1128,6 +1231,9 @@ def handle_financing_payload(
             continue
 
         phone = (args.phone or "").strip()
+        # Always push PDF on WhatsApp when phone is known (text-first path).
+        if phone:
+            args = args.model_copy(update={"send_whatsapp": True})
         crm_result: dict[str, Any] | None = None
         if phone and quote is not None:
             try:
@@ -1138,27 +1244,34 @@ def handle_financing_payload(
                 logger.exception("financing CRM upsert failed for %s", call_id)
                 crm_result = None
 
-        def _queue_financing_side_effects() -> None:
-            if args.send_whatsapp and phone and quote is not None:
+        def _queue_financing_side_effects(
+            fin_args: FinancingArgs = args,
+            fin_quote: Any = quote,
+            fin_crm: dict[str, Any] | None = crm_result,
+            fin_phone: str = phone,
+        ) -> None:
+            if fin_args.send_whatsapp and fin_phone and fin_quote is not None:
                 dispatch_financing_whatsapp(
-                    args, quote, whatsapp_client=whatsapp_client
+                    fin_args, fin_quote, whatsapp_client=whatsapp_client
                 )
-            if crm_result and not crm_result.get("skipped") and not crm_result.get("dry_run"):
+            if fin_crm and not fin_crm.get("skipped") and not fin_crm.get("dry_run"):
                 dispatch_appointment_rep_alert(
                     LeadArgs(
-                        name=(args.customer_name or "Cliente").strip() or "Cliente",
-                        phone=phone,
-                        interested_vehicle=args.vehicle_name,
-                        financing_summary=crm_result.get("financing_summary"),
+                        name=(fin_args.customer_name or "Cliente").strip() or "Cliente",
+                        phone=fin_phone,
+                        interested_vehicle=fin_args.vehicle_name,
+                        financing_summary=fin_crm.get("financing_summary"),
                         appointment_date=None,
                     ),
-                    branch=str(crm_result.get("branch") or args.branch or "periferico"),
-                    lead_id=crm_result.get("lead_id"),
-                    assignment=crm_result.get("assignment")
-                    if isinstance(crm_result.get("assignment"), dict)
+                    branch=str(
+                        fin_crm.get("branch") or fin_args.branch or "periferico"
+                    ),
+                    lead_id=fin_crm.get("lead_id"),
+                    assignment=fin_crm.get("assignment")
+                    if isinstance(fin_crm.get("assignment"), dict)
                     else None,
                     stage_name=str(
-                        crm_result.get("stage_name") or STAGE_BEATRIZ_LEAD
+                        fin_crm.get("stage_name") or STAGE_BEATRIZ_LEAD
                     ),
                     whatsapp_client=whatsapp_client,
                 )

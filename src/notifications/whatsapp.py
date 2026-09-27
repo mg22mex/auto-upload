@@ -177,9 +177,11 @@ def format_financing_whatsapp_summary(
     term_months: int | None = None,
     monthly_payment: float | None = None,
     vehicle_name: str | None = None,
+    branch_label: str | None = None,
 ) -> str:
     """Short ES-MX text sent with the CrediAuto PDF attachment."""
     client = (name or "").strip() or "Cliente"
+    branch = (branch_label or "").strip() or "Periférico"
     lines = [
         f"Hola {client}, aquí tienes tu cotización Scotiabank CrediAuto de Autosell. 🚗",
         "",
@@ -197,8 +199,10 @@ def format_financing_whatsapp_summary(
     lines.extend(
         [
             "",
-            "Adjuntamos la tabla de amortización (PDF). "
-            "Un asesor te contactará para resolver dudas. ¡Gracias!",
+            "Adjuntamos la tabla de amortización (PDF).",
+            "",
+            f"¿Te gustaría agendar una cita en sucursal {branch} "
+            "para ver la unidad o realizar prueba de manejo?",
         ]
     )
     return "\n".join(lines)
@@ -245,6 +249,7 @@ def notify_financing_quote(
         term_months=term_months,
         monthly_payment=monthly_payment,
         vehicle_name=vehicle_name,
+        branch_label=branch,
     )
     doc_caption = (caption or "Autosell — Tabla de amortización CrediAuto").strip()
 

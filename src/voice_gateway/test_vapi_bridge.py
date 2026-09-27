@@ -343,7 +343,8 @@ class TestFinancing(unittest.TestCase):
         text = resp.results[0].result
         self.assertIn("enganche", text.lower())
         self.assertIn("Scotiabank", text)
-        self.assertIn("WhatsApp", text)
+        self.assertIn("agendar una cita", text.lower())
+        self.assertIn("Periférico", text)
         self.assertNotIn("$", text)
         self.assertRegex(text, r"pesos")
 
