@@ -967,6 +967,36 @@ async def handle_inventory_payload(payload: dict[str, Any]) -> VapiToolResponse:
         # Vapi tool result is a string — compact JSON for the LLM (no long TTS).
         result_text = json.dumps(payload_out, ensure_ascii=False, separators=(",", ":"))
         results.append(VapiToolResult(toolCallId=call_id, result=result_text))
+
+        # Stick session interested_vehicle to this inventory inquiry.
+        try:
+            from src.voice_gateway.session_vehicle import (
+                inventory_vehicle_label,
+                remember_interested_vehicle,
+            )
+
+            wa_ctx = extract_whatsapp_context(payload)
+            label = inventory_vehicle_label(
+                brand=args.brand,
+                model=args.model,
+                year=args.year,
+                rows=rows,
+            )
+            if label:
+                price = None
+                if len(rows) == 1:
+                    try:
+                        price = float(rows[0].get("list_price") or 0) or None
+                    except (TypeError, ValueError):
+                        price = None
+                remember_interested_vehicle(
+                    label,
+                    phone=wa_ctx.get("phone"),
+                    instance=None,
+                    price=price,
+                )
+        except Exception:
+            logger.exception("inventory session vehicle update failed")
     response = VapiToolResponse(results=results)
     logger.info(
         "inventory final response: %s",
@@ -1258,6 +1288,21 @@ def handle_financing_payload(
         try:
             quote = run_financing_quote(args)
             speech = format_financing_speech(args, quote)
+            # Persist NEW vehicle as session interested_vehicle (replace prior).
+            vehicle_label = (args.vehicle_name or "").strip()
+            if vehicle_label:
+                try:
+                    from src.voice_gateway.session_vehicle import (
+                        remember_interested_vehicle,
+                    )
+
+                    remember_interested_vehicle(
+                        vehicle_label,
+                        phone=(args.phone or "").strip() or None,
+                        price=float(getattr(quote, "vehicle_price", args.vehicle_price)),
+                    )
+                except Exception:
+                    logger.exception("financing session vehicle update failed")
         except Exception as exc:
             logger.exception("financing quote failed for %s", call_id)
             speech = (
@@ -1651,6 +1696,25 @@ def handle_lead_payload(
     for call_id, args in calls:
         if args.lead_id is None and context_lead_id is not None:
             args = args.model_copy(update={"lead_id": context_lead_id})
+        # Appointment / CRM must bind to LAST session vehicle, not a stale LLM arg.
+        try:
+            from src.voice_gateway.session_vehicle import resolve_interested_vehicle
+
+            wa_ctx = extract_whatsapp_context(payload)
+            phone = (args.phone or wa_ctx.get("phone") or "").strip()
+            last_vehicle = resolve_interested_vehicle(
+                phone,
+                fallback=args.interested_vehicle,
+            )
+            if last_vehicle and (
+                (args.appointment_date or "").strip()
+                or not (args.interested_vehicle or "").strip()
+                or last_vehicle.casefold()
+                != (args.interested_vehicle or "").strip().casefold()
+            ):
+                args = args.model_copy(update={"interested_vehicle": last_vehicle})
+        except Exception:
+            logger.exception("lead interested_vehicle session bind failed")
         try:
             result = create_vapi_lead(args, manager=manager)
             speech = format_lead_speech(

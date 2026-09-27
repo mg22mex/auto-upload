@@ -300,6 +300,8 @@ def build_qualification_notes(session: QualificationSession) -> str:
         f"Estado: {STATE_HANDOFF_TO_HUMAN}",
         f"Mensaje inicial: {session.initial_message or 'n/a'}",
     ]
+    if session.vehicle_interest:
+        lines.append(f"Vehículo de interés: {session.vehicle_interest}")
     if session.payment_method:
         lines.append(
             f"Forma de pago: {_PAYMENT_LABELS.get(session.payment_method, session.payment_method)}"
@@ -645,6 +647,12 @@ def _process_ai_turn(
             or "",
         )
         if vapi.ok:
+            # Sync qualification.db to the vehicle Beatriz just worked on.
+            active = (
+                (vapi.interested_vehicle or vapi.vehicle_name or "").strip()
+            )
+            if active:
+                session.vehicle_interest = active
             routing = {
                 **decision.as_dict(),
                 "vapi_chat_id": vapi.chat_id,
@@ -652,15 +660,35 @@ def _process_ai_turn(
                 "financing_sent": vapi.financing_sent,
                 "financing_forced": vapi.financing_forced,
                 "tools_called": list(vapi.tools_called or []),
+                "interested_vehicle": session.vehicle_interest,
             }
             # Stay AI-active after financing PDF — handoff only on explicit cita.
             if appointment.requested:
+                # Re-resolve last vehicle right before cita bind (Car B wins).
+                try:
+                    from src.voice_gateway.session_vehicle import (
+                        resolve_interested_vehicle,
+                    )
+
+                    last = resolve_interested_vehicle(
+                        event.phone,
+                        instance=event.instance,
+                        fallback=session.vehicle_interest,
+                    )
+                    if last:
+                        session.vehicle_interest = last
+                except Exception:
+                    pass
                 session.state = STATE_HANDOFF_TO_HUMAN
                 session.handling_agent = "human_rep"
                 session.appointment_time = appointment.when_text or appointment.raw
                 notes = build_qualification_notes(session)
                 notes += (
                     f"\nCita solicitada: {session.appointment_time or 'sin horario'}"
+                )
+                notes += (
+                    f"\nVehículo de interés: "
+                    f"{session.vehicle_interest or session.initial_message or 'n/a'}"
                 )
                 return QualificationTurnResult(
                     session=session,
@@ -740,6 +768,19 @@ def _process_ai_turn(
         )
 
     if appointment.requested:
+        # Bind cita to LAST interested vehicle (not the initial message seed).
+        try:
+            from src.voice_gateway.session_vehicle import resolve_interested_vehicle
+
+            last = resolve_interested_vehicle(
+                event.phone,
+                instance=event.instance,
+                fallback=session.vehicle_interest or session.initial_message,
+            )
+            if last:
+                session.vehicle_interest = last
+        except Exception:
+            pass
         session.state = STATE_HANDOFF_TO_HUMAN
         session.handling_agent = "human_rep"
         session.appointment_time = appointment.when_text or appointment.raw

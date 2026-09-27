@@ -23,6 +23,7 @@ Companion to [README.md](./README.md) and [docs/PROJECT_GUIDE.md](./docs/PROJECT
 | Marketplace `wa.me` CTAs | **Live** | Branch phones in `listing_cta.py` / env overrides |
 | Odoo CRM attribution | **Live** | Tag `MG Quote Lead` + UTM medium/source by channel |
 | CrediAuto year term caps | **Live** | `term_limits.py`: ≥Y−2→60m, Y−3/Y−4→48m, ≤Y−5→36m; Beatriz note + PDF Plazo |
+| Session `interested_vehicle` | **Live** | Inventory/financing overwrite `wa_qualification.vehicle_interest` + Vapi chat meta; cita binds last vehicle |
 | Meta Messenger | **Paused** | Code complete; awaiting Fanpage admin |
 | Native Odoo WA templates | **Paused** | `ODOO_WA_ACCOUNT_*` unset until Meta Manager |
 | FB Page feed posts | **Not started** | Marketplace only today (no Graph `/{page}/feed`) |

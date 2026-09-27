@@ -66,6 +66,8 @@ class VapiChatResult:
     financing_sent: bool = False
     financing_forced: bool = False
     tools_called: list[str] = field(default_factory=list)
+    vehicle_name: str | None = None
+    interested_vehicle: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -249,6 +251,44 @@ def _default_vehicle_price() -> float:
         return float(raw)
     except ValueError:
         return 450000.0
+
+
+def _vehicle_from_tool_call_args(chat_payload: dict[str, Any]) -> str | None:
+    """Pull vehicle_name from calculate_financing / inventory tool arguments."""
+    for step in chat_payload.get("output") or []:
+        if not isinstance(step, dict):
+            continue
+        for call in step.get("tool_calls") or step.get("toolCalls") or []:
+            if not isinstance(call, dict):
+                continue
+            fn = call.get("function") if isinstance(call.get("function"), dict) else call
+            name = str(fn.get("name") or "").strip().lower()
+            raw_args = fn.get("arguments")
+            if isinstance(raw_args, str):
+                try:
+                    raw_args = json.loads(raw_args)
+                except json.JSONDecodeError:
+                    raw_args = {}
+            if not isinstance(raw_args, dict):
+                continue
+            if name in {"calculate_financing", "get_financing"}:
+                for key in ("vehicle_name", "interested_vehicle", "vehicle"):
+                    val = str(raw_args.get(key) or "").strip()
+                    if val:
+                        return val
+            if name in {"query_inventory", "get_inventory", "search_inventory"}:
+                parts = [
+                    str(raw_args.get(k) or "").strip()
+                    for k in ("brand", "make", "marca", "model", "modelo")
+                    if str(raw_args.get(k) or "").strip()
+                ]
+                year = raw_args.get("year") or raw_args.get("anio") or raw_args.get("año")
+                label = " ".join(parts)
+                if year not in (None, ""):
+                    label = f"{label} {year}".strip()
+                if label:
+                    return label
+    return None
 
 
 def _price_from_tool_blobs(blobs: list[dict[str, Any]]) -> tuple[float | None, str | None]:
@@ -504,9 +544,10 @@ def chat_with_beatriz(
     session = store or get_chat_store()
     prev = previous_chat_id or session.get_chat_id(phone, instance)
     meta = session.get_meta(phone, instance)
+    # Prefer last quoted vehicle from chat meta over stale qualification seed.
     vehicle_name = (
-        vehicle_interest
-        or str(meta.get("vehicle_name") or "").strip()
+        str(meta.get("interested_vehicle") or meta.get("vehicle_name") or "").strip()
+        or (vehicle_interest or "").strip()
         or "Vehículo"
     )
     vehicle_price = meta.get("vehicle_price")
@@ -523,6 +564,7 @@ def chat_with_beatriz(
         f"[customer_name={customer_name or 'Cliente'}]",
         f"[branch={branch or 'periferico'}]",
         f"[vehicle_name={vehicle_name}]",
+        f"[interested_vehicle={vehicle_name}]",
     ]
     if vehicle_price_f:
         context_bits.append(f"[vehicle_price={vehicle_price_f}]")
@@ -533,6 +575,9 @@ def chat_with_beatriz(
         f"con phone={phone}, down_payment, vehicle_price"
         + (f"={vehicle_price_f}" if vehicle_price_f else "")
         + f", vehicle_name={vehicle_name!r}, send_whatsapp=true. "
+        "Si el cliente cambia de unidad (otra marca/modelo), actualiza vehicle_name "
+        "al vehículo NUEVO en calculate_financing / query_inventory — no reutilices "
+        "un auto anterior. "
         "Después de la cotización/PDF, NO digas que un asesor contactará. "
         f"Pregunta exactamente: {CITA_FOLLOWUP.format(branch=label)}"
     )
@@ -563,16 +608,20 @@ def chat_with_beatriz(
     tools = extract_tools_called(payload)
     blobs = parse_tool_result_blobs(payload)
     price_from_tools, name_from_tools = _price_from_tool_blobs(blobs)
+    name_from_args = _vehicle_from_tool_call_args(payload)
     if price_from_tools:
         vehicle_price_f = price_from_tools
-    if name_from_tools:
+    if name_from_args:
+        vehicle_name = name_from_args
+    elif name_from_tools:
         vehicle_name = name_from_tools
 
     meta_update: dict[str, Any] = {}
     if vehicle_price_f:
         meta_update["vehicle_price"] = vehicle_price_f
-    if vehicle_name:
+    if vehicle_name and vehicle_name != "Vehículo":
         meta_update["vehicle_name"] = vehicle_name
+        meta_update["interested_vehicle"] = vehicle_name
     if down is not None:
         meta_update["last_down_payment"] = down
 
@@ -584,6 +633,19 @@ def chat_with_beatriz(
     elif meta_update:
         try:
             session.update_meta(phone, instance, **meta_update)
+        except Exception:
+            pass
+
+    if vehicle_name and vehicle_name != "Vehículo":
+        try:
+            from src.voice_gateway.session_vehicle import remember_interested_vehicle
+
+            remember_interested_vehicle(
+                vehicle_name,
+                phone=phone,
+                instance=instance,
+                price=vehicle_price_f,
+            )
         except Exception:
             pass
 
@@ -607,6 +669,17 @@ def chat_with_beatriz(
             financing_forced = True
             financing_sent = True
             tools = [*tools, "calculate_financing"]
+            try:
+                from src.voice_gateway.session_vehicle import remember_interested_vehicle
+
+                remember_interested_vehicle(
+                    vehicle_name,
+                    phone=phone,
+                    instance=instance,
+                    price=vehicle_price_f,
+                )
+            except Exception:
+                pass
         except Exception as exc:
             print(
                 f"WARN force_calculate_financing failed phone={phone}: {exc}",
@@ -618,6 +691,9 @@ def chat_with_beatriz(
         reply = forced_speech
     reply = rewrite_reply_keep_interactive(reply, branch=branch)
 
+    active_vehicle = (
+        vehicle_name if vehicle_name and vehicle_name != "Vehículo" else None
+    )
     if not reply:
         return VapiChatResult(
             reply_text="",
@@ -628,6 +704,8 @@ def chat_with_beatriz(
             financing_sent=financing_sent,
             financing_forced=financing_forced,
             tools_called=tools,
+            vehicle_name=active_vehicle,
+            interested_vehicle=active_vehicle,
         )
     return VapiChatResult(
         reply_text=reply,
@@ -637,6 +715,8 @@ def chat_with_beatriz(
         financing_sent=financing_sent,
         financing_forced=financing_forced,
         tools_called=tools,
+        vehicle_name=active_vehicle,
+        interested_vehicle=active_vehicle,
     )
 
 
