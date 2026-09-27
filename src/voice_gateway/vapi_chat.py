@@ -781,13 +781,6 @@ def chat_with_beatriz(
     manager: Any | None = None,
 ) -> VapiChatResult:
     """Send one WhatsApp turn to Vapi Chat; force financing PDF on engache."""
-    key = _api_key()
-    if not key:
-        return VapiChatResult(reply_text="", error="missing VAPI_API_KEY")
-    assistant = _assistant_id()
-    if not assistant:
-        return VapiChatResult(reply_text="", error="missing VAPI_ASSISTANT_ID")
-
     message = (text or "").strip()
     if not message:
         return VapiChatResult(reply_text="", error="empty message")
@@ -807,7 +800,8 @@ def chat_with_beatriz(
         )
 
     # Trade-in / valuation takes strict precedence over sticky financing context.
-    # Short-circuit BEFORE Vapi so previousChatId (e.g. Mustang) cannot fire PDF.
+    # Short-circuit BEFORE Vapi/API key so previousChatId (e.g. Mustang) cannot
+    # fire calculate_financing / PDF side-effects.
     if detect_tradein_intent(message):
         try:
             forced_ti = force_get_tradein_valuation(text=message, phone=phone)
@@ -868,6 +862,13 @@ def chat_with_beatriz(
                 f"WARN force_get_tradein_valuation (early) failed phone={phone}: {exc}",
                 flush=True,
             )
+
+    key = _api_key()
+    if not key:
+        return VapiChatResult(reply_text="", error="missing VAPI_API_KEY")
+    assistant = _assistant_id()
+    if not assistant:
+        return VapiChatResult(reply_text="", error="missing VAPI_ASSISTANT_ID")
 
     prev = previous_chat_id or session.get_chat_id(phone, instance)
     meta = session.get_meta(phone, instance)
