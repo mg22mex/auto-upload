@@ -77,7 +77,9 @@ class TestMessageFormat(RepNotifyTestCase):
         )
 
         self.assertIn("¡Nuevo Lead Asignado!", text)
-        self.assertIn("*Cliente:* +526145550000", text)
+        self.assertIn("*Cliente:* 526145550000", text)
+        self.assertIn("*Teléfono:* 526145550000", text)
+        self.assertIn("Contactar WhatsApp:* https://wa.me/526145550000", text)
         self.assertIn("*Auto:* 2021 Mazda CX-30", text)
         self.assertIn("*Modalidad:* Financiamiento", text)
         self.assertIn("*Sucursal:* San Felipe", text)
@@ -124,6 +126,7 @@ class TestMessageFormat(RepNotifyTestCase):
         self.assertIn("• Stage: Beatriz Cita", text)
         self.assertIn("• Cliente: María López", text)
         self.assertIn("• Teléfono: 6141234567", text)
+        self.assertIn("• Contactar WhatsApp: https://wa.me/6141234567", text)
         self.assertIn("• Vehículo: Toyota Corolla 2022", text)
         self.assertIn("• Sucursal: Periférico", text)
         self.assertIn("• Fecha/Hora Cita: mañana 11:00", text)
@@ -140,7 +143,64 @@ class TestMessageFormat(RepNotifyTestCase):
         self.assertIn("• Auto a cambio: Toyota Corolla 2020", text2)
         self.assertIn("San Felipe", text2)
         self.assertIn("Mustang", text2)
+        self.assertIn("https://wa.me/6140001111", text2)
 
+    def test_synthetic_name_replaced_from_session(self):
+        from src.notifications.whatsapp_rep import (
+            is_synthetic_customer_name,
+            resolve_customer_identity,
+        )
+
+        self.assertTrue(is_synthetic_customer_name("RR Fresh Test"))
+        self.assertFalse(is_synthetic_customer_name("Marco Gastelum"))
+
+        with patch(
+            "src.whatsapp_worker.inbound.QualificationStore"
+        ) as store_cls:
+            sess = QualificationSession(
+                phone="5216141754852",
+                instance="autosell_san_felipe",
+                state="AI_ACTIVE",
+                contact_name="Marco Gastelum",
+                updated_at="2026-01-01T00:00:00Z",
+            )
+            store_cls.return_value.list_by_phone.return_value = [sess]
+            name, phone = resolve_customer_identity(
+                phone="5216141754852",
+                name="RR Fresh Test",
+            )
+        self.assertEqual(name, "Marco Gastelum")
+        self.assertEqual(phone, "5216141754852")
+
+        card = format_appointment_lead_alert(
+            customer_name="RR Fresh Test",
+            phone="5216141754852",
+            interested_vehicle="Chevrolet Aveo 2020",
+            branch_name="San Felipe",
+            appointment_date="lunes a las 10 am",
+            tradein_summary="Toyota Corolla 2020 LE · Autométrica ~$201,200",
+            stage_name="Beatriz Cita",
+        )
+        # Without live store in format_*, resolve still runs — patch store again
+        with patch(
+            "src.whatsapp_worker.inbound.QualificationStore"
+        ) as store_cls:
+            store_cls.return_value.list_by_phone.return_value = [sess]
+            card = format_appointment_lead_alert(
+                customer_name="RR Fresh Test",
+                phone="5216141754852",
+                interested_vehicle="Chevrolet Aveo 2020",
+                branch_name="San Felipe",
+                appointment_date="lunes a las 10 am",
+                tradein_summary="Toyota Corolla 2020 LE · Autométrica ~$201,200",
+                stage_name="Beatriz Cita",
+            )
+        self.assertIn("• Cliente: Marco Gastelum", card)
+        self.assertIn("• Teléfono: 5216141754852", card)
+        self.assertIn(
+            "• Contactar WhatsApp: https://wa.me/5216141754852", card
+        )
+        self.assertNotIn("RR Fresh", card)
 
 class TestNotifyAppointmentRep(RepNotifyTestCase):
     def test_notify_appointment_rep_uses_assignment_phone(self):

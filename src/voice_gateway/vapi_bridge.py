@@ -1964,11 +1964,14 @@ def dispatch_appointment_rep_alert(
     branch: str = "periferico",
     lead_id: int | None = None,
     assignment: dict[str, Any] | None = None,
-    stage_name: str | None = None,
     whatsapp_client: Any | None = None,
+    stage_name: str | None = None,
 ) -> dict[str, Any]:
     """Round-robin agent WhatsApp when Beatriz registers a lead/cita (never raises)."""
-    from src.notifications.whatsapp_rep import notify_appointment_rep
+    from src.notifications.whatsapp_rep import (
+        notify_appointment_rep,
+        resolve_customer_identity,
+    )
     from src.odoo_sync.crm import RepAssignment
 
     appointment = _safe_optional_text(args.appointment_date)
@@ -1977,9 +1980,15 @@ def dispatch_appointment_rep_alert(
         financing=bool(_safe_optional_text(args.financing_summary)),
     )
 
+    # Prefer live qualification identity over script/mock LeadArgs placeholders.
+    customer_name, customer_phone = resolve_customer_identity(
+        phone=args.phone or "",
+        name=args.name or "",
+    )
+
     pick: RepAssignment | None = None
     if isinstance(assignment, dict) and (
-        assignment.get("phone") or assignment.get("odoo_id")
+        assignment.get("phone") or assignment.get("odoo_id") is not None
     ):
         pick = RepAssignment(
             branch=str(assignment.get("branch") or branch),
@@ -1996,8 +2005,8 @@ def dispatch_appointment_rep_alert(
 
     try:
         result = notify_appointment_rep(
-            customer_name=args.name or "",
-            client_phone=args.phone or "",
+            customer_name=customer_name,
+            client_phone=customer_phone or (args.phone or ""),
             branch=branch,
             interested_vehicle=_safe_optional_text(args.interested_vehicle),
             appointment_date=appointment,
@@ -2009,14 +2018,22 @@ def dispatch_appointment_rep_alert(
             whatsapp_client=whatsapp_client,
         )
         logger.warning(
-            "dispatch_appointment_rep_alert sent=%s stage=%s rep=%s odoo_id=%s err=%s",
+            "dispatch_appointment_rep_alert sent=%s stage=%s rep=%s odoo_id=%s "
+            "customer=%s phone=%s err=%s",
             result.sent,
             stage,
             result.phone,
             result.odoo_id,
+            (customer_name or "")[:40],
+            customer_phone,
             result.error or result.skipped_reason,
         )
-        return {**result.as_dict(), "stage_name": stage}
+        return {
+            **result.as_dict(),
+            "stage_name": stage,
+            "customer_name": customer_name,
+            "customer_phone": customer_phone,
+        }
     except Exception as exc:
         logger.exception("dispatch_appointment_rep_alert failed: %s", exc)
         return {"sent": False, "error": str(exc), "stage_name": stage}

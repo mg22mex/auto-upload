@@ -54,7 +54,17 @@ def main() -> int:
     parser.add_argument(
         "--phone",
         default="",
-        help="Override fresh phone (default: generated)",
+        help="Customer phone (default: generated unique test number)",
+    )
+    parser.add_argument(
+        "--name",
+        default="",
+        help="Customer display name (default: resolved from session or 'Cliente')",
+    )
+    parser.add_argument(
+        "--marco",
+        action="store_true",
+        help="Verify with Marco Gastelum / 5216141754852 (session identity)",
     )
     args = parser.parse_args()
 
@@ -78,12 +88,17 @@ def main() -> int:
     before = load_cursors().get(PLACEHOLDER_BRANCH, 0)
     print(f"cursor BEFORE san_felipe={before} → next={reps[before % len(reps)].name}")
 
-    phone = (args.phone or "").strip() or _fresh_phone()
+    if args.marco:
+        phone = "5216141754852"
+        name = "Marco Gastelum"
+    else:
+        phone = (args.phone or "").strip() or _fresh_phone()
+        name = (args.name or "").strip() or "Cliente"
     vehicle = "Chevrolet Aveo 2020"
     tradein = "Toyota Corolla 2020 LE · Autométrica ~$201,200"
 
     lead_args = LeadArgs(
-        name="RR Fresh Test",
+        name=name,
         phone=phone,
         interested_vehicle=vehicle,
         tradein_summary=tradein,
@@ -133,12 +148,36 @@ def main() -> int:
         assignment=pick,
     )
     print("notify_appointment_rep:", notice.as_dict())
+    print("----- MESSAGE PAYLOAD -----")
+    print(notice.message or "(empty — notify disabled/skipped)")
+    print("---------------------------")
 
     final_cursor = load_cursors().get(PLACEHOLDER_BRANCH, 0)
     print(f"cursor FINAL san_felipe={final_cursor} → next={reps[final_cursor % len(reps)].name}")
 
     # --- Assertions ---
     ok = True
+    if args.marco or phone.endswith("6141754852"):
+        msg = notice.message or ""
+        if "Marco Gastelum" not in msg:
+            print("FAIL: card missing Marco Gastelum", file=sys.stderr)
+            ok = False
+        else:
+            print("OK customer name Marco Gastelum")
+        if "5216141754852" not in msg:
+            print("FAIL: card missing 5216141754852", file=sys.stderr)
+            ok = False
+        else:
+            print("OK customer phone 5216141754852")
+        if "https://wa.me/5216141754852" not in msg:
+            print("FAIL: card missing wa.me link", file=sys.stderr)
+            ok = False
+        else:
+            print("OK wa.me link present")
+        if "RR Fresh" in msg:
+            print("FAIL: synthetic RR Fresh still on card", file=sys.stderr)
+            ok = False
+
     francisco = reps[1]
     expected_phone = francisco.phone
     if notice.phone != expected_phone and not args.dry_run:
