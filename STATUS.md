@@ -30,7 +30,7 @@ Companion to [README.md](./README.md) and [docs/PROJECT_GUIDE.md](./docs/PROJECT
 | Native Odoo WA templates | **Paused** | `ODOO_WA_ACCOUNT_*` unset until Meta Manager |
 | FB Page feed posts | **Not started** | Marketplace only today (no Graph `/{page}/feed`) |
 | account_3 | **Pending** | Clear old FB listings before enabling |
-| Commission attribution | **Not started** | Track commissions from CRM closed deals (see backlog) |
+| Commission attribution | **Scaffold** | `src/attribution.py` + `data/commissions.db` + Streamlit `dashboard/app.py` (Comisiones tab); reconcile via `scripts/reconcile_commissions.py` |
 
 ---
 
@@ -83,7 +83,9 @@ Operational blockers and next product modules. Same section in [docs/PROJECT_GUI
 - [ ] Meta **WhatsApp Cloud API** / Manager credentials → set `ODOO_WA_ACCOUNT_PERIFERICO` / `ODOO_WA_ACCOUNT_SAN_FELIPE` (native Odoo templates currently `queued_pending_meta` only).
 
 ### Lead Conversion & Commission Attribution Module
-- [ ] **Not started.** Mechanism to attribute and track **sales commissions** from CRM **closed / won** deals (won stage / sale order link → assigned rep from Round Robin roster → commission ledger or Odoo report). Depends on stable `user_id` / roster `odoo_id` mapping for phone-only reps (e.g. Francisco).
+- [x] **Scaffold (2026-09-27):** `src/attribution.py` ledger (`data/commissions.db`), won/lost stage hook in `OdooTriggerManager`, Odoo reconcile (`scripts/reconcile_commissions.py`), Streamlit tab **Comisiones y Atribución** (`dashboard/app.py`).
+- [ ] Tune `COMMISSION_WON_STAGES` to live Odoo stage names; map phone-only reps to durable keys for payroll.
+- [ ] Production cron for monthly reconcile + operator review of rates (`COMMISSION_DEFAULT_PERCENTAGE`).
 
 ### Other backlog
 - Facebook Page Messenger resume + optional Page **feed** posting (`/{page}/feed`).

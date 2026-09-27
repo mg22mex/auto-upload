@@ -306,11 +306,9 @@ Cross-cutting ops blockers and the next CRM product module. Mirrored in [STATUS.
 - [ ] **Meta WhatsApp API** credentials — set `ODOO_WA_ACCOUNT_PERIFERICO` / `ODOO_WA_ACCOUNT_SAN_FELIPE`; until then native Odoo templates stay `queued_pending_meta` (`src/odoo_sync/whatsapp.py` / triggers).
 
 ### Lead Conversion & Commission Attribution Module
-- [ ] **Not started.** Design and implement commission tracking tied to **CRM closed deals** (won / sold stage or linked sale order):
-  1. Capture closing event on `crm.lead` / opportunity.
-  2. Resolve selling advisor (`user_id` / Round Robin roster `odoo_id` + phone).
-  3. Persist commission amount / rate / branch / vehicle SKU for reporting or payroll export.
-- **Dependency:** phone-only roster entries (e.g. Francisco without `res.users` id) need a durable advisor key before payout attribution is reliable.
+- [x] **Scaffold:** [`src/attribution.py`](../src/attribution.py) → SQLite `data/commissions.db` (`lead_id`, phone, VIN/name, assigned_rep, first_contact, `WON`/`IN_PROGRESS`/`LOST`, commission %/amount). Stage hook in `OdooTriggerManager`; monthly reconcile against Odoo `MG Quote Lead` tags; Streamlit **Comisiones y Atribución** in [`dashboard/app.py`](../dashboard/app.py).
+- [ ] Align won-stage names with production CRM; harden phone-only roster keys for payroll export.
+- [ ] Schedule `scripts/reconcile_commissions.py` on Oracle for monthly billable summary.
 
 ---
 

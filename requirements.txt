@@ -14,3 +14,6 @@ python-multipart>=0.0.9
 
 # Phase 2 — PDF quote / spec sheets
 reportlab>=4.0.0
+
+# Analytics dashboard (commission attribution)
+streamlit>=1.36.0

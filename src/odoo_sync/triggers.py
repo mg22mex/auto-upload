@@ -62,6 +62,16 @@ def is_quote_stage(stage: str | None) -> bool:
     return _normalize_stage(stage) in QUOTE_STAGES
 
 
+def is_attribution_stage(stage: str | None) -> bool:
+    """Won / lost stages that update the local commission ledger."""
+    try:
+        from src.attribution import is_lost_stage, is_won_stage
+
+        return is_won_stage(stage) or is_lost_stage(stage)
+    except Exception:
+        return False
+
+
 def extract_vehicle_from_lead(lead_data: dict[str, Any]) -> dict[str, Any]:
     """Build vehicle dict for QuotePDFManager from free-form lead payload."""
     nested = lead_data.get("vehicle") if isinstance(lead_data.get("vehicle"), dict) else {}
@@ -225,9 +235,32 @@ class OdooTriggerManager:
             "action": "none",
             "quote": None,
             "whatsapp": None,
+            "attribution": None,
             "dry_run": use_dry,
             "error": None,
         }
+
+        # Commission ledger — won / lost (AI-sourced leads tracked locally).
+        if is_attribution_stage(new_stage):
+            try:
+                from src.attribution import sync_lead_attribution
+
+                attr = sync_lead_attribution(int(lead_id), new_stage, lead_data)
+                result["attribution"] = attr.to_row()
+                result["action"] = f"attribution_{attr.sale_status.lower()}"
+                print(
+                    f"OdooTriggerManager attribution lead={lead_id} "
+                    f"stage={new_stage!r} status={attr.sale_status} "
+                    f"commission={attr.commission_amount}"
+                )
+            except Exception as exc:
+                result["ok"] = False
+                result["action"] = "attribution_failed"
+                result["error"] = str(exc)
+                print(
+                    f"WARN on_lead_stage_change attribution lead={lead_id}: {exc}"
+                )
+            return result
 
         if not is_quote_stage(new_stage):
             result["action"] = "ignored"
@@ -503,6 +536,7 @@ __all__ = [
     "extract_client_from_lead",
     "extract_quote_from_lead",
     "extract_vehicle_from_lead",
+    "is_attribution_stage",
     "is_quote_stage",
     "process_incoming_webhook",
 ]
