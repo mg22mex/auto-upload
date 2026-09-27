@@ -59,6 +59,7 @@ def remember_interested_vehicle(
     phone: str | None = None,
     instance: str | None = None,
     price: float | int | None = None,
+    vehicle_year: int | None = None,
     qualification_store: Any | None = None,
     chat_store: Any | None = None,
 ) -> str:
@@ -74,6 +75,19 @@ def remember_interested_vehicle(
     if price is not None:
         try:
             meta["vehicle_price"] = float(price)
+        except (TypeError, ValueError):
+            pass
+    year = vehicle_year
+    if year is None:
+        try:
+            from src.quote_engine.term_limits import extract_model_year
+
+            year = extract_model_year(label)
+        except Exception:
+            year = None
+    if year is not None:
+        try:
+            meta["vehicle_year"] = int(year)
         except (TypeError, ValueError):
             pass
 

@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
 
 from src.notifications.whatsapp import (
     format_customer_phone,
+    format_financing_whatsapp_summary,
     format_lead_confirmation,
     notify_lead_confirmation,
     send_whatsapp_message,
@@ -43,6 +44,22 @@ class TestFormatLeadConfirmation(unittest.TestCase):
     def test_phone_normalize_mx_521_prefix(self):
         with patch.dict("os.environ", {"WHATSAPP_MX_COUNTRY_PREFIX": "521"}):
             self.assertEqual(format_customer_phone("6141234567"), "5216141234567")
+
+
+class TestFinancingWhatsappSummary(unittest.TestCase):
+    def test_sanitizes_chat_lead_in_and_shows_year(self):
+        text = format_financing_whatsapp_summary(
+            name="Marco",
+            vehicle_name="Hola, quiero cotizar un Ford Mustang GT 2025",
+            vehicle_price=689000,
+            down_payment=200000,
+            term_months=60,
+            monthly_payment=12345.67,
+        )
+        self.assertIn("Vehículo: Ford Mustang GT 2025", text)
+        self.assertNotIn("Hola, quiero", text)
+        self.assertIn("Plazo: 60 meses", text)
+        self.assertIn("2025", text)
 
 
 class TestSendWhatsApp(unittest.TestCase):

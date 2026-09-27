@@ -183,14 +183,17 @@ def format_financing_whatsapp_summary(
     branch_label: str | None = None,
 ) -> str:
     """Short ES-MX text sent with the CrediAuto PDF attachment."""
+    from src.pdf_engine.generator import sanitize_vehicle_title
+
     client = (name or "").strip() or "Cliente"
     branch = (branch_label or "").strip() or "Periférico"
+    clean_vehicle = sanitize_vehicle_title(vehicle_name) if vehicle_name else ""
     lines = [
         f"Hola {client}, aquí tienes tu cotización Scotiabank CrediAuto de Autosell. 🚗",
         "",
     ]
-    if vehicle_name:
-        lines.append(f"📌 Vehículo: {vehicle_name.strip()}")
+    if clean_vehicle and clean_vehicle != "Vehículo":
+        lines.append(f"📌 Vehículo: {clean_vehicle}")
     if vehicle_price is not None:
         lines.append(f"💵 Precio: ${float(vehicle_price):,.2f} MXN")
     if down_payment is not None:

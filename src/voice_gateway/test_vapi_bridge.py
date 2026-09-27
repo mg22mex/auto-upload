@@ -73,6 +73,8 @@ class TestFormatters(unittest.TestCase):
         self.assertEqual(payload["count"], 1)
         vehicle = payload["vehicles"][0]
         self.assertEqual(vehicle["model"], "Corolla XLE Toyota 2020")
+        self.assertEqual(vehicle["name"], "Corolla XLE Toyota 2020")
+        self.assertEqual(vehicle["year"], 2020)
         self.assertEqual(vehicle["price"], "$285,000 MXN")
         self.assertEqual(vehicle["location"], "Sucursal Periférico (*)")
         self.assertEqual(vehicle["code"], "obj042")
@@ -424,6 +426,20 @@ class TestFinancing(unittest.TestCase):
         self.assertIn("plazo máximo disponible", text.lower())
         self.assertIn("2021", text)
         self.assertIn("36", text)
+
+    def test_financing_2025_allows_60_months(self):
+        resp = handle_financing_payload(
+            {
+                "vehicle_price": 689000,
+                "term_months": 60,
+                "down_payment": 200000,
+                "vehicle_name": "Ford Mustang GT 2025",
+                "vehicle_year": 2025,
+            }
+        )
+        text = resp.results[0].result
+        self.assertIn("sesenta meses", text)
+        self.assertNotIn("plazo máximo disponible", text.lower())
 
     def test_financing_year_from_vehicle_name(self):
         resp = handle_financing_payload(

@@ -46,12 +46,18 @@ _HANDOFF_CLOSE_RE = re.compile(
 
 _DOWN_PAYMENT_RE = re.compile(
     r"(?:\$\s*)?(\d{1,3}(?:[,\s]\d{3})+|\d{4,7})(?:\s*(?:pesos|mxn))?|"
-    r"(\d{1,3})\s*mil",
+    r"(\d{1,3})\s*mil|"
+    r"(\d{1,3})\s*k\b",
     re.IGNORECASE,
 )
 
 _MONEY_CONTEXT_RE = re.compile(
     r"(enganche|down\s*payment|anticipo|dejo|dar[eé]|pongo|pago)",
+    re.IGNORECASE,
+)
+
+_TERM_MONTHS_RE = re.compile(
+    r"(?:a|plazo|financiar|financiamiento)?\s*(?:de\s*)?(\d{1,2})\s*meses",
     re.IGNORECASE,
 )
 
@@ -206,6 +212,8 @@ def detect_down_payment_amount(text: str) -> float | None:
     for match in _DOWN_PAYMENT_RE.finditer(raw):
         if match.group(2):
             amount = float(match.group(2)) * 1000.0
+        elif match.group(3):
+            amount = float(match.group(3)) * 1000.0
         else:
             digits = re.sub(r"[^\d]", "", match.group(1) or "")
             if not digits:
@@ -253,6 +261,25 @@ def _default_vehicle_price() -> float:
         return 450000.0
 
 
+def detect_term_months(text: str) -> int | None:
+    """Extract plazo in months from user text (e.g. ``60 meses``)."""
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    match = _TERM_MONTHS_RE.search(raw)
+    if not match:
+        return None
+    try:
+        months = int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+    if months % 12 != 0:
+        months = max(12, round(months / 12) * 12)
+    if months < 12 or months > 72:
+        return None
+    return months
+
+
 def _vehicle_from_tool_call_args(chat_payload: dict[str, Any]) -> str | None:
     """Pull vehicle_name from calculate_financing / inventory tool arguments."""
     for step in chat_payload.get("output") or []:
@@ -275,6 +302,9 @@ def _vehicle_from_tool_call_args(chat_payload: dict[str, Any]) -> str | None:
                 for key in ("vehicle_name", "interested_vehicle", "vehicle"):
                     val = str(raw_args.get(key) or "").strip()
                     if val:
+                        year = raw_args.get("vehicle_year") or raw_args.get("year")
+                        if year not in (None, "") and str(year) not in val:
+                            val = f"{val} {year}".strip()
                         return val
             if name in {"query_inventory", "get_inventory", "search_inventory"}:
                 parts = [
@@ -291,30 +321,48 @@ def _vehicle_from_tool_call_args(chat_payload: dict[str, Any]) -> str | None:
     return None
 
 
-def _price_from_tool_blobs(blobs: list[dict[str, Any]]) -> tuple[float | None, str | None]:
+def _match_from_tool_blobs(
+    blobs: list[dict[str, Any]],
+) -> tuple[float | None, str | None, int | None]:
+    """Return (price, clean_name, year) from inventory / financing tool results."""
+    from src.quote_engine.term_limits import extract_model_year
+
     for blob in blobs:
         vehicles = blob.get("vehicles")
         if isinstance(vehicles, list) and vehicles:
             first = vehicles[0]
             if isinstance(first, dict):
-                name = str(first.get("model") or first.get("name") or "").strip() or None
+                name = str(
+                    first.get("name") or first.get("model") or ""
+                ).strip() or None
+                year = extract_model_year(first.get("year")) or extract_model_year(name)
                 price_raw = first.get("price") or first.get("list_price")
+                price: float | None = None
                 if isinstance(price_raw, str):
                     digits = re.sub(r"[^\d.]", "", price_raw.replace(",", ""))
                     try:
-                        return float(digits), name
+                        price = float(digits)
                     except ValueError:
-                        pass
-                if isinstance(price_raw, (int, float)):
-                    return float(price_raw), name
+                        price = None
+                elif isinstance(price_raw, (int, float)):
+                    price = float(price_raw)
+                if price is not None or name:
+                    return price, name, year
         if blob.get("vehicle_price") is not None:
             try:
-                return float(blob["vehicle_price"]), str(
-                    blob.get("vehicle_name") or ""
-                ).strip() or None
+                name = str(blob.get("vehicle_name") or "").strip() or None
+                year = extract_model_year(blob.get("vehicle_year")) or extract_model_year(
+                    name
+                )
+                return float(blob["vehicle_price"]), name, year
             except (TypeError, ValueError):
                 pass
-    return None, None
+    return None, None, None
+
+
+def _price_from_tool_blobs(blobs: list[dict[str, Any]]) -> tuple[float | None, str | None]:
+    price, name, _year = _match_from_tool_blobs(blobs)
+    return price, name
 
 
 class VapiChatSessionStore:
@@ -453,41 +501,60 @@ def force_calculate_financing(
     customer_name: str = "",
     vehicle_name: str = "",
     vehicle_price: float | None = None,
+    vehicle_year: int | None = None,
     term_months: int = DEFAULT_TERM_MONTHS,
     branch: str | None = None,
     whatsapp_client: Any | None = None,
     manager: Any | None = None,
 ) -> dict[str, Any]:
     """Run bridge financing path synchronously → PDF + Beatriz Lead CRM."""
+    from src.pdf_engine.generator import sanitize_vehicle_title
+    from src.quote_engine.term_limits import extract_model_year
     from src.voice_gateway.vapi_bridge import handle_financing_payload
 
     price = float(vehicle_price) if vehicle_price else _default_vehicle_price()
-    payload = {
+    clean_name = sanitize_vehicle_title(vehicle_name or "Vehículo")
+    year = vehicle_year if vehicle_year is not None else extract_model_year(clean_name)
+    term = int(term_months) or DEFAULT_TERM_MONTHS
+    args_body: dict[str, Any] = {
         "vehicle_price": price,
-        "term_months": int(term_months) or DEFAULT_TERM_MONTHS,
+        "term_months": term,
         "down_payment": float(down_payment),
         "phone": phone,
         "customer_name": customer_name or "Cliente",
-        "vehicle_name": vehicle_name or "Vehículo",
+        "vehicle_name": clean_name,
         "branch": branch or "periferico",
         "send_whatsapp": True,
-        # Markers so extract_whatsapp_context also sees them if nested.
+    }
+    if year is not None:
+        args_body["vehicle_year"] = int(year)
+        args_body["year"] = int(year)
+    markers = (
+        f"[whatsapp_phone={phone}] "
+        f"[customer_name={customer_name}] "
+        f"[branch={branch or 'periferico'}] "
+        f"[vehicle_name={clean_name}] "
+        f"[vehicle_price={price}]"
+    )
+    if year is not None:
+        markers += f" [vehicle_year={int(year)}]"
+    payload = {
+        "vehicle_price": price,
+        "term_months": term,
+        "down_payment": float(down_payment),
+        "phone": phone,
+        "customer_name": customer_name or "Cliente",
+        "vehicle_name": clean_name,
+        "vehicle_year": year,
+        "branch": branch or "periferico",
+        "send_whatsapp": True,
         "message": {
             "toolCalls": [
                 {
                     "id": "wa_forced_financing",
                     "function": {
                         "name": "calculate_financing",
-                        "arguments": {
-                            "vehicle_price": price,
-                            "term_months": int(term_months) or DEFAULT_TERM_MONTHS,
-                            "down_payment": float(down_payment),
-                            "phone": phone,
-                            "customer_name": customer_name or "Cliente",
-                            "vehicle_name": vehicle_name or "Vehículo",
-                            "branch": branch or "periferico",
-                            "send_whatsapp": True,
-                        },
+                        "arguments": args_body,
                     },
                 }
             ],
@@ -495,13 +562,7 @@ def force_calculate_financing(
                 "messages": [
                     {
                         "role": "user",
-                        "message": (
-                            f"[whatsapp_phone={phone}] "
-                            f"[customer_name={customer_name}] "
-                            f"[branch={branch or 'periferico'}] "
-                            f"[vehicle_name={vehicle_name}] "
-                            f"[vehicle_price={price}]"
-                        ),
+                        "message": markers,
                     }
                 ]
             },
@@ -544,8 +605,11 @@ def chat_with_beatriz(
     session = store or get_chat_store()
     prev = previous_chat_id or session.get_chat_id(phone, instance)
     meta = session.get_meta(phone, instance)
+    from src.pdf_engine.generator import sanitize_vehicle_title
+    from src.quote_engine.term_limits import extract_model_year
+
     # Prefer last quoted vehicle from chat meta over stale qualification seed.
-    vehicle_name = (
+    vehicle_name = sanitize_vehicle_title(
         str(meta.get("interested_vehicle") or meta.get("vehicle_name") or "").strip()
         or (vehicle_interest or "").strip()
         or "Vehículo"
@@ -555,8 +619,12 @@ def chat_with_beatriz(
         vehicle_price_f = float(vehicle_price) if vehicle_price not in (None, "") else None
     except (TypeError, ValueError):
         vehicle_price_f = None
+    vehicle_year = extract_model_year(meta.get("vehicle_year")) or extract_model_year(
+        vehicle_name
+    )
 
     down = detect_down_payment_amount(message)
+    term_from_msg = detect_term_months(message)
     label = branch_label(branch)
 
     context_bits = [
@@ -568,13 +636,26 @@ def chat_with_beatriz(
     ]
     if vehicle_price_f:
         context_bits.append(f"[vehicle_price={vehicle_price_f}]")
+    if vehicle_year is not None:
+        context_bits.append(f"[vehicle_year={int(vehicle_year)}]")
 
+    financing_hint = (
+        f"con phone={phone}, down_payment, vehicle_price"
+        + (f"={vehicle_price_f}" if vehicle_price_f else "")
+        + f", vehicle_name={vehicle_name!r}"
+        + (f", vehicle_year={int(vehicle_year)}" if vehicle_year is not None else "")
+        + (
+            f", term_months={int(term_from_msg)}"
+            if term_from_msg is not None
+            else ""
+        )
+        + ", send_whatsapp=true. "
+    )
     instructions = (
         "Eres Beatriz de Autosell en WhatsApp. "
         "Si el cliente da un enganche/cantidad, DEBES llamar calculate_financing "
-        f"con phone={phone}, down_payment, vehicle_price"
-        + (f"={vehicle_price_f}" if vehicle_price_f else "")
-        + f", vehicle_name={vehicle_name!r}, send_whatsapp=true. "
+        + financing_hint
+        + "USA el year del inventario (vehicle_year) en calculate_financing. "
         "Si el cliente cambia de unidad (otra marca/modelo), actualiza vehicle_name "
         "al vehículo NUEVO en calculate_financing / query_inventory — no reutilices "
         "un auto anterior. "
@@ -586,6 +667,8 @@ def chat_with_beatriz(
             f" Enganche detectado en este mensaje: {down:.0f}. "
             "Llama calculate_financing YA."
         )
+    if term_from_msg is not None:
+        instructions += f" Plazo detectado: {term_from_msg} meses."
 
     input_text = f"{' '.join(context_bits)}\n{instructions}\n\nCliente: {message}"
 
@@ -607,14 +690,18 @@ def chat_with_beatriz(
     chat_id = str(payload.get("id") or "").strip() or None
     tools = extract_tools_called(payload)
     blobs = parse_tool_result_blobs(payload)
-    price_from_tools, name_from_tools = _price_from_tool_blobs(blobs)
+    price_from_tools, name_from_tools, year_from_tools = _match_from_tool_blobs(blobs)
     name_from_args = _vehicle_from_tool_call_args(payload)
     if price_from_tools:
         vehicle_price_f = price_from_tools
     if name_from_args:
-        vehicle_name = name_from_args
+        vehicle_name = sanitize_vehicle_title(name_from_args)
     elif name_from_tools:
-        vehicle_name = name_from_tools
+        vehicle_name = sanitize_vehicle_title(name_from_tools)
+    if year_from_tools is not None:
+        vehicle_year = year_from_tools
+    else:
+        vehicle_year = extract_model_year(vehicle_name) or vehicle_year
 
     meta_update: dict[str, Any] = {}
     if vehicle_price_f:
@@ -622,8 +709,12 @@ def chat_with_beatriz(
     if vehicle_name and vehicle_name != "Vehículo":
         meta_update["vehicle_name"] = vehicle_name
         meta_update["interested_vehicle"] = vehicle_name
+    if vehicle_year is not None:
+        meta_update["vehicle_year"] = int(vehicle_year)
     if down is not None:
         meta_update["last_down_payment"] = down
+    if term_from_msg is not None:
+        meta_update["last_term_months"] = int(term_from_msg)
 
     if chat_id:
         try:
@@ -645,6 +736,7 @@ def chat_with_beatriz(
                 phone=phone,
                 instance=instance,
                 price=vehicle_price_f,
+                vehicle_year=vehicle_year,
             )
         except Exception:
             pass
@@ -652,6 +744,7 @@ def chat_with_beatriz(
     financing_forced = False
     financing_sent = "calculate_financing" in tools or "get_financing" in tools
     forced_speech = ""
+    term_for_quote = term_from_msg or int(meta.get("last_term_months") or 0) or DEFAULT_TERM_MONTHS
 
     if down is not None and not financing_sent:
         try:
@@ -661,6 +754,8 @@ def chat_with_beatriz(
                 customer_name=customer_name,
                 vehicle_name=vehicle_name,
                 vehicle_price=vehicle_price_f,
+                vehicle_year=vehicle_year,
+                term_months=term_for_quote,
                 branch=branch,
                 whatsapp_client=whatsapp_client,
                 manager=manager,
@@ -677,6 +772,7 @@ def chat_with_beatriz(
                     phone=phone,
                     instance=instance,
                     price=vehicle_price_f,
+                    vehicle_year=vehicle_year,
                 )
             except Exception:
                 pass
@@ -728,6 +824,7 @@ __all__ = [
     "VapiChatSessionStore",
     "chat_with_beatriz",
     "detect_down_payment_amount",
+    "detect_term_months",
     "extract_assistant_text",
     "extract_tools_called",
     "force_calculate_financing",

@@ -61,6 +61,55 @@ class TestDownPaymentDetect(unittest.TestCase):
     def test_small_ignored(self):
         self.assertIsNone(detect_down_payment_amount("tengo 2 hijos"))
 
+    def test_k_suffix(self):
+        self.assertEqual(
+            detect_down_payment_amount(
+                "Hola, quiero cotizar un mustang con 200k de enganche, 60 meses"
+            ),
+            200000.0,
+        )
+
+
+class TestTermMonthsDetect(unittest.TestCase):
+    def test_60_meses(self):
+        from src.voice_gateway.vapi_chat import detect_term_months
+
+        self.assertEqual(
+            detect_term_months(
+                "Hola, quiero cotizar un mustang con 200k de enganche, 60 meses"
+            ),
+            60,
+        )
+
+    def test_missing(self):
+        from src.voice_gateway.vapi_chat import detect_term_months
+
+        self.assertIsNone(detect_term_months("quiero un mustang"))
+
+
+class TestMatchFromInventoryBlob(unittest.TestCase):
+    def test_year_pulled_from_inventory_json(self):
+        from src.voice_gateway.vapi_chat import _match_from_tool_blobs
+
+        price, name, year = _match_from_tool_blobs(
+            [
+                {
+                    "found": True,
+                    "vehicles": [
+                        {
+                            "name": "Ford Mustang GT 2025",
+                            "model": "Ford Mustang GT 2025",
+                            "year": 2025,
+                            "price": "$689,000 MXN",
+                        }
+                    ],
+                }
+            ]
+        )
+        self.assertEqual(price, 689000.0)
+        self.assertIn("Mustang", name or "")
+        self.assertEqual(year, 2025)
+
 
 class TestRewriteReply(unittest.TestCase):
     def test_strips_asesor_and_adds_cita(self):

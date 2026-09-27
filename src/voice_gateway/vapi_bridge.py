@@ -89,6 +89,7 @@ _WA_NAME_RE = re.compile(r"\[customer_name=([^\]]+)\]", re.IGNORECASE)
 _WA_BRANCH_RE = re.compile(r"\[branch=([^\]]+)\]", re.IGNORECASE)
 _WA_VEHICLE_RE = re.compile(r"\[vehicle_name=([^\]]+)\]", re.IGNORECASE)
 _WA_PRICE_RE = re.compile(r"\[vehicle_price=([0-9.]+)\]", re.IGNORECASE)
+_WA_YEAR_RE = re.compile(r"\[vehicle_year=(\d{4})\]", re.IGNORECASE)
 
 app = FastAPI(
     title="Autosell Vapi Bridge",
@@ -521,9 +522,13 @@ def _merge_wa_context_into_financing(
     if args.vehicle_year is None:
         from src.quote_engine.term_limits import extract_model_year
 
-        year = extract_model_year(
-            updates.get("vehicle_name") or args.vehicle_name or ctx.get("vehicle_name")
-        )
+        year = _coerce_optional_year(ctx.get("vehicle_year"))
+        if year is None:
+            year = extract_model_year(
+                updates.get("vehicle_name")
+                or args.vehicle_name
+                or ctx.get("vehicle_name")
+            )
         if year is not None:
             updates["vehicle_year"] = year
     if not (args.branch or "").strip() and ctx.get("branch"):
@@ -805,6 +810,8 @@ def format_inventory_payload(
     timed_out: bool = False,
 ) -> dict[str, Any]:
     """Compact JSON for Vapi ``query_inventory`` (no long TTS essay)."""
+    from src.quote_engine.term_limits import extract_model_year
+
     if timed_out:
         return {
             "found": False,
@@ -812,17 +819,21 @@ def format_inventory_payload(
             "vehicles": [],
             "next_prompt": INVENTORY_NEXT_PROMPT_TIMEOUT,
         }
-    vehicles: list[dict[str, str]] = []
+    vehicles: list[dict[str, Any]] = []
     for row in rows:
         raw_name = str(row.get("name") or "Vehículo")
-        vehicles.append(
-            {
-                "model": _clean_name(raw_name),
-                "price": format_price_compact_mxn(row.get("list_price")),
-                "location": location_compact_for_title(raw_name),
-                "code": str(row.get("default_code") or "").strip() or "",
-            }
-        )
+        clean = _clean_name(raw_name)
+        year = extract_model_year(row.get("year")) or extract_model_year(clean)
+        entry: dict[str, Any] = {
+            "model": clean,
+            "name": clean,
+            "price": format_price_compact_mxn(row.get("list_price")),
+            "location": location_compact_for_title(raw_name),
+            "code": str(row.get("default_code") or "").strip() or "",
+        }
+        if year is not None:
+            entry["year"] = int(year)
+        vehicles.append(entry)
     found = bool(vehicles)
     return {
         "found": found,
@@ -984,16 +995,28 @@ async def handle_inventory_payload(payload: dict[str, Any]) -> VapiToolResponse:
             )
             if label:
                 price = None
-                if len(rows) == 1:
+                year = None
+                if rows:
+                    from src.quote_engine.term_limits import extract_model_year
+
+                    first = rows[0]
                     try:
-                        price = float(rows[0].get("list_price") or 0) or None
+                        price = float(first.get("list_price") or 0) or None
                     except (TypeError, ValueError):
                         price = None
+                    year = extract_model_year(first.get("year")) or extract_model_year(
+                        first.get("name")
+                    )
+                    # Prefer catalog title (includes year) when we have hits.
+                    hit_label = inventory_vehicle_label(rows=rows[:1])
+                    if hit_label:
+                        label = hit_label
                 remember_interested_vehicle(
                     label,
                     phone=wa_ctx.get("phone"),
                     instance=None,
                     price=price,
+                    vehicle_year=year,
                 )
         except Exception:
             logger.exception("inventory session vehicle update failed")
@@ -1060,6 +1083,12 @@ def extract_whatsapp_context(payload: dict[str, Any]) -> dict[str, Any]:
     if m:
         try:
             out["vehicle_price"] = float(m.group(1))
+        except ValueError:
+            pass
+    m = _WA_YEAR_RE.search(blob)
+    if m:
+        try:
+            out["vehicle_year"] = int(m.group(1))
         except ValueError:
             pass
     return out
@@ -1146,7 +1175,8 @@ def dispatch_financing_whatsapp(
             vehicle_data={
                 "name": sanitize_vehicle_title(
                     (args.vehicle_name or "Vehículo").strip() or "Vehículo"
-                )
+                ),
+                "year": args.vehicle_year,
             },
             customer_name=args.customer_name,
             contact={"branch_label": (args.branch or "Autosell").strip() or "Autosell"},
@@ -1156,6 +1186,9 @@ def dispatch_financing_whatsapp(
         logger.exception("financing PDF generation failed")
         return {"sent": False, "error": f"pdf: {exc}"}
 
+    clean_vehicle = sanitize_vehicle_title(
+        (args.vehicle_name or "").strip() or "Vehículo"
+    )
     try:
         result = notify_financing_quote(
             phone=phone,
@@ -1165,7 +1198,7 @@ def dispatch_financing_whatsapp(
             down_payment=float(getattr(quote, "down_payment", args.down_payment or 0)),
             term_months=int(getattr(quote, "term_months", args.term_months)),
             monthly_payment=float(getattr(quote, "estimated_monthly_payment", 0)),
-            vehicle_name=args.vehicle_name,
+            vehicle_name=clean_vehicle,
             branch=args.branch,
             whatsapp_client=whatsapp_client,
             caption="Autosell — financing_quote.pdf (Scotiabank CrediAuto)",
@@ -1292,15 +1325,21 @@ def handle_financing_payload(
             vehicle_label = (args.vehicle_name or "").strip()
             if vehicle_label:
                 try:
+                    from src.pdf_engine.generator import sanitize_vehicle_title
                     from src.voice_gateway.session_vehicle import (
                         remember_interested_vehicle,
                     )
 
+                    clean = sanitize_vehicle_title(vehicle_label)
                     remember_interested_vehicle(
-                        vehicle_label,
+                        clean,
                         phone=(args.phone or "").strip() or None,
                         price=float(getattr(quote, "vehicle_price", args.vehicle_price)),
+                        vehicle_year=args.vehicle_year
+                        or getattr(quote, "vehicle_year", None),
                     )
+                    if clean and clean != vehicle_label:
+                        args = args.model_copy(update={"vehicle_name": clean})
                 except Exception:
                     logger.exception("financing session vehicle update failed")
         except Exception as exc:
