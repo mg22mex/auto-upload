@@ -108,6 +108,15 @@ class TestWhatsAppRouting(unittest.TestCase):
                 resolve_outbound_instance(instance="autosell_san_felipe"),
                 "autosell_san_felipe",
             )
+            # Live inbound instance must never be remapped via branch.
+            self.assertEqual(
+                resolve_outbound_instance(
+                    instance="autosell_san_felipe",
+                    branch="periferico",
+                    fallback="autosell_periferico",
+                ),
+                "autosell_san_felipe",
+            )
 
 
 if __name__ == "__main__":

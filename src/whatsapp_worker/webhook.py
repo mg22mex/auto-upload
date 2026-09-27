@@ -63,38 +63,41 @@ def handle_inbound_event(
     reply_sent = False
     reply_error: str | None = None
     from src.whatsapp_worker.inbound import is_banned_handoff_auto_reply
-    from src.whatsapp_worker.routing import resolve_outbound_instance
+
+    # Strict match: reply ONLY to the inbound sender on the inbound instance.
+    sender_phone = event.phone
+    incoming_instance = (event.instance or "").strip()
+    if not incoming_instance:
+        raise ValueError(
+            f"missing Evolution instance on inbound event phone={sender_phone}"
+        )
 
     reply = (turn.reply_text or "").strip()
-    outbound_instance = resolve_outbound_instance(
-        instance=event.instance or None,
-        branch=turn.session.branch,
-    )
     if not reply or is_banned_handoff_auto_reply(reply):
         reply_sent = False
         if is_banned_handoff_auto_reply(reply):
             logger.warning(
-                "Blocked banned sticky handoff auto-reply for %s", event.phone
+                "Blocked banned sticky handoff auto-reply for %s", sender_phone
             )
         elif not reply:
             logger.warning(
                 "Empty Beatriz reply phone=%s state=%s — skip sendText",
-                event.phone,
+                sender_phone,
                 turn.session.state,
             )
     else:
         try:
             whatsapp.send_text_message(
-                event.phone,
+                sender_phone,
                 turn.reply_text,
-                instance=outbound_instance,
-                branch=turn.session.branch,
+                instance=incoming_instance,
+                branch=None,
             )
             reply_sent = True
             logger.info(
                 "sendText ok phone=%s instance=%s chars=%s preview=%r",
-                event.phone,
-                outbound_instance,
+                sender_phone,
+                incoming_instance,
                 len(reply),
                 reply[:80],
             )
@@ -102,17 +105,20 @@ def handle_inbound_event(
             reply_error = str(exc)
             logger.exception(
                 "sendText FAILED phone=%s instance=%s: %s",
-                event.phone,
-                outbound_instance,
+                sender_phone,
+                incoming_instance,
                 exc,
             )
 
+    # Persist under the same phone+instance that received the message.
+    turn.session.phone = sender_phone
+    turn.session.instance = incoming_instance
     store.save(turn.session)
     return {
         "status": "ok",
-        "phone": event.phone,
-        "instance": event.instance,
-        "outbound_instance": outbound_instance,
+        "phone": sender_phone,
+        "instance": incoming_instance,
+        "outbound_instance": incoming_instance,
         "branch": turn.session.branch,
         "branch_id": turn.session.branch_id,
         "lead_id": lead_id,

@@ -68,20 +68,19 @@ def resolve_outbound_instance(
     branch: str | None = None,
     fallback: str | None = None,
 ) -> str:
-    """Pick a live Evolution instance for ``/message/sendText/{instance}``.
+    """Resolve Evolution instance for outbound send.
 
-    Prefers the inbound webhook instance when it looks valid; otherwise maps
-    ``branch`` → ``autosell_periferico`` / ``autosell_san_felipe``. Never returns
-    the retired ``autosell_main`` name.
+    When ``instance`` is provided and not retired, it is returned **unchanged**
+    (strict inbound→outbound match). Fallbacks only apply when instance is blank.
     """
-    candidates = [
-        (instance or "").strip(),
+    incoming = (instance or "").strip()
+    if incoming and incoming.lower() not in _RETIRED_INSTANCES:
+        return incoming
+    for name in (
         (fallback or "").strip(),
         resolve_instance_for_branch(branch) if branch else "",
         instance_name_periferico(),
-        instance_name_san_felipe(),
-    ]
-    for name in candidates:
+    ):
         if name and name.lower() not in _RETIRED_INSTANCES:
             return name
     return instance_name_periferico()

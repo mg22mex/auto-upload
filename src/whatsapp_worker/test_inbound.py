@@ -105,6 +105,27 @@ class TestParseEvolutionInbound(unittest.TestCase):
         events = parse_evolution_inbound(payload)
         self.assertEqual(events[0].text, "precio 150000")
 
+    def test_lid_uses_sender_pn_not_lid_digits(self):
+        payload = {
+            "event": "messages.upsert",
+            "instance": "autosell_san_felipe",
+            "data": {
+                "key": {
+                    "remoteJid": "123456789012345@lid",
+                    "senderPn": "5216149998877@s.whatsapp.net",
+                    "fromMe": False,
+                    "id": "LID1",
+                },
+                "pushName": "Cliente A",
+                "message": {"conversation": "Hola desde A"},
+            },
+        }
+        events = parse_evolution_inbound(payload)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].phone, "5216149998877")
+        self.assertEqual(events[0].instance, "autosell_san_felipe")
+        self.assertNotEqual(events[0].phone, "123456789012345")
+
     def test_voice_payload_shape(self):
         event = parse_evolution_inbound(_UPSERT)[0]
         body = inbound_to_voice_payload(event)

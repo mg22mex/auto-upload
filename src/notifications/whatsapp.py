@@ -100,12 +100,15 @@ def send_whatsapp_message(
     text: str,
     *,
     branch: str | None = None,
+    instance: str | None = None,
     client: WhatsAppWorkerClient | None = None,
 ) -> dict[str, Any]:
     """POST Evolution ``/message/sendText/{INSTANCE}`` (or open-wa equivalent)."""
     wa = client or WhatsAppWorkerClient()
     number = format_customer_phone(phone)
-    return wa.send_text_message(number, text, branch=branch)
+    return wa.send_text_message(
+        number, text, branch=branch, instance=instance
+    )
 
 
 def notify_lead_confirmation(
@@ -265,7 +268,7 @@ def notify_financing_quote(
 
     wa = whatsapp_client or WhatsAppWorkerClient()
     try:
-        wa.send_text_message(number, message, branch=branch)
+        wa.send_text_message(number, message, branch=branch, instance=None)
     except Exception as exc:
         print(
             f"WARN financing WhatsApp text failed phone={number}: "

@@ -293,10 +293,11 @@ class WhatsAppWorkerClient:
         phone = normalize_phone_number(phone_number)
         from src.whatsapp_worker.routing import resolve_outbound_instance
 
+        # Strict: explicit instance wins; never remap a live inbound instance.
         target_instance = resolve_outbound_instance(
             instance=instance,
-            branch=branch,
-            fallback=self.instance,
+            branch=branch if not (instance or "").strip() else None,
+            fallback=self.instance if not (instance or "").strip() else None,
         )
 
         if self.provider == "openwa":
@@ -332,8 +333,8 @@ class WhatsAppWorkerClient:
 
         target_instance = resolve_outbound_instance(
             instance=instance,
-            branch=branch,
-            fallback=self.instance,
+            branch=branch if not (instance or "").strip() else None,
+            fallback=self.instance if not (instance or "").strip() else None,
         )
 
         if self.provider == "openwa":

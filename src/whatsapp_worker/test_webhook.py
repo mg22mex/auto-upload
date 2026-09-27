@@ -46,7 +46,9 @@ class _FakeWhatsApp:
         self.sent: list[dict] = []
 
     def send_text_message(self, phone, text, *, branch=None, instance=None):
-        self.sent.append({"phone": phone, "text": text})
+        self.sent.append(
+            {"phone": phone, "text": text, "instance": instance, "branch": branch}
+        )
         return {"ok": True}
 
 
@@ -95,6 +97,52 @@ class TestWhatsAppWorkerWebhook(unittest.TestCase):
         self.assertIsNone(result["rep_notification"])
         self.assertEqual(result["qualification_state"], "AI_ACTIVE")
         self.assertEqual(len(self.whatsapp.sent), 1)
+        self.assertEqual(self.whatsapp.sent[0]["phone"], "5216145550000")
+        self.assertEqual(self.whatsapp.sent[0]["instance"], "autosell_periferico")
+        self.assertEqual(result["outbound_instance"], "autosell_periferico")
+
+    def test_phone_a_and_phone_b_keep_separate_instances(self):
+        """Inbound A/B must never cross-wire outbound phone or instance."""
+        payload_a = {
+            "event": "messages.upsert",
+            "instance": "autosell_periferico",
+            "data": {
+                "key": {
+                    "remoteJid": "5216111111111@s.whatsapp.net",
+                    "fromMe": False,
+                    "id": "A1",
+                },
+                "pushName": "PhoneA",
+                "message": {"conversation": "Hola soy A"},
+            },
+        }
+        payload_b = {
+            "event": "messages.upsert",
+            "instance": "autosell_san_felipe",
+            "data": {
+                "key": {
+                    "remoteJid": "5216222222222@s.whatsapp.net",
+                    "fromMe": False,
+                    "id": "B1",
+                },
+                "pushName": "PhoneB",
+                "message": {"conversation": "Hola soy B"},
+            },
+        }
+        ra = self.client.post("/webhook/whatsapp", json=payload_a)
+        rb = self.client.post("/webhook/whatsapp", json=payload_b)
+        self.assertEqual(ra.status_code, 200)
+        self.assertEqual(rb.status_code, 200)
+        customer_msgs = [
+            m for m in self.whatsapp.sent if "Nuevo Lead Asignado" not in m["text"]
+        ]
+        self.assertEqual(len(customer_msgs), 2)
+        self.assertEqual(customer_msgs[0]["phone"], "5216111111111")
+        self.assertEqual(customer_msgs[0]["instance"], "autosell_periferico")
+        self.assertEqual(customer_msgs[1]["phone"], "5216222222222")
+        self.assertEqual(customer_msgs[1]["instance"], "autosell_san_felipe")
+        self.assertEqual(ra.json()["results"][0]["phone"], "5216111111111")
+        self.assertEqual(rb.json()["results"][0]["phone"], "5216222222222")
 
     def test_appointment_request_hands_off_and_alerts_rep(self):
         self.client.post("/webhook/whatsapp", json=_payload("Hola, el CX-30"))

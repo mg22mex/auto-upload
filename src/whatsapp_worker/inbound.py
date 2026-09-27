@@ -90,8 +90,59 @@ def _digits(value: str) -> str:
 
 
 def _phone_from_jid(remote_jid: str) -> str:
+    """Digits from a WhatsApp JID local-part (``5216…@s.whatsapp.net``)."""
     local = (remote_jid or "").split("@", 1)[0]
     return _digits(local)
+
+
+def _jid_is_phone_address(jid: str) -> bool:
+    jid = (jid or "").strip().lower()
+    if not jid or any(skip in jid for skip in _JID_SKIP):
+        return False
+    # Linked-ID placeholders are not dialable phone numbers.
+    if jid.endswith("@lid"):
+        return False
+    return "@s.whatsapp.net" in jid or "@c.us" in jid or "@" not in jid
+
+
+def extract_sender_phone(item: dict[str, Any], *, payload_instance: str = "") -> str:
+    """Strict customer phone from an Evolution ``messages.upsert`` data item.
+
+    Prefer real PN fields when Baileys sends ``@lid`` in ``remoteJid``.
+    Never invent fallbacks — empty string means "skip this event".
+    """
+    del payload_instance  # reserved; phone never comes from instance name
+    key = item.get("key") if isinstance(item.get("key"), dict) else {}
+    candidates: list[str] = []
+    for field in (
+        key.get("senderPn"),
+        key.get("cleanedSenderPn"),
+        key.get("remoteJidAlt"),
+        item.get("senderPn"),
+        item.get("remoteJidAlt"),
+        key.get("participant"),
+        key.get("remoteJid"),
+        item.get("remoteJid"),
+    ):
+        jid = str(field or "").strip()
+        if not jid:
+            continue
+        if _jid_is_phone_address(jid) or (
+            "@" not in jid and len(_digits(jid)) >= 10
+        ):
+            phone = _phone_from_jid(jid)
+            if len(phone) >= 10:
+                candidates.append(phone)
+        elif jid.endswith("@lid"):
+            continue
+    return candidates[0] if candidates else ""
+
+
+def extract_incoming_instance(payload: dict[str, Any]) -> str:
+    """Evolution instance that received the webhook (no env fallback)."""
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("instance") or payload.get("instanceName") or "").strip()
 
 
 def _message_text(message: dict[str, Any] | None) -> str:
@@ -141,7 +192,7 @@ def parse_evolution_inbound(payload: dict[str, Any]) -> list[WhatsAppInboundEven
     if event and "message" not in event and event not in {"messages.upsert", "messages"}:
         return []
 
-    instance = str(payload.get("instance") or payload.get("instanceName") or "").strip()
+    instance = extract_incoming_instance(payload)
     events: list[WhatsAppInboundEvent] = []
     seen: set[str] = set()
 
@@ -150,9 +201,9 @@ def parse_evolution_inbound(payload: dict[str, Any]) -> list[WhatsAppInboundEven
         if key.get("fromMe") is True:
             continue
         remote_jid = str(key.get("remoteJid") or item.get("remoteJid") or "")
-        if not remote_jid or any(skip in remote_jid for skip in _JID_SKIP):
+        if remote_jid and any(skip in remote_jid for skip in _JID_SKIP):
             continue
-        phone = _phone_from_jid(remote_jid)
+        phone = extract_sender_phone(item)
         if len(phone) < 10:
             continue
         text = _message_text(
@@ -380,6 +431,18 @@ def process_qualification_turn(
             vehicle_interest=event.text.strip(),
             updated_at=now,
         )
+    else:
+        # Hard-bind session identity to this inbound event (never bleed Phone B).
+        session.phone = event.phone
+        session.instance = event.instance or session.instance
+        if event.name and event.name != "WhatsApp":
+            session.contact_name = event.name
+        if branch:
+            session.branch = branch
+        if branch_id is not None:
+            session.branch_id = branch_id
+        if physical_location:
+            session.physical_location = physical_location
 
     try:
         from src.voice_gateway.vapi_chat import vapi_wa_text_first_enabled
@@ -970,26 +1033,31 @@ class QualificationStore:
             (phone, instance or ""),
         ).fetchone()
         if row is None:
-            # Evolution may change JID formatting / instance label — fall back.
-            matches = self.list_by_phone(phone)
+            # Same phone, possibly different instance label — never return a
+            # row whose phone digits do not match the inbound sender.
+            matches = [
+                s
+                for s in self.list_by_phone(phone)
+                if _digits(s.phone) == _digits(phone)
+                or (
+                    len(_digits(phone)) >= 10
+                    and _digits(s.phone).endswith(_digits(phone)[-10:])
+                    and _digits(phone).endswith(_digits(s.phone)[-10:])
+                )
+            ]
+            if not matches:
+                return None
             if instance:
                 for sess in matches:
                     if sess.instance == (instance or ""):
+                        sess.phone = phone
                         return sess
-            if len(matches) == 1:
-                # Re-key to the live instance so subsequent saves stay consistent.
-                sess = matches[0]
-                if (instance or "") and sess.instance != (instance or ""):
-                    sess.instance = instance or ""
-                return sess
-            if matches:
-                # Prefer the most recently updated row.
-                matches.sort(key=lambda s: s.updated_at or "", reverse=True)
-                sess = matches[0]
-                if instance is not None:
-                    sess.instance = instance or ""
-                return sess
-            return None
+            matches.sort(key=lambda s: s.updated_at or "", reverse=True)
+            sess = matches[0]
+            sess.phone = phone
+            if instance is not None:
+                sess.instance = instance or ""
+            return sess
         keys = set(row.keys())
         return QualificationSession(
             phone=str(row["phone"]),
