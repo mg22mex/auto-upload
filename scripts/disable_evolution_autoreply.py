@@ -33,6 +33,7 @@ DEFAULT_INSTANCES = (
     "autosell_san_felipe",
 )
 # Docker Evolution → host FastAPI (voice_gateway.webhook on :8080).
+# On Oracle fb-worker, Evolution is local ``127.0.0.1:8082`` (see STATUS.md).
 DEFAULT_WEBHOOK = "http://host.docker.internal:8080/webhook/whatsapp"
 BOT_FIND_PATHS = (
     ("typebot", "/typebot/find/{instance}"),
@@ -47,8 +48,14 @@ BOT_DELETE_TEMPLATES = (
     "/chatbot/delete/{instance}/{bot_id}",
 )
 
+# Set by ``main()`` so CLI ``--base-url`` / ``--api-key`` override .env.
+_RUNTIME_BASE: str | None = None
+_RUNTIME_KEY: str | None = None
+
 
 def _base_url() -> str:
+    if _RUNTIME_BASE:
+        return _RUNTIME_BASE.rstrip("/")
     return (
         os.getenv("EVOLUTION_SERVER_URL")
         or os.getenv("WHATSAPP_API_URL")
@@ -57,6 +64,8 @@ def _base_url() -> str:
 
 
 def _api_key() -> str:
+    if _RUNTIME_KEY is not None:
+        return _RUNTIME_KEY.strip()
     return (os.getenv("WHATSAPP_API_KEY") or "").strip()
 
 
@@ -234,6 +243,8 @@ def configure_instance(instance: str, webhook_url: str) -> dict[str, Any]:
 
 
 def main() -> int:
+    global _RUNTIME_BASE, _RUNTIME_KEY
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--instances",
@@ -246,11 +257,26 @@ def main() -> int:
         help=f"Webhook URL (default: {DEFAULT_WEBHOOK})",
     )
     parser.add_argument(
+        "--base-url",
+        default="",
+        help="Evolution API base (default: EVOLUTION_SERVER_URL / WHATSAPP_API_URL)",
+    )
+    parser.add_argument(
+        "--api-key",
+        default="",
+        help="Override WHATSAPP_API_KEY (prefer .env on the Evolution host)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="List targets only; do not PATCH Evolution",
     )
     args = parser.parse_args()
+
+    if args.base_url.strip():
+        _RUNTIME_BASE = args.base_url.strip()
+    if args.api_key.strip():
+        _RUNTIME_KEY = args.api_key.strip()
 
     if not _api_key():
         print("ERROR: WHATSAPP_API_KEY missing", file=sys.stderr)
@@ -258,7 +284,9 @@ def main() -> int:
 
     discovered = _list_instances()
     requested = [x.strip() for x in args.instances.split(",") if x.strip()]
-    targets = requested or sorted(set(discovered) | set(DEFAULT_INSTANCES))
+    # Prefer live discovered instances when caller did not pin a list.
+    targets = requested or (discovered if discovered else list(DEFAULT_INSTANCES))
+    # Always include explicitly requested names even if missing (report 404).
     if args.dry_run:
         print(
             json.dumps(
@@ -279,14 +307,31 @@ def main() -> int:
         "webhook_url": args.webhook_url,
         "results": [configure_instance(name, args.webhook_url) for name in targets],
     }
+    summary = []
+    for r in report["results"]:
+        name = r.get("instance")
+        settings_st = (r.get("settings") or {}).get("status")
+        webhook_st = (r.get("webhook") or {}).get("status")
+        ok = settings_st in {200, 201} and webhook_st in {200, 201}
+        summary.append(
+            {
+                "instance": name,
+                "settings": settings_st,
+                "webhook": webhook_st,
+                "ok": ok,
+            }
+        )
+    report["summary"] = summary
     print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
-    # Non-zero only when every target hard-failed webhook set (instance missing is OK).
-    ok_any = any(
-        (r.get("webhook") or {}).get("status") in {200, 201}
-        for r in report["results"]
-    )
+
+    ok_any = any(s["ok"] for s in summary)
     if discovered and not ok_any:
         return 1
+    # Fail if every requested live-like name failed (and something was requested).
+    if requested:
+        live_req = [s for s in summary if s["instance"] in discovered or s["ok"]]
+        if live_req and not any(s["ok"] for s in live_req):
+            return 1
     return 0
 
 

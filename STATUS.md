@@ -16,7 +16,7 @@ Companion to [README.md](./README.md) and [docs/PROJECT_GUIDE.md](./docs/PROJECT
 | Listing bump / relist | **Live** | Daily incremental, ≥2d age |
 | Voice quote webhook | **Live** | `/webhook/voice-lead`, `/voice/webhook`, `/voice/stream` |
 | **Beatriz Vapi bridge** | **Live on Oracle** | `:8000`; published-stock only; audit logs; timeout **5s**; quick tunnel + **auto Vapi tool URL sync** (`scripts/sync_vapi_tool_urls.py` / `cloudflared-quick-tunnel.service`); TTS lots `*`/`+`; CRM lot→`team_id` RR |
-| WhatsApp Evolution | **Live on Oracle** | Docker `deploy/docker-compose.evolution.yml` → `127.0.0.1:8082`; customer WA on `/vapi/crm-lead` |
+| WhatsApp Evolution | **Live on Oracle** | Docker → `127.0.0.1:8082`; instances `autosell_periferico` + `autosell_san_felipe` (no `autosell_main`). Disable bots: `scripts/disable_evolution_autoreply.py` on the VPS. |
 | Cloudflare tunnel | **Connector live** | Named token on VPS; **Neubox DNS for `vapi.autosell.mx` still pending** — use quick `*.trycloudflare.com` until CNAME |
 | WhatsApp qualification bot | **Live** | FSM → `HANDOFF_TO_HUMAN` + Odoo |
 | VoIP inbound | **Code live** | `/voice/inbound` — configure `VOICE_DID_*` / forward numbers on VPS |
