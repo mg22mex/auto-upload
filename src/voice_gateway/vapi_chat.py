@@ -86,6 +86,18 @@ SESSION_RESET_REPLY = (
     "o valuar tu auto a cuenta."
 )
 
+TRADEIN_APPLY_CTA = (
+    "Entendido. ¿Deseas aplicar esta valuación como enganche "
+    "para cotizar alguna unidad de nuestro catálogo?"
+)
+
+# Short / unparseable replies after a trade-in quote (avoid Vapi inventing amounts).
+_BRIEF_TRADEIN_FOLLOWUP_RE = re.compile(
+    r"^(?:ee+|e+|ok|oke?y?|vale|va+|sip?|s[ií]+|no+|nop|gracias|"
+    r"umm+|eh+|aja|ajá|mmm+|bien|perfecto)\W*$",
+    re.IGNORECASE,
+)
+
 
 @dataclass
 class VapiChatResult:
@@ -587,6 +599,90 @@ def detect_tradein_intent(text: str) -> bool:
     return bool(parse_payment_intent(text).trade_in)
 
 
+def extract_tradein_version(text: str) -> str:
+    """Pull trim/version from clarifying replies (e.g. ``es versión LE``)."""
+    from src.lead_routing import extract_trade_in_version
+
+    return extract_trade_in_version(text)
+
+
+def is_brief_tradein_followup(text: str) -> bool:
+    """True for tiny / ack-only messages that must not invent Autométrica amounts."""
+    raw = (text or "").strip()
+    if not raw:
+        return True
+    if len(raw) <= 2:
+        return True
+    return bool(_BRIEF_TRADEIN_FOLLOWUP_RE.match(raw))
+
+
+def _prior_tradein_from_meta(meta: dict[str, Any]) -> Any | None:
+    """Rebuild TradeInDetails from chat meta after a prior Autométrica quote."""
+    make = str(meta.get("tradein_make") or "").strip()
+    model = str(meta.get("tradein_model") or "").strip()
+    year_raw = meta.get("tradein_year")
+    if not (make and model and year_raw not in (None, "")):
+        summary = str(meta.get("tradein_summary") or "")
+        if not summary and not meta.get("valor_compra"):
+            return None
+        from src.lead_routing import parse_trade_in_details
+
+        recovered = parse_trade_in_details(summary)
+        if recovered.year and recovered.make and recovered.model:
+            return recovered
+        return None
+    from src.lead_routing import TradeInDetails
+
+    try:
+        year = int(year_raw)
+    except (TypeError, ValueError):
+        return None
+    km_raw = meta.get("tradein_mileage_km")
+    try:
+        km = int(km_raw) if km_raw not in (None, "") else None
+    except (TypeError, ValueError):
+        km = None
+    return TradeInDetails(
+        year=year,
+        make=make,
+        model=model,
+        version=str(meta.get("tradein_version") or meta.get("tradein_trim") or "").strip(),
+        mileage_km=km,
+        is_trade_in=True,
+    )
+
+
+def _tradein_meta_fields(details: dict[str, Any], speech: str) -> dict[str, Any]:
+    out: dict[str, Any] = {"tradein_summary": speech}
+    if details.get("make"):
+        out["tradein_make"] = details["make"]
+    if details.get("model"):
+        out["tradein_model"] = details["model"]
+    if details.get("year") not in (None, ""):
+        out["tradein_year"] = details["year"]
+    if details.get("version"):
+        out["tradein_version"] = details["version"]
+        out["tradein_trim"] = details["version"]
+    if details.get("mileage_km") not in (None, ""):
+        out["tradein_mileage_km"] = details["mileage_km"]
+    amount_m = re.search(r"~\$([0-9,]+)", speech)
+    if amount_m:
+        try:
+            amount = float(amount_m.group(1).replace(",", ""))
+            out["valor_compra"] = amount
+            out["net_trade_in_equity"] = amount
+        except ValueError:
+            pass
+    label = (
+        f"{details.get('make', '')} {details.get('model', '')} {details.get('year', '')}"
+    ).strip()
+    if label:
+        out["vehicle_name"] = label
+        out["interested_vehicle"] = label
+        out["trade_in_label"] = label
+    return out
+
+
 def clear_wa_session_context(
     phone: str,
     *,
@@ -618,6 +714,8 @@ def force_get_tradein_valuation(
     *,
     text: str,
     phone: str = "",
+    prior: Any | None = None,
+    version: str | None = None,
     whatsapp_client: Any | None = None,
 ) -> dict[str, Any]:
     """Parse trade-in vehicle from chat and run Autométrica via bridge."""
@@ -625,7 +723,10 @@ def force_get_tradein_valuation(
     from src.lead_routing import apply_baseline_trim, parse_trade_in_details
     from src.voice_gateway.vapi_bridge import handle_tradein_payload
 
-    details = apply_baseline_trim(parse_trade_in_details(text))
+    details = parse_trade_in_details(text, prior=prior)
+    if (version or "").strip():
+        details.version = version.strip()
+    details = apply_baseline_trim(details)
     details.is_trade_in = True
     if details.year is None or not details.make or not details.model:
         return {
@@ -687,8 +788,64 @@ def force_get_tradein_valuation(
             "year": details.year,
             "version": details.version,
             "mileage_km": details.mileage_km,
+            "trim": details.version,
         },
     }
+
+
+def _finish_forced_tradein(
+    *,
+    forced_ti: dict[str, Any],
+    phone: str,
+    instance: str,
+    branch: str | None,
+    session: VapiChatSessionStore,
+    previous_chat_id: str | None,
+) -> VapiChatResult | None:
+    speech = str(forced_ti.get("speech") or "").strip()
+    if not speech:
+        return None
+    if forced_ti.get("ok") is False:
+        reply = rewrite_reply_keep_interactive(speech, branch=branch)
+        return VapiChatResult(
+            reply_text=reply,
+            tradein_sent=False,
+            tradein_forced=True,
+            tools_called=["get_tradein_valuation"],
+            tradein_summary=speech,
+        )
+    details = forced_ti.get("details") if isinstance(forced_ti, dict) else {}
+    if not isinstance(details, dict):
+        details = {}
+    meta_update = _tradein_meta_fields(details, speech)
+    try:
+        session.update_meta(phone, instance, **meta_update)
+    except Exception:
+        pass
+    vehicle_label = str(meta_update.get("interested_vehicle") or "").strip()
+    if vehicle_label:
+        try:
+            from src.voice_gateway.session_vehicle import remember_interested_vehicle
+
+            remember_interested_vehicle(
+                vehicle_label,
+                phone=phone,
+                instance=instance,
+            )
+        except Exception:
+            pass
+    reply = rewrite_reply_keep_interactive(speech, branch=branch)
+    return VapiChatResult(
+        reply_text=reply,
+        previous_chat_id=previous_chat_id or session.get_chat_id(phone, instance),
+        tradein_sent=True,
+        tradein_forced=True,
+        tools_called=["get_tradein_valuation"],
+        vehicle_name=vehicle_label or None,
+        interested_vehicle=vehicle_label or None,
+        tradein_summary=speech,
+    )
+
 
 
 def force_calculate_financing(
@@ -806,64 +963,73 @@ def chat_with_beatriz(
             tools_called=["session_reset"],
         )
 
+    meta_early = session.get_meta(phone, instance)
+    prior_tradein = _prior_tradein_from_meta(meta_early)
+    version_followup = extract_tradein_version(message)
+
+    # Clarifying trim after a prior Autométrica quote → re-run guide lookup.
+    if prior_tradein is not None and version_followup and not detect_tradein_intent(message):
+        try:
+            forced_ti = force_get_tradein_valuation(
+                text=message,
+                phone=phone,
+                prior=prior_tradein,
+                version=version_followup,
+            )
+            finished = _finish_forced_tradein(
+                forced_ti=forced_ti,
+                phone=phone,
+                instance=instance,
+                branch=branch,
+                session=session,
+                previous_chat_id=previous_chat_id,
+            )
+            if finished is not None:
+                return finished
+        except Exception as exc:
+            print(
+                f"WARN tradein version follow-up failed phone={phone}: {exc}",
+                flush=True,
+            )
+
+    # Brief/unparseable follow-up after valuation — never invent guide amounts.
+    if (
+        prior_tradein is not None
+        and (meta_early.get("tradein_summary") or meta_early.get("valor_compra"))
+        and is_brief_tradein_followup(message)
+        and not detect_tradein_intent(message)
+        and not detect_session_reset(message)
+    ):
+        return VapiChatResult(
+            reply_text=TRADEIN_APPLY_CTA,
+            previous_chat_id=previous_chat_id or session.get_chat_id(phone, instance),
+            tradein_sent=True,
+            tradein_summary=str(meta_early.get("tradein_summary") or "") or None,
+            tools_called=["tradein_apply_cta"],
+            vehicle_name=str(meta_early.get("interested_vehicle") or "") or None,
+            interested_vehicle=str(meta_early.get("interested_vehicle") or "") or None,
+        )
+
     # Trade-in / valuation takes strict precedence over sticky financing context.
     # Short-circuit BEFORE Vapi/API key so previousChatId (e.g. Mustang) cannot
     # fire calculate_financing / PDF side-effects.
     if detect_tradein_intent(message):
         try:
-            forced_ti = force_get_tradein_valuation(text=message, phone=phone)
-            speech = str(forced_ti.get("speech") or "").strip()
-            if speech:
-                meta_update: dict[str, Any] = {"tradein_summary": speech}
-                details = (
-                    forced_ti.get("details") if isinstance(forced_ti, dict) else None
-                )
-                vehicle_label = ""
-                if isinstance(details, dict):
-                    vehicle_label = (
-                        f"{details.get('make', '')} {details.get('model', '')} "
-                        f"{details.get('year', '')}"
-                    ).strip()
-                    amount_m = re.search(r"~\$([0-9,]+)", speech)
-                    if amount_m:
-                        try:
-                            amount = float(amount_m.group(1).replace(",", ""))
-                            meta_update["valor_compra"] = amount
-                            meta_update["net_trade_in_equity"] = amount
-                        except ValueError:
-                            pass
-                if vehicle_label:
-                    meta_update["vehicle_name"] = vehicle_label
-                    meta_update["interested_vehicle"] = vehicle_label
-                try:
-                    session.update_meta(phone, instance, **meta_update)
-                except Exception:
-                    pass
-                if vehicle_label:
-                    try:
-                        from src.voice_gateway.session_vehicle import (
-                            remember_interested_vehicle,
-                        )
-
-                        remember_interested_vehicle(
-                            vehicle_label,
-                            phone=phone,
-                            instance=instance,
-                        )
-                    except Exception:
-                        pass
-                reply = rewrite_reply_keep_interactive(speech, branch=branch)
-                return VapiChatResult(
-                    reply_text=reply,
-                    previous_chat_id=previous_chat_id
-                    or session.get_chat_id(phone, instance),
-                    tradein_sent=True,
-                    tradein_forced=True,
-                    tools_called=["get_tradein_valuation"],
-                    vehicle_name=vehicle_label or None,
-                    interested_vehicle=vehicle_label or None,
-                    tradein_summary=speech,
-                )
+            forced_ti = force_get_tradein_valuation(
+                text=message,
+                phone=phone,
+                prior=prior_tradein,
+            )
+            finished = _finish_forced_tradein(
+                forced_ti=forced_ti,
+                phone=phone,
+                instance=instance,
+                branch=branch,
+                session=session,
+                previous_chat_id=previous_chat_id,
+            )
+            if finished is not None:
+                return finished
         except Exception as exc:
             print(
                 f"WARN force_get_tradein_valuation (early) failed phone={phone}: {exc}",
@@ -927,9 +1093,14 @@ def chat_with_beatriz(
     instructions = (
         "Eres Beatriz de Autosell en WhatsApp. "
         "Si el cliente pide valuación / avalúo / 'cuánto me dan por' / 'a cuenta' / "
-        "'estimas' / 'toman', DEBES llamar get_tradein_valuation (o estimate_tradein) "
-        "con brand, model, year, mileage y version si la da — "
-        "NUNCA reutilices calculate_financing ni el vehículo anterior (Mustang, etc.). "
+        "'estimas' / 'toman' / 'versión LE|Base|Sense', DEBES llamar get_tradein_valuation "
+        "(o estimate_tradein) con brand, model, year, mileage y version — "
+        "NUNCA inventes montos Autométrica ni digas 'ciento cincuenta mil' u otras "
+        "cifras fijas: solo usa el resultado exacto de la herramienta. "
+        "Si ya hay tradein_summary / valor_compra en contexto, reutilízalo o "
+        "re-llama get_tradein_valuation al cambiar la versión. "
+        "NUNCA reutilices calculate_financing ni el vehículo anterior (Mustang, etc.) "
+        "para una valuación. "
         "Si el cliente da un enganche/cantidad, DEBES llamar calculate_financing "
         + financing_hint
         + "USA el year del inventario (vehicle_year) en calculate_financing. "
@@ -939,6 +1110,13 @@ def chat_with_beatriz(
         "Después de la cotización/PDF, NO digas que un asesor contactará. "
         f"Pregunta exactamente: {CITA_FOLLOWUP.format(branch=label)}"
     )
+    if meta.get("tradein_summary"):
+        instructions += (
+            f" Valuación Autométrica vigente (NO inventes otra): "
+            f"{meta.get('tradein_summary')}. "
+        )
+    if meta.get("valor_compra") not in (None, ""):
+        instructions += f" Valor Compra numérico: {meta.get('valor_compra')}. "
     if down is not None:
         instructions += (
             f" Enganche detectado en este mensaje: {down:.0f}. "
@@ -1039,34 +1217,22 @@ def chat_with_beatriz(
     # Fallback trade-in force (early path above is preferred).
     if detect_tradein_intent(message) and not tradein_sent:
         try:
-            forced_ti = force_get_tradein_valuation(text=message, phone=phone)
-            if forced_ti.get("speech"):
+            forced_ti = force_get_tradein_valuation(
+                text=message,
+                phone=phone,
+                prior=_prior_tradein_from_meta(meta),
+            )
+            if forced_ti.get("speech") and forced_ti.get("ok") is not False:
                 forced_speech = str(forced_ti["speech"])
                 tradein_summary = forced_speech
                 tradein_forced = True
                 tradein_sent = True
                 tools = [*tools, "get_tradein_valuation"]
-                meta_update["tradein_summary"] = forced_speech
-                if isinstance(forced_ti.get("details"), dict):
-                    d = forced_ti["details"]
-                    amount_m = re.search(r"~\$([0-9,]+)", forced_speech)
-                    if amount_m:
-                        try:
-                            meta_update["valor_compra"] = float(
-                                amount_m.group(1).replace(",", "")
-                            )
-                            meta_update["net_trade_in_equity"] = meta_update[
-                                "valor_compra"
-                            ]
-                        except ValueError:
-                            pass
-                    ti_label = (
-                        f"{d.get('make', '')} {d.get('model', '')} {d.get('year', '')}"
-                    ).strip()
-                    if ti_label:
-                        meta_update["vehicle_name"] = ti_label
-                        meta_update["interested_vehicle"] = ti_label
-                        vehicle_name = ti_label
+                details = forced_ti.get("details") if isinstance(forced_ti, dict) else {}
+                if isinstance(details, dict):
+                    meta_update.update(_tradein_meta_fields(details, forced_speech))
+                    if meta_update.get("interested_vehicle"):
+                        vehicle_name = str(meta_update["interested_vehicle"])
         except Exception as exc:
             print(
                 f"WARN force_get_tradein_valuation failed phone={phone}: {exc}",
@@ -1112,6 +1278,18 @@ def chat_with_beatriz(
     reply = extract_assistant_text(payload)
     if (financing_forced or tradein_forced) and forced_speech:
         reply = forced_speech
+    # Scrub stale LLM guide inventions when we already have Autométrica speech.
+    stale_amt = re.search(
+        r"ciento\s+cincuenta\s+mil|\$?\s*150[\s.,]?000",
+        reply or "",
+        re.IGNORECASE,
+    )
+    if stale_amt:
+        real = (tradein_summary or str(meta.get("tradein_summary") or "")).strip()
+        if real:
+            reply = real
+        elif forced_speech:
+            reply = forced_speech
     reply = rewrite_reply_keep_interactive(reply, branch=branch)
 
     active_vehicle = (
@@ -1155,6 +1333,7 @@ __all__ = [
     "DEFAULT_ASSISTANT_ID",
     "ENV_ENABLED",
     "SESSION_RESET_REPLY",
+    "TRADEIN_APPLY_CTA",
     "VapiChatResult",
     "VapiChatSessionStore",
     "chat_with_beatriz",
@@ -1165,9 +1344,11 @@ __all__ = [
     "detect_tradein_intent",
     "extract_assistant_text",
     "extract_tools_called",
+    "extract_tradein_version",
     "force_calculate_financing",
     "force_get_tradein_valuation",
     "get_chat_store",
+    "is_brief_tradein_followup",
     "reset_chat_store_for_tests",
     "rewrite_reply_keep_interactive",
     "vapi_wa_text_first_enabled",

@@ -94,6 +94,95 @@ class TestSessionResetDetect(unittest.TestCase):
         self.assertFalse(detect_session_reset("cuanto cuesta el mustang"))
 
 
+class TestTradeinVersionFollowup(unittest.TestCase):
+    def test_version_le_reruns_valuation(self):
+        from src.voice_gateway import vapi_chat as vc
+
+        forced = {
+            "ok": True,
+            "tool": "get_tradein_valuation",
+            "speech": (
+                "Estimación de toma a cuenta para Toyota Corolla 2020 LE (50,000 km): "
+                "~$201,200 MXN (Sujeto a inspección física y mecánica en sucursal)."
+            ),
+            "details": {
+                "make": "Toyota",
+                "model": "Corolla",
+                "year": 2020,
+                "version": "LE",
+                "mileage_km": 50000,
+                "trim": "LE",
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            store = VapiChatSessionStore(Path(tmp) / "chats.db")
+            store.set_chat_id(
+                "6143231198",
+                "prev",
+                meta={
+                    "tradein_make": "Toyota",
+                    "tradein_model": "Corolla",
+                    "tradein_year": 2020,
+                    "tradein_version": "Base",
+                    "tradein_mileage_km": 50000,
+                    "tradein_summary": "Estimación previa Base",
+                    "valor_compra": 195500,
+                },
+            )
+            with patch.object(vc, "_api_key", return_value="k"), patch.object(
+                vc, "_assistant_id", return_value="asst"
+            ), patch.object(vc, "_http_json") as http, patch.object(
+                vc, "force_get_tradein_valuation", return_value=forced
+            ) as force_ti:
+                result = vc.chat_with_beatriz(
+                    text="Es versión LE",
+                    phone="6143231198",
+                    branch="periferico",
+                    store=store,
+                )
+        http.assert_not_called()
+        force_ti.assert_called_once()
+        self.assertEqual(force_ti.call_args.kwargs.get("version"), "LE")
+        self.assertTrue(result.tradein_forced)
+        self.assertIn("201,200", result.reply_text)
+        self.assertNotIn("ciento cincuenta", result.reply_text.casefold())
+
+    def test_brief_ee_gets_apply_cta(self):
+        from src.voice_gateway import vapi_chat as vc
+        from src.voice_gateway.vapi_chat import TRADEIN_APPLY_CTA
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = VapiChatSessionStore(Path(tmp) / "chats.db")
+            store.set_chat_id(
+                "6143231198",
+                "prev",
+                meta={
+                    "tradein_make": "Toyota",
+                    "tradein_model": "Corolla",
+                    "tradein_year": 2020,
+                    "tradein_mileage_km": 50000,
+                    "tradein_summary": (
+                        "Estimación de toma a cuenta para Toyota Corolla 2020 LE "
+                        "(50,000 km): ~$201,200 MXN "
+                        "(Sujeto a inspección física y mecánica en sucursal)."
+                    ),
+                    "valor_compra": 201200,
+                },
+            )
+            with patch.object(vc, "_api_key", return_value="k"), patch.object(
+                vc, "_assistant_id", return_value="asst"
+            ), patch.object(vc, "_http_json") as http:
+                result = vc.chat_with_beatriz(
+                    text="ee",
+                    phone="6143231198",
+                    branch="periferico",
+                    store=store,
+                )
+        http.assert_not_called()
+        self.assertEqual(result.reply_text, TRADEIN_APPLY_CTA)
+        self.assertIn("tradein_apply_cta", result.tools_called)
+
+
 class TestTradeinOverridesMustangContext(unittest.TestCase):
     def test_tradein_short_circuits_before_vapi(self):
         from src.voice_gateway import vapi_chat as vc

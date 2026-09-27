@@ -706,6 +706,11 @@ def _extract_version(text: str) -> str:
     return ""
 
 
+def extract_trade_in_version(text: str) -> str:
+    """Public wrapper for trim/version extraction from free text."""
+    return _extract_version(text)
+
+
 def parse_trade_in_details(
     text: str,
     *,
@@ -1414,6 +1419,7 @@ __all__ = [
     "detect_forma_pago_financing",
     "detect_forma_pago_permuta",
     "extract_tags",
+    "extract_trade_in_version",
     "format_ai_reply",
     "handle_outbound_voice_request",
     "handle_voice_appointment_result",
