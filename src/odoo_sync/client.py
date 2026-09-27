@@ -45,7 +45,9 @@ class TestDriveEventResult:
 class OdooCRMClient(WhatsAppMixin, FleetMixin, DocumentsMixin, OdooClient):
     """CRM + WhatsApp + Fleet + Documents on one shared Odoo XML-RPC session."""
 
-    TEST_DRIVE_STAGE = "Cita/Prueba de manejo"
+    TEST_DRIVE_STAGE = "Beatriz Cita"
+    BEATRIZ_LEAD_STAGE = "Beatriz Lead"
+    BEATRIZ_CITA_STAGE = "Beatriz Cita"
     DEFAULT_ACTIVITY_SUMMARY = "Seguimiento post-cotización / Confirmación de Cita"
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1088,7 +1090,7 @@ class OdooCRMClient(WhatsAppMixin, FleetMixin, DocumentsMixin, OdooClient):
         )
 
     def _resolve_crm_stage_id(self, stage_name: str) -> int | None:
-        """Best-effort ``crm.stage`` match; appointment stages fall back to id 2."""
+        """Best-effort ``crm.stage`` match; Beatriz / appointment stages fall back."""
         label = (stage_name or "").strip()
         if not label:
             return None
@@ -1107,38 +1109,53 @@ class OdooCRMClient(WhatsAppMixin, FleetMixin, DocumentsMixin, OdooClient):
 
         rows = _search([("name", "ilike", label)])
         lowered = label.lower()
-        appointment_like = any(
-            token in lowered for token in ("cita", "prueba", "manejo", "appointment", "test drive")
+        beatriz_lead = "beatriz lead" in lowered or lowered in {
+            "primer contacto",
+            "quote generated",
+        }
+        beatriz_cita = "beatriz cita" in lowered or any(
+            token in lowered
+            for token in ("cita", "prueba", "manejo", "appointment", "test drive")
         )
 
-        if not rows and appointment_like:
-            # Prefer real Autosell pipeline stage: "Cita/Prueba de manejo"
-            rows = _search(
-                [
-                    "|",
-                    ("name", "ilike", "Cita"),
-                    ("name", "ilike", "Prueba de manejo"),
-                ]
-            )
-            if not rows:
-                for alt in (
-                    "Cita/Prueba de manejo",
-                    "Prueba de manejo",
-                    "Cita Agendada",
-                    "Cita",
-                    "Test Drive",
-                    "Appointment",
-                ):
-                    rows = _search([("name", "ilike", alt)], limit=5)
-                    if rows:
-                        break
+        if not rows and beatriz_lead:
+            for alt in (
+                self.BEATRIZ_LEAD_STAGE,
+                "Beatriz Lead",
+                "Primer contacto",
+                "Quote Generated",
+            ):
+                rows = _search([("name", "ilike", alt)], limit=5)
+                if rows:
+                    break
+
+        if not rows and beatriz_cita:
+            for alt in (
+                self.BEATRIZ_CITA_STAGE,
+                "Beatriz Cita",
+                "Cita/Prueba de manejo",
+                "Prueba de manejo",
+                "Cita Agendada",
+                "Cita",
+                "Test Drive",
+                "Appointment",
+            ):
+                rows = _search([("name", "ilike", alt)], limit=5)
+                if rows:
+                    break
 
         if rows:
-            # Exact match first
             for row in rows:
                 if str(row.get("name") or "").strip().lower() == lowered:
                     return int(row["id"])
-            # Prefer the canonical appointment stage name when present
+            for row in rows:
+                name = str(row.get("name") or "").strip().lower()
+                if "beatriz cita" in name:
+                    return int(row["id"])
+            for row in rows:
+                name = str(row.get("name") or "").strip().lower()
+                if "beatriz lead" in name:
+                    return int(row["id"])
             for row in rows:
                 name = str(row.get("name") or "").strip().lower()
                 if "prueba" in name and "manejo" in name:
@@ -1149,11 +1166,19 @@ class OdooCRMClient(WhatsAppMixin, FleetMixin, DocumentsMixin, OdooClient):
                     return int(row["id"])
             return int(rows[0]["id"])
 
-        if appointment_like:
+        if beatriz_cita or beatriz_lead:
+            env_key = (
+                "ODOO_CRM_BEATRIZ_CITA_STAGE_ID"
+                if beatriz_cita
+                else "ODOO_CRM_BEATRIZ_LEAD_STAGE_ID"
+            )
+            fallback_raw = (
+                (os.getenv(env_key) or "").strip()
+                or (os.getenv("ODOO_CRM_CITA_STAGE_ID") or "2").strip()
+                or "2"
+            )
             try:
-                fallback = int(
-                    (os.getenv("ODOO_CRM_CITA_STAGE_ID") or "2").strip() or "2"
-                )
+                fallback = int(fallback_raw)
             except ValueError:
                 fallback = 2
             if fallback > 0:

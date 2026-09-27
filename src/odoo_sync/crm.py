@@ -366,9 +366,11 @@ class CRMLeadManager:
                 print(
                     f"WARN CRMLeadManager chatter on lead {existing_id}: {exc}"
                 )
+            assignment_meta: dict[str, Any] | None = None
+            assigned_user_id: int | None = None
             try:
-                # Never rewrite user_id — preserve Round Robin / outbound owner.
-                # Always map contact/phone/description (appointment notes live here).
+                # Never rewrite user_id when preserve_salesperson — keep Round Robin /
+                # outbound owner. Exception: appointment + assign_rr with no owner yet.
                 update_vals: dict[str, Any] = {
                     "contact_name": client_name,
                     "phone": phone_digits,
@@ -385,6 +387,27 @@ class CRMLeadManager:
                 if tag_ids:
                     update_vals["tag_ids"] = [(6, 0, list(tag_ids))]
                 resolved_stage_id = self._apply_stage_id(update_vals, stage_name)
+
+                if assign_rr and (appointment or stage_name):
+                    existing_owner = self._read_lead_user_id(int(existing_id))
+                    if existing_owner is None or not preserve_owner:
+                        try:
+                            assignment = assign_lead_owner(effective_branch)
+                            assignment_meta = assignment.as_dict()
+                            if assignment.odoo_id:
+                                assigned_user_id = int(assignment.odoo_id)
+                                update_vals["user_id"] = assigned_user_id
+                        except Exception as exc:
+                            print(
+                                f"WARN CRMLeadManager RR on update "
+                                f"lead={existing_id}: {exc}"
+                            )
+                    elif existing_owner is not None:
+                        assigned_user_id = int(existing_owner)
+                        assignment_meta = self._assignment_from_user_id(
+                            effective_branch, assigned_user_id
+                        )
+
                 self._client.execute_kw(
                     "crm.lead",
                     "write",
@@ -393,6 +416,8 @@ class CRMLeadManager:
             except Exception as exc:
                 print(f"WARN CRMLeadManager update lead {existing_id}: {exc}")
                 resolved_stage_id = None
+                assignment_meta = None
+                assigned_user_id = None
 
             stage_label = stage_name or (
                 self._client.TEST_DRIVE_STAGE if resolved_stage_id else "(no stage)"
@@ -423,6 +448,8 @@ class CRMLeadManager:
                 "stage_name": stage_name or None,
                 "stage_id": resolved_stage_id,
                 "salesperson_preserved": True,
+                "user_id": assigned_user_id,
+                "assignment": assignment_meta,
                 "dry_run": False,
             }
 
@@ -447,9 +474,11 @@ class CRMLeadManager:
         resolved_stage_id = self._apply_stage_id(vals, stage_name)
 
         assigned_user_id: int | None = None
+        assignment_meta: dict[str, Any] | None = None
         if assign_rr:
             try:
                 assignment = assign_lead_owner(effective_branch)
+                assignment_meta = assignment.as_dict()
                 if assignment.odoo_id:
                     assigned_user_id = int(assignment.odoo_id)
                     vals["user_id"] = assigned_user_id
@@ -501,6 +530,7 @@ class CRMLeadManager:
             "stage_name": stage_name or None,
             "stage_id": resolved_stage_id,
             "user_id": assigned_user_id,
+            "assignment": assignment_meta,
             "dry_run": False,
         }
 
@@ -732,6 +762,49 @@ class CRMLeadManager:
                 except Exception:
                     pass
         return None
+
+    def _read_lead_user_id(self, lead_id: int) -> int | None:
+        """Return current ``crm.lead.user_id`` or None when unset / unreadable."""
+        try:
+            rows = self._client.execute_kw(
+                "crm.lead",
+                "read",
+                [[int(lead_id)]],
+                {"fields": ["user_id"]},
+            )
+            if not rows:
+                return None
+            raw = rows[0].get("user_id")
+            if isinstance(raw, (list, tuple)) and raw:
+                return int(raw[0])
+            if raw in (False, None, ""):
+                return None
+            return int(raw)
+        except Exception as exc:
+            print(f"WARN CRMLeadManager read user_id lead={lead_id}: {exc}")
+            return None
+
+    def _assignment_from_user_id(
+        self, branch: str, user_id: int
+    ) -> dict[str, Any] | None:
+        """Map an existing Odoo salesperson to a roster phone for WhatsApp."""
+        from src.config import load_branch_reps
+
+        roster = load_branch_reps().get(normalize_crm_branch(branch)) or []
+        for rep in roster:
+            if rep.odoo_id is not None and int(rep.odoo_id) == int(user_id):
+                return RepAssignment(
+                    branch=normalize_crm_branch(branch),
+                    phone=rep.phone,
+                    odoo_id=rep.odoo_id,
+                    rep_name=rep.name,
+                ).as_dict()
+        return RepAssignment(
+            branch=normalize_crm_branch(branch),
+            phone="",
+            odoo_id=int(user_id),
+            rep_name="",
+        ).as_dict()
 
     def _maybe_link_fleet(
         self,

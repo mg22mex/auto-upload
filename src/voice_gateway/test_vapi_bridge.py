@@ -347,6 +347,52 @@ class TestFinancing(unittest.TestCase):
         self.assertNotIn("$", text)
         self.assertRegex(text, r"pesos")
 
+    def test_financing_whatsapp_sends_text_and_pdf(self):
+        from src.voice_gateway.vapi_bridge import handle_financing_payload
+
+        manager = MagicMock()
+        manager.create_or_update_lead.return_value = {
+            "status": "created",
+            "lead_id": 70,
+            "branch": "periferico",
+            "dry_run": False,
+            "stage_name": "Beatriz Lead",
+            "assignment": {
+                "branch": "periferico",
+                "phone": "+526148888888",
+                "odoo_id": 12,
+            },
+            "user_id": 12,
+        }
+        wa = MagicMock()
+        wa.send_text_message.return_value = {"ok": True}
+        wa.send_quote_pdf.return_value = {"ok": True}
+        resp = handle_financing_payload(
+            {
+                "vehicle_price": 450000,
+                "term_months": 48,
+                "down_payment": 90000,
+                "phone": "6149876543",
+                "customer_name": "Luis",
+                "vehicle_name": "Toyota Corolla 2022",
+                "send_whatsapp": True,
+            },
+            whatsapp_client=wa,
+            manager=manager,
+        )
+        self.assertIn("WhatsApp", resp.results[0].result)
+        self.assertIn("amortización", resp.results[0].result.lower())
+        self.assertGreaterEqual(wa.send_text_message.call_count, 2)
+        wa.send_quote_pdf.assert_called_once()
+        pdf_path = wa.send_quote_pdf.call_args.args[1]
+        self.assertTrue(str(pdf_path).endswith("financing_quote.pdf"))
+        self.assertIn("CrediAuto", wa.send_text_message.call_args_list[0].args[1])
+        manager.create_or_update_lead.assert_called_once()
+        self.assertEqual(
+            manager.create_or_update_lead.call_args.args[0]["stage_name"],
+            "Beatriz Lead",
+        )
+
     def test_financing_speech_template(self):
         quote = MagicMock(
             down_payment=Decimal("90000"),
@@ -418,6 +464,13 @@ class TestLead(unittest.TestCase):
             "lead_id": 42,
             "branch": "periferico",
             "dry_run": False,
+            "assignment": {
+                "branch": "periferico",
+                "phone": "+526141111111",
+                "odoo_id": 2,
+                "rep_name": "Ana",
+            },
+            "user_id": 2,
         }
         wa = MagicMock()
         wa.send_text_message.return_value = {"ok": True}
@@ -445,15 +498,21 @@ class TestLead(unittest.TestCase):
         self.assertIn("Financiamiento:", payload["description"])
         self.assertIn("Cita preferida:", payload["description"])
         self.assertTrue(payload["opportunity_name"].startswith("Llamada Paulina - "))
-        self.assertEqual(payload["stage_name"], "Cita/Prueba de manejo")
+        self.assertEqual(payload["stage_name"], "Beatriz Cita")
         self.assertTrue(payload["assign_round_robin"])
         self.assertTrue(payload["preserve_salesperson"])
         manager.odoo.execute_kw.assert_not_called()
-        wa.send_text_message.assert_called_once()
-        wa_args = wa.send_text_message.call_args
-        self.assertEqual(wa_args.args[0], "526149876543")
-        self.assertIn("Juan Pérez", wa_args.args[1])
-        self.assertIn("Mazda CX-5 2020", wa_args.args[1])
+        # Customer confirmation + sales-rep appointment alert
+        self.assertEqual(wa.send_text_message.call_count, 2)
+        customer_msg = wa.send_text_message.call_args_list[0].args[1]
+        rep_msg = wa.send_text_message.call_args_list[1].args[1]
+        self.assertEqual(wa.send_text_message.call_args_list[0].args[0], "526149876543")
+        self.assertIn("Juan Pérez", customer_msg)
+        self.assertIn("Mazda CX-5 2020", customer_msg)
+        self.assertIn("NUEVO LEAD EN REGISTRO", rep_msg)
+        self.assertIn("Beatriz Cita", rep_msg)
+        self.assertIn("Juan Pérez", rep_msg)
+        self.assertIn("mañana a las 11", rep_msg)
 
     def test_create_lead_san_felipe_branch_from_marker(self):
         from src.voice_gateway.vapi_bridge import handle_lead_payload
@@ -465,6 +524,12 @@ class TestLead(unittest.TestCase):
             "branch": "san_felipe",
             "team_id": 5,
             "dry_run": False,
+            "assignment": {
+                "branch": "san_felipe",
+                "phone": "+526142222222",
+                "odoo_id": 5,
+            },
+            "user_id": 5,
         }
         wa = MagicMock()
         handle_lead_payload(
@@ -488,7 +553,7 @@ class TestLead(unittest.TestCase):
         )
         self.assertEqual(branch_arg, "san_felipe")
         self.assertEqual(payload.get("physical_location"), "San Felipe")
-        wa.send_text_message.assert_called_once()
+        self.assertEqual(wa.send_text_message.call_count, 2)
 
     def test_update_existing_lead_by_id(self):
         from src.voice_gateway.vapi_bridge import handle_lead_payload
@@ -500,6 +565,12 @@ class TestLead(unittest.TestCase):
             "deduplicated": True,
             "branch": "periferico",
             "dry_run": False,
+            "assignment": {
+                "branch": "periferico",
+                "phone": "+526143333333",
+                "odoo_id": 3,
+            },
+            "user_id": 3,
         }
         wa = MagicMock()
         resp = handle_lead_payload(
@@ -517,7 +588,7 @@ class TestLead(unittest.TestCase):
         self.assertEqual(payload["lead_id"], 1937)
         self.assertTrue(payload["preserve_salesperson"])
         manager.odoo.execute_kw.assert_not_called()
-        wa.send_text_message.assert_called_once()
+        self.assertEqual(wa.send_text_message.call_count, 2)
 
     def test_background_tasks_queues_whatsapp(self):
         from fastapi import BackgroundTasks
@@ -530,6 +601,12 @@ class TestLead(unittest.TestCase):
             "lead_id": 9,
             "branch": "periferico",
             "dry_run": False,
+            "assignment": {
+                "branch": "periferico",
+                "phone": "+526144444444",
+                "odoo_id": 4,
+            },
+            "user_id": 4,
         }
         wa = MagicMock()
         tasks = BackgroundTasks()
@@ -540,9 +617,10 @@ class TestLead(unittest.TestCase):
             whatsapp_client=wa,
         )
         wa.send_text_message.assert_not_called()
-        self.assertEqual(len(tasks.tasks), 1)
-        tasks.tasks[0].func(*tasks.tasks[0].args, **tasks.tasks[0].kwargs)
-        wa.send_text_message.assert_called_once()
+        self.assertEqual(len(tasks.tasks), 2)
+        for task in tasks.tasks:
+            task.func(*task.args, **task.kwargs)
+        self.assertEqual(wa.send_text_message.call_count, 2)
 
     def test_crm_lead_alias_queues_whatsapp(self):
         """``/vapi/crm-lead`` shares ``handle_lead_payload`` → same WA queue."""
@@ -558,6 +636,12 @@ class TestLead(unittest.TestCase):
             "lead_id": 42,
             "branch": "periferico",
             "dry_run": False,
+            "assignment": {
+                "branch": "periferico",
+                "phone": "+526145555555",
+                "odoo_id": 7,
+            },
+            "user_id": 7,
         }
         wa = MagicMock()
         tasks = BackgroundTasks()
@@ -574,7 +658,9 @@ class TestLead(unittest.TestCase):
                 whatsapp_client=wa,
             )
             tasks.tasks[0].func(*tasks.tasks[0].args, **tasks.tasks[0].kwargs)
-        wa.send_text_message.assert_called_once()
+            if len(tasks.tasks) > 1:
+                tasks.tasks[1].func(*tasks.tasks[1].args, **tasks.tasks[1].kwargs)
+        self.assertGreaterEqual(wa.send_text_message.call_count, 1)
         warned = [
             c
             for c in log.warning.call_args_list
@@ -585,6 +671,84 @@ class TestLead(unittest.TestCase):
         self.assertIn("interested_vehicle", blob)
         self.assertIn("financing_summary", blob)
         self.assertIn("tradein_summary", blob)
+
+
+    def test_lead_without_appointment_uses_beatriz_lead_stage(self):
+        from src.voice_gateway.vapi_bridge import handle_lead_payload
+
+        manager = MagicMock()
+        manager.create_or_update_lead.return_value = {
+            "status": "created",
+            "lead_id": 55,
+            "branch": "periferico",
+            "dry_run": False,
+            "stage_name": "Beatriz Lead",
+            "assignment": {
+                "branch": "periferico",
+                "phone": "+526146666666",
+                "odoo_id": 8,
+            },
+            "user_id": 8,
+        }
+        wa = MagicMock()
+        handle_lead_payload(
+            {
+                "name": "Pedro",
+                "phone": "6147778888",
+                "interested_vehicle": "Mazda CX-5",
+                "financing_summary": "48 meses",
+            },
+            manager=manager,
+            whatsapp_client=wa,
+        )
+        payload = manager.create_or_update_lead.call_args.args[0]
+        self.assertEqual(payload["stage_name"], "Beatriz Lead")
+        self.assertEqual(wa.send_text_message.call_count, 2)
+        rep_msg = wa.send_text_message.call_args_list[1].args[1]
+        self.assertIn("Beatriz Lead", rep_msg)
+        self.assertIn("NUEVO LEAD EN REGISTRO", rep_msg)
+
+    def test_financing_upserts_beatriz_lead_and_alerts(self):
+        from src.voice_gateway.vapi_bridge import handle_financing_payload
+
+        manager = MagicMock()
+        manager.create_or_update_lead.return_value = {
+            "status": "created",
+            "lead_id": 66,
+            "branch": "periferico",
+            "dry_run": False,
+            "stage_name": "Beatriz Lead",
+            "assignment": {
+                "branch": "periferico",
+                "phone": "+526147777777",
+                "odoo_id": 9,
+            },
+            "user_id": 9,
+        }
+        wa = MagicMock()
+        wa.send_text_message.return_value = {"ok": True}
+        wa.send_quote_pdf.return_value = {"ok": True}
+        resp = handle_financing_payload(
+            {
+                "vehicle_price": 365000,
+                "term_months": 48,
+                "down_payment": 73000,
+                "phone": "6149990000",
+                "customer_name": "Laura",
+                "vehicle_name": "Corolla XLE",
+                "send_whatsapp": True,
+            },
+            whatsapp_client=wa,
+            manager=manager,
+        )
+        self.assertIn("WhatsApp", resp.results[0].result)
+        manager.create_or_update_lead.assert_called_once()
+        payload = manager.create_or_update_lead.call_args.args[0]
+        self.assertEqual(payload["stage_name"], "Beatriz Lead")
+        self.assertTrue(payload["assign_round_robin"])
+        # customer financing text+pdf + rep alert
+        self.assertGreaterEqual(wa.send_text_message.call_count, 2)
+        self.assertEqual(wa.send_quote_pdf.call_count, 1)
 
     def test_context_lead_id_from_variable_values(self):
         from src.voice_gateway.vapi_bridge import handle_lead_payload

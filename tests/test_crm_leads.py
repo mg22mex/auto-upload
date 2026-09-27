@@ -177,7 +177,7 @@ class TestCRMLeadManagerLiveMocked(unittest.TestCase):
                 return [1]
             if model == "crm.stage" and method == "search_read":
                 name = args[0][0][2] if args and args[0] else "Stage"
-                return [{"id": 15, "name": "Cita/Prueba de manejo"}]
+                return [{"id": 15, "name": "Beatriz Cita"}]
             raise AssertionError(f"unexpected {model}.{method}")
 
         return execute_kw, created, writes, utm_ids
@@ -333,7 +333,7 @@ class TestCRMLeadManagerLiveMocked(unittest.TestCase):
                 return 99
             if model == "crm.stage" and method == "search_read":
                 stages.append(args)
-                return [{"id": 15, "name": "Cita/Prueba de manejo"}]
+                return [{"id": 15, "name": "Beatriz Cita"}]
             return execute_kw(db, uid, key, model, method, args, kwargs)
 
         models.execute_kw.side_effect = wrapped
@@ -351,7 +351,7 @@ class TestCRMLeadManagerLiveMocked(unittest.TestCase):
                     "vehicle_info": "CX-5",
                     "notes": "Cita outbound",
                     "appointment_date": "viernes 16:00",
-                    "stage_name": "Cita/Prueba de manejo",
+                    "stage_name": "Beatriz Cita",
                     "assign_round_robin": True,
                     "preserve_salesperson": True,
                     "opportunity_name": "Llamada Paulina - Marco",
@@ -385,7 +385,7 @@ class TestCRMLeadManagerLiveMocked(unittest.TestCase):
                     "vehicle_info": "Sentra",
                     "opportunity_name": "Llamada Paulina - Nueva",
                     "assign_round_robin": True,
-                    "stage_name": "Cita/Prueba de manejo",
+                    "stage_name": "Beatriz Cita",
                     "appointment_date": "mañana 11:00",
                     "channel": "Voice",
                 }

@@ -399,3 +399,245 @@ def generate_vehicle_quote_pdf(
         result_meta["sku"] = sku
 
     return path if path is not None else pdf_bytes
+
+
+def quote_result_to_dict(quote: Any) -> dict[str, Any]:
+    """Flatten a ``QuoteResult`` (or quote-like object) into PDF-ready dicts."""
+    schedule_rows: list[dict[str, Any]] = []
+    for row in getattr(quote, "schedule", ()) or ():
+        schedule_rows.append(
+            {
+                "period": getattr(row, "month", None) or getattr(row, "period", None),
+                "beginning_balance": getattr(row, "beginning_balance", None),
+                "interest": getattr(row, "interest", None),
+                "iva": getattr(row, "iva", None),
+                "principal": getattr(row, "principal", None),
+                "base_payment": getattr(row, "base_payment", None),
+                "auto_insurance": getattr(row, "auto_insurance", None),
+                "life_insurance": getattr(row, "life_insurance", None),
+                "admin_fee": getattr(row, "admin_fee", None),
+                "total_payment": getattr(row, "total_payment", None),
+                "ending_balance": getattr(row, "ending_balance", None),
+                "is_opening": bool(getattr(row, "is_opening", False)),
+            }
+        )
+    return {
+        "vehicle_price": getattr(quote, "vehicle_price", None),
+        "term_months": getattr(quote, "term_months", None),
+        "annual_rate": getattr(quote, "annual_rate", None),
+        "down_payment": getattr(quote, "down_payment", None),
+        "cash_down_payment": getattr(quote, "cash_down_payment", None),
+        "net_trade_in_equity": getattr(quote, "net_trade_in_equity", None),
+        "amount_to_finance": getattr(quote, "amount_to_finance", None),
+        "origination_fee": getattr(quote, "origination_fee", None),
+        "financed_principal": getattr(quote, "financed_principal", None),
+        "base_monthly_payment": getattr(quote, "base_monthly_payment", None),
+        "monthly_auto_insurance": getattr(quote, "monthly_auto_insurance", None),
+        "monthly_life_insurance": getattr(quote, "monthly_life_insurance", None),
+        "average_monthly_iva": getattr(quote, "average_monthly_iva", None),
+        "estimated_monthly_payment": getattr(quote, "estimated_monthly_payment", None),
+        "monthly_admin_fee": getattr(quote, "monthly_admin_fee", None),
+        "profile_name": getattr(quote, "profile_name", "Scotiabank CrediAuto"),
+        "schedule": schedule_rows,
+    }
+
+
+def _amortization_table(schedule: list[dict[str, Any]]) -> Table:
+    """Compact amortization grid (period / interest / principal / total / balance)."""
+    header = ["#", "Interés", "IVA", "Capital", "Pago", "Saldo"]
+    data: list[list[Any]] = [header]
+    for row in schedule:
+        period = row.get("period")
+        label = "Apertura" if row.get("is_opening") else str(period if period is not None else "")
+        data.append(
+            [
+                label,
+                _money(row.get("interest")),
+                _money(row.get("iva")),
+                _money(row.get("principal")),
+                _money(row.get("total_payment")),
+                _money(row.get("ending_balance")),
+            ]
+        )
+    col_w = [0.85 * inch, 1.15 * inch, 1.0 * inch, 1.15 * inch, 1.15 * inch, 1.2 * inch]
+    table = Table(data, colWidths=col_w, repeatRows=1)
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0B3D2E")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 7.5),
+                ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
+                ("ALIGN", (0, 0), (0, -1), "CENTER"),
+                ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#CCD5D3")),
+                ("TOPPADDING", (0, 0), (-1, -1), 2),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+                ("LEFTPADDING", (0, 0), (-1, -1), 3),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+                (
+                    "ROWBACKGROUNDS",
+                    (0, 1),
+                    (-1, -1),
+                    [colors.white, colors.HexColor("#F4F8F6")],
+                ),
+            ]
+        )
+    )
+    return table
+
+
+def build_financing_quote_pdf_bytes(
+    quote_data: dict[str, Any],
+    *,
+    vehicle_data: dict[str, Any] | None = None,
+    contact: dict[str, Any] | None = None,
+    customer_name: str | None = None,
+    valid_days: int = 7,
+) -> bytes:
+    """Scotiabank CrediAuto amortization schedule PDF (``financing_quote.pdf``)."""
+    _require_reportlab()
+    if not isinstance(quote_data, dict):
+        raise PdfEngineError("quote_data must be a dict")
+
+    styles = _styles()
+    contact = contact or {}
+    vehicle_data = vehicle_data or {}
+    buffer = io.BytesIO()
+    from reportlab import rl_config
+
+    prev_compression = rl_config.pageCompression
+    rl_config.pageCompression = 0
+    try:
+        doc = SimpleDocTemplate(
+            buffer,
+            pagesize=letter,
+            leftMargin=0.55 * inch,
+            rightMargin=0.55 * inch,
+            topMargin=0.5 * inch,
+            bottomMargin=0.5 * inch,
+            title="Autosell MX — Tabla de Amortización CrediAuto",
+            author="Autosell MX",
+        )
+        issued = date.today()
+        expires = issued + timedelta(days=max(1, int(valid_days)))
+        vehicle_name = _text(
+            vehicle_data.get("name")
+            or vehicle_data.get("vehicle_name")
+            or vehicle_data.get("title"),
+            "Vehículo",
+        )
+        profile = _text(quote_data.get("profile_name"), "Scotiabank CrediAuto")
+        client = _text(customer_name, "")
+
+        story: list[Any] = [
+            _header_table(
+                styles,
+                {
+                    **contact,
+                    "brand": contact.get("brand") or "Autosell MX",
+                    "branch_label": contact.get("branch_label")
+                    or contact.get("branch")
+                    or "CrediAuto",
+                },
+            ),
+            Spacer(1, 0.15 * inch),
+            Paragraph(f"Tabla de amortización — {profile}", styles["h2"]),
+        ]
+        summary_rows: list[tuple[str, str]] = []
+        if client and client != "—":
+            summary_rows.append(("Cliente", client))
+        summary_rows.extend(
+            [
+                ("Vehículo", vehicle_name),
+                ("Precio", _money(quote_data.get("vehicle_price"))),
+                ("Enganche total", _money(quote_data.get("down_payment"))),
+                ("Monto financiado", _money(quote_data.get("financed_principal"))),
+                ("Plazo", f"{_text(quote_data.get('term_months'), '—')} meses"),
+                (
+                    "Mensualidad estimada",
+                    _money(quote_data.get("estimated_monthly_payment")),
+                ),
+            ]
+        )
+        story.append(_kv_table(summary_rows))
+        story.append(Spacer(1, 0.12 * inch))
+        story.append(Paragraph("Desglose financiero", styles["h2"]))
+        story.append(_finance_table(quote_data))
+
+        schedule = quote_data.get("schedule") or []
+        if isinstance(schedule, (list, tuple)) and schedule:
+            story.append(Spacer(1, 0.15 * inch))
+            story.append(Paragraph("Calendario de pagos", styles["h2"]))
+            story.append(_amortization_table(list(schedule)))
+
+        story.append(Spacer(1, 0.2 * inch))
+        story.append(
+            Paragraph(
+                f"Cotización emitida: {issued.isoformat()} · Vigencia hasta: "
+                f"{expires.isoformat()} · Informativa, sujeta a aprobación crediticia "
+                f"Scotiabank CrediAuto y disponibilidad de inventario.",
+                styles["footer"],
+            )
+        )
+        story.append(
+            Paragraph(
+                f"Autosell MX · {_text(contact.get('branch_label') or contact.get('city'), 'Chihuahua')} "
+                f"· autosell.mx",
+                styles["footer"],
+            )
+        )
+        try:
+            doc.build(story)
+        except Exception as exc:
+            raise PdfEngineError(f"financing PDF build failed: {exc}") from exc
+    finally:
+        rl_config.pageCompression = prev_compression
+    return buffer.getvalue()
+
+
+def generate_financing_quote_pdf(
+    quote: Any,
+    *,
+    output_path: str | Path | None = None,
+    output_dir: str | Path | None = None,
+    vehicle_data: dict[str, Any] | None = None,
+    contact: dict[str, Any] | None = None,
+    customer_name: str | None = None,
+    valid_days: int = 7,
+    filename: str = "financing_quote.pdf",
+    result_meta: dict[str, Any] | None = None,
+) -> Path:
+    """Write Scotiabank amortization PDF; default name ``financing_quote.pdf``."""
+    if isinstance(quote, dict):
+        quote_data = dict(quote)
+    else:
+        quote_data = quote_result_to_dict(quote)
+
+    pdf_bytes = build_financing_quote_pdf_bytes(
+        quote_data,
+        vehicle_data=vehicle_data,
+        contact=contact,
+        customer_name=customer_name,
+        valid_days=valid_days,
+    )
+    if not pdf_bytes:
+        raise PdfEngineError("financing PDF generation returned empty content")
+
+    if output_path is not None:
+        path = Path(output_path)
+    elif output_dir is not None:
+        path = Path(output_dir) / filename
+    else:
+        import tempfile
+
+        path = Path(tempfile.mkdtemp(prefix="autosell_financing_")) / filename
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(pdf_bytes)
+    print(f"Generated financing amortization PDF at {path} ({len(pdf_bytes)} bytes)")
+    if result_meta is not None:
+        result_meta["path"] = str(path)
+        result_meta["bytes_len"] = len(pdf_bytes)
+        result_meta["filename"] = path.name
+    return path

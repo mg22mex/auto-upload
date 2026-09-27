@@ -101,7 +101,7 @@ class TestCreateTestDriveEvent(unittest.TestCase):
                 created["event"] = args[0]
                 return 9001
             if model == "crm.stage" and method == "search_read":
-                return [{"id": 15, "name": "Cita/Prueba de manejo"}]
+                return [{"id": 15, "name": "Beatriz Cita"}]
             if model == "crm.lead" and method == "write":
                 created["stage_write"] = args
                 return True

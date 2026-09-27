@@ -74,6 +74,9 @@ INVENTORY_NEXT_PROMPT_TIMEOUT = (
 DEFAULT_TERM_MONTHS = 48
 LEAD_TITLE_PREFIX = "Llamada Paulina - "
 VAPI_LEAD_CHANNEL = "Voice"
+# Odoo Beatriz pipeline (see src.lead_routing STAGE_BEATRIZ_*).
+STAGE_BEATRIZ_LEAD = "Beatriz Lead"
+STAGE_BEATRIZ_CITA = "Beatriz Cita"
 
 app = FastAPI(
     title="Autosell Vapi Bridge",
@@ -166,6 +169,11 @@ class FinancingArgs(BaseModel):
     term_months: int = Field(default=DEFAULT_TERM_MONTHS, gt=0)
     down_payment: float | None = Field(default=None, ge=0)
     net_trade_in_equity: float | None = Field(default=None, ge=0)
+    phone: str | None = None
+    customer_name: str | None = None
+    vehicle_name: str | None = None
+    branch: str | None = None
+    send_whatsapp: bool = False
 
 
 class TradeInArgs(BaseModel):
@@ -430,12 +438,40 @@ def _parse_financing_dict(raw: dict[str, Any]) -> FinancingArgs:
         if raw.get("net_trade_in_equity") is not None
         else raw.get("trade_in_equity") or raw.get("valor_compra")
     )
+    phone = (
+        raw.get("phone")
+        or raw.get("mobile")
+        or raw.get("telefono")
+        or raw.get("customer_phone")
+    )
+    send_flag = raw.get("send_whatsapp")
+    if send_flag is None:
+        send_flag = raw.get("enviar_whatsapp")
+    send_whatsapp = False
+    if isinstance(send_flag, bool):
+        send_whatsapp = send_flag
+    elif send_flag is not None:
+        send_whatsapp = str(send_flag).strip().lower() in {"1", "true", "yes", "si", "sí"}
+    # Phone present ⇒ deliver summary + PDF unless explicitly disabled.
+    if phone and send_flag is None:
+        send_whatsapp = True
     return FinancingArgs.model_validate(
         {
             "vehicle_price": price,
             "term_months": term,
             "down_payment": down,
             "net_trade_in_equity": equity,
+            "phone": _coerce_optional_str(phone),
+            "customer_name": _coerce_optional_str(
+                raw.get("customer_name") or raw.get("name") or raw.get("client_name")
+            ),
+            "vehicle_name": _coerce_optional_str(
+                raw.get("vehicle_name")
+                or raw.get("interested_vehicle")
+                or raw.get("vehicle")
+            ),
+            "branch": _coerce_optional_str(raw.get("branch") or raw.get("sucursal")),
+            "send_whatsapp": send_whatsapp,
         }
     )
 
@@ -881,13 +917,32 @@ async def handle_inventory_payload(payload: dict[str, Any]) -> VapiToolResponse:
 # --- Financing -------------------------------------------------------------------
 
 
+def resolve_beatriz_stage(
+    *,
+    appointment_date: str | None = None,
+    financing: bool = False,
+) -> str:
+    """Map tool outcome → Odoo stage: cita wins over financing / interest."""
+    del financing  # reserved — financing alone stays Beatriz Lead
+    if (appointment_date or "").strip():
+        return STAGE_BEATRIZ_CITA
+    return STAGE_BEATRIZ_LEAD
+
+
 def format_financing_speech(args: FinancingArgs, quote: Any) -> str:
     down = format_price_voice_es(quote.down_payment)
     months = format_months_voice_es(quote.term_months)
     monthly = format_price_voice_es(quote.estimated_monthly_payment)
-    return (
+    base = (
         f"Con un enganche de {down} a {months}, tu mensualidad estimada "
-        f"con Scotiabank sería de {monthly}. "
+        f"con Scotiabank sería de {monthly}."
+    )
+    if args.send_whatsapp and (args.phone or "").strip():
+        return (
+            f"{base} Te envié el resumen y la tabla de amortización por WhatsApp."
+        )
+    return (
+        f"{base} "
         "¿Te interesa que te enviemos la cotización formal por WhatsApp?"
     )
 
@@ -909,7 +964,132 @@ def run_financing_quote(args: FinancingArgs) -> Any:
     )
 
 
-def handle_financing_payload(payload: dict[str, Any]) -> VapiToolResponse:
+def dispatch_financing_whatsapp(
+    args: FinancingArgs,
+    quote: Any,
+    *,
+    whatsapp_client: Any | None = None,
+) -> dict[str, Any]:
+    """Generate CrediAuto PDF and send text + document to the customer."""
+    from src.notifications.whatsapp import notify_financing_quote
+    from src.pdf_engine.generator import generate_financing_quote_pdf
+
+    phone = (args.phone or "").strip()
+    if not phone:
+        return {"sent": False, "skipped_reason": "missing phone"}
+
+    try:
+        pdf_path = generate_financing_quote_pdf(
+            quote,
+            vehicle_data={"name": (args.vehicle_name or "Vehículo").strip() or "Vehículo"},
+            customer_name=args.customer_name,
+            contact={"branch_label": (args.branch or "Autosell").strip() or "Autosell"},
+            filename="financing_quote.pdf",
+        )
+    except Exception as exc:
+        logger.exception("financing PDF generation failed")
+        return {"sent": False, "error": f"pdf: {exc}"}
+
+    try:
+        result = notify_financing_quote(
+            phone=phone,
+            pdf_path=pdf_path,
+            name=args.customer_name,
+            vehicle_price=float(getattr(quote, "vehicle_price", args.vehicle_price)),
+            down_payment=float(getattr(quote, "down_payment", args.down_payment or 0)),
+            term_months=int(getattr(quote, "term_months", args.term_months)),
+            monthly_payment=float(getattr(quote, "estimated_monthly_payment", 0)),
+            vehicle_name=args.vehicle_name,
+            branch=args.branch,
+            whatsapp_client=whatsapp_client,
+            caption="Autosell — financing_quote.pdf (Scotiabank CrediAuto)",
+        )
+        logger.warning(
+            "dispatch_financing_whatsapp sent=%s skipped=%s error=%s pdf=%s",
+            result.sent,
+            result.skipped_reason,
+            result.error,
+            pdf_path,
+        )
+        return {**result.as_dict(), "pdf_path": str(pdf_path)}
+    except Exception as exc:
+        logger.exception("dispatch_financing_whatsapp failed: %s", exc)
+        return {"sent": False, "error": str(exc), "pdf_path": str(pdf_path)}
+
+
+def format_financing_crm_summary(args: FinancingArgs, quote: Any) -> str:
+    monthly = getattr(quote, "estimated_monthly_payment", None)
+    down = getattr(quote, "down_payment", args.down_payment)
+    term = getattr(quote, "term_months", args.term_months)
+    bits = [
+        f"precio ${float(args.vehicle_price):,.0f}",
+        f"enganche ${float(down or 0):,.0f}",
+        f"{int(term)} meses",
+    ]
+    if monthly is not None:
+        bits.append(f"mensualidad ${float(monthly):,.2f}")
+    return " / ".join(bits)
+
+
+def upsert_financing_crm_lead(
+    args: FinancingArgs,
+    quote: Any,
+    *,
+    manager: Any | None = None,
+) -> dict[str, Any]:
+    """Stamp Beatriz Lead + MG Quote Lead when financing is calculated."""
+    from src.odoo_sync.crm import CRMLeadManager
+
+    phone = (args.phone or "").strip()
+    if not phone:
+        return {"skipped": True, "reason": "missing phone"}
+
+    name = (args.customer_name or "").strip() or "Cliente WhatsApp"
+    vehicle = (args.vehicle_name or "").strip() or "Consulta financiamiento"
+    branch_key, physical_label = branch_from_vehicle_title(vehicle)
+    summary = format_financing_crm_summary(args, quote)
+    stage = resolve_beatriz_stage(financing=True)
+    notes = (
+        f"Canal: Vapi / Beatriz (financing)\n"
+        f"Cliente: {name}\n"
+        f"Teléfono: {phone}\n"
+        f"Vehículo: {vehicle}\n"
+        f"Financiamiento: {summary}\n"
+    )
+    title = f"{LEAD_TITLE_PREFIX}{name}"[:128]
+    payload: dict[str, Any] = {
+        "name": name,
+        "client_name": name,
+        "phone": phone,
+        "vehicle_info": vehicle,
+        "vehicle_name": vehicle,
+        "description": notes,
+        "notes": notes,
+        "channel": VAPI_LEAD_CHANNEL,
+        "opportunity_name": title,
+        "stage_name": stage,
+        "assign_round_robin": True,
+        "preserve_salesperson": True,
+    }
+    if physical_label:
+        payload["physical_location"] = physical_label
+    crm = manager or CRMLeadManager()
+    result = crm.create_or_update_lead(payload, branch=branch_key)
+    return {
+        **result,
+        "opportunity_name": title,
+        "stage_name": stage,
+        "financing_summary": summary,
+    }
+
+
+def handle_financing_payload(
+    payload: dict[str, Any],
+    *,
+    background_tasks: BackgroundTasks | None = None,
+    whatsapp_client: Any | None = None,
+    manager: Any | None = None,
+) -> VapiToolResponse:
     calls = extract_typed_tool_calls(
         payload,
         parser=_parse_financing_dict,
@@ -922,10 +1102,18 @@ def handle_financing_payload(payload: dict[str, Any]) -> VapiToolResponse:
             "plazo",
             "down_payment",
             "enganche",
+            "phone",
+            "mobile",
+            "telefono",
+            "customer_name",
+            "name",
+            "vehicle_name",
+            "send_whatsapp",
         ),
     )
     results: list[VapiToolResult] = []
     for call_id, args in calls:
+        quote: Any | None = None
         try:
             quote = run_financing_quote(args)
             speech = format_financing_speech(args, quote)
@@ -936,6 +1124,50 @@ def handle_financing_payload(payload: dict[str, Any]) -> VapiToolResponse:
                 f"Detalle técnico: {type(exc).__name__}. "
                 "¿Me confirmas el precio del vehículo, el enganche y el plazo en meses?"
             )
+            results.append(VapiToolResult(toolCallId=call_id, result=speech))
+            continue
+
+        phone = (args.phone or "").strip()
+        crm_result: dict[str, Any] | None = None
+        if phone and quote is not None:
+            try:
+                crm_result = upsert_financing_crm_lead(
+                    args, quote, manager=manager
+                )
+            except Exception:
+                logger.exception("financing CRM upsert failed for %s", call_id)
+                crm_result = None
+
+        def _queue_financing_side_effects() -> None:
+            if args.send_whatsapp and phone and quote is not None:
+                dispatch_financing_whatsapp(
+                    args, quote, whatsapp_client=whatsapp_client
+                )
+            if crm_result and not crm_result.get("skipped") and not crm_result.get("dry_run"):
+                dispatch_appointment_rep_alert(
+                    LeadArgs(
+                        name=(args.customer_name or "Cliente").strip() or "Cliente",
+                        phone=phone,
+                        interested_vehicle=args.vehicle_name,
+                        financing_summary=crm_result.get("financing_summary"),
+                        appointment_date=None,
+                    ),
+                    branch=str(crm_result.get("branch") or args.branch or "periferico"),
+                    lead_id=crm_result.get("lead_id"),
+                    assignment=crm_result.get("assignment")
+                    if isinstance(crm_result.get("assignment"), dict)
+                    else None,
+                    stage_name=str(
+                        crm_result.get("stage_name") or STAGE_BEATRIZ_LEAD
+                    ),
+                    whatsapp_client=whatsapp_client,
+                )
+
+        if phone and quote is not None:
+            if background_tasks is not None:
+                background_tasks.add_task(_queue_financing_side_effects)
+            else:
+                _queue_financing_side_effects()
         results.append(VapiToolResult(toolCallId=call_id, result=speech))
     return VapiToolResponse(results=results)
 
@@ -1073,6 +1305,9 @@ def create_vapi_lead(
     branch_key, physical_label = branch_from_vehicle_title(vehicle)
     notes = build_lead_notes(args)
     title = f"{LEAD_TITLE_PREFIX}{args.name.strip()}"[:128]
+    stage = resolve_beatriz_stage(
+        appointment_date=args.appointment_date,
+    )
     payload: dict[str, Any] = {
         "name": args.name.strip(),
         "client_name": args.name.strip(),
@@ -1084,7 +1319,7 @@ def create_vapi_lead(
         "channel": VAPI_LEAD_CHANNEL,
         "appointment_date": (args.appointment_date or "").strip() or None,
         "opportunity_name": title,
-        "stage_name": "Cita/Prueba de manejo",
+        "stage_name": stage,
         "assign_round_robin": True,
         "preserve_salesperson": True,
     }
@@ -1093,13 +1328,14 @@ def create_vapi_lead(
     if args.lead_id is not None:
         payload["lead_id"] = int(args.lead_id)
     logger.warning(
-        "crm-lead branch=%s physical_location=%s vehicle=%s",
+        "crm-lead branch=%s physical_location=%s vehicle=%s stage=%s",
         branch_key,
         physical_label,
         vehicle[:80],
+        stage,
     )
     result = crm.create_or_update_lead(payload, branch=branch_key)
-    return {**result, "opportunity_name": title}
+    return {**result, "opportunity_name": title, "stage_name": stage}
 
 
 def _safe_optional_text(value: str | None) -> str | None:
@@ -1170,6 +1406,69 @@ def dispatch_lead_whatsapp(
         return {"sent": False, "error": str(exc)}
 
 
+def dispatch_appointment_rep_alert(
+    args: LeadArgs,
+    *,
+    branch: str = "periferico",
+    lead_id: int | None = None,
+    assignment: dict[str, Any] | None = None,
+    stage_name: str | None = None,
+    whatsapp_client: Any | None = None,
+) -> dict[str, Any]:
+    """Round-robin agent WhatsApp when Beatriz registers a lead/cita (never raises)."""
+    from src.notifications.whatsapp_rep import notify_appointment_rep
+    from src.odoo_sync.crm import RepAssignment
+
+    appointment = _safe_optional_text(args.appointment_date)
+    stage = (stage_name or "").strip() or resolve_beatriz_stage(
+        appointment_date=appointment,
+        financing=bool(_safe_optional_text(args.financing_summary)),
+    )
+
+    pick: RepAssignment | None = None
+    if isinstance(assignment, dict) and (
+        assignment.get("phone") or assignment.get("odoo_id")
+    ):
+        pick = RepAssignment(
+            branch=str(assignment.get("branch") or branch),
+            phone=str(assignment.get("phone") or ""),
+            odoo_id=(
+                int(assignment["odoo_id"])
+                if assignment.get("odoo_id") not in (None, "", False)
+                else None
+            ),
+            rep_name=str(assignment.get("rep_name") or ""),
+            fell_back=bool(assignment.get("fell_back")),
+            rotation_index=int(assignment.get("rotation_index") or 0),
+        )
+
+    try:
+        result = notify_appointment_rep(
+            customer_name=args.name or "",
+            client_phone=args.phone or "",
+            branch=branch,
+            interested_vehicle=_safe_optional_text(args.interested_vehicle),
+            appointment_date=appointment,
+            financing_summary=_safe_optional_text(args.financing_summary),
+            stage_name=stage,
+            lead_id=lead_id,
+            assignment=pick,
+            whatsapp_client=whatsapp_client,
+        )
+        logger.warning(
+            "dispatch_appointment_rep_alert sent=%s stage=%s rep=%s odoo_id=%s err=%s",
+            result.sent,
+            stage,
+            result.phone,
+            result.odoo_id,
+            result.error or result.skipped_reason,
+        )
+        return {**result.as_dict(), "stage_name": stage}
+    except Exception as exc:
+        logger.exception("dispatch_appointment_rep_alert failed: %s", exc)
+        return {"sent": False, "error": str(exc), "stage_name": stage}
+
+
 def handle_lead_payload(
     payload: dict[str, Any],
     *,
@@ -1210,6 +1509,12 @@ def handle_lead_payload(
             )
             if not result.get("dry_run"):
                 branch = str(result.get("branch") or "periferico")
+                lead_pk = result.get("lead_id")
+                assignment = result.get("assignment")
+                stage = str(
+                    result.get("stage_name")
+                    or resolve_beatriz_stage(appointment_date=args.appointment_date)
+                )
                 if background_tasks is not None:
                     background_tasks.add_task(
                         dispatch_lead_whatsapp,
@@ -1217,10 +1522,27 @@ def handle_lead_payload(
                         branch=branch,
                         whatsapp_client=whatsapp_client,
                     )
+                    background_tasks.add_task(
+                        dispatch_appointment_rep_alert,
+                        args,
+                        branch=branch,
+                        lead_id=int(lead_pk) if lead_pk is not None else None,
+                        assignment=assignment if isinstance(assignment, dict) else None,
+                        stage_name=stage,
+                        whatsapp_client=whatsapp_client,
+                    )
                 else:
                     dispatch_lead_whatsapp(
                         args,
                         branch=branch,
+                        whatsapp_client=whatsapp_client,
+                    )
+                    dispatch_appointment_rep_alert(
+                        args,
+                        branch=branch,
+                        lead_id=int(lead_pk) if lead_pk is not None else None,
+                        assignment=assignment if isinstance(assignment, dict) else None,
+                        stage_name=stage,
                         whatsapp_client=whatsapp_client,
                     )
         except Exception as exc:
@@ -1287,11 +1609,17 @@ async def vapi_inventory(request: Request) -> JSONResponse:
 
 
 @app.post("/vapi/financing", response_model=VapiToolResponse)
-async def vapi_financing(request: Request) -> VapiToolResponse:
-    """Scotiabank-calibrated French amortization for Riley."""
+async def vapi_financing(
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> VapiToolResponse:
+    """Scotiabank-calibrated French amortization; optional WhatsApp PDF."""
     payload = await _read_json_object(request)
     try:
-        return handle_financing_payload(payload)
+        return handle_financing_payload(
+            payload,
+            background_tasks=background_tasks,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

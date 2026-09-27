@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from src.whatsapp_worker.client import WhatsAppWorkerClient, normalize_phone_number
@@ -168,13 +169,138 @@ def notify_lead_confirmation(
     return CustomerNotifyResult(sent=True, phone=number, message=message)
 
 
+def format_financing_whatsapp_summary(
+    *,
+    name: str | None = None,
+    vehicle_price: float | None = None,
+    down_payment: float | None = None,
+    term_months: int | None = None,
+    monthly_payment: float | None = None,
+    vehicle_name: str | None = None,
+) -> str:
+    """Short ES-MX text sent with the CrediAuto PDF attachment."""
+    client = (name or "").strip() or "Cliente"
+    lines = [
+        f"Hola {client}, aquí tienes tu cotización Scotiabank CrediAuto de Autosell. 🚗",
+        "",
+    ]
+    if vehicle_name:
+        lines.append(f"📌 Vehículo: {vehicle_name.strip()}")
+    if vehicle_price is not None:
+        lines.append(f"💵 Precio: ${float(vehicle_price):,.2f} MXN")
+    if down_payment is not None:
+        lines.append(f"💰 Enganche: ${float(down_payment):,.2f} MXN")
+    if term_months is not None:
+        lines.append(f"📆 Plazo: {int(term_months)} meses")
+    if monthly_payment is not None:
+        lines.append(f"📅 Mensualidad estimada: ${float(monthly_payment):,.2f} MXN")
+    lines.extend(
+        [
+            "",
+            "Adjuntamos la tabla de amortización (PDF). "
+            "Un asesor te contactará para resolver dudas. ¡Gracias!",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def notify_financing_quote(
+    *,
+    phone: str,
+    pdf_path: str | Path,
+    name: str | None = None,
+    vehicle_price: float | None = None,
+    down_payment: float | None = None,
+    term_months: int | None = None,
+    monthly_payment: float | None = None,
+    vehicle_name: str | None = None,
+    branch: str | None = None,
+    whatsapp_client: Any | None = None,
+    caption: str | None = None,
+) -> CustomerNotifyResult:
+    """Send financing text summary + ``financing_quote.pdf`` document to the client.
+
+    Evolution: ``sendText`` then ``sendMedia`` (document). Failures are logged,
+    never raised.
+    """
+    if not customer_whatsapp_enabled():
+        return CustomerNotifyResult(sent=False, skipped_reason=f"{ENV_ENABLED}=false")
+
+    phone_raw = (phone or "").strip()
+    if not phone_raw:
+        return CustomerNotifyResult(sent=False, skipped_reason="missing phone")
+
+    path = Path(pdf_path)
+    if not path.is_file():
+        return CustomerNotifyResult(
+            sent=False,
+            skipped_reason="pdf missing",
+            error=f"PDF not found: {path}",
+        )
+
+    message = format_financing_whatsapp_summary(
+        name=name,
+        vehicle_price=vehicle_price,
+        down_payment=down_payment,
+        term_months=term_months,
+        monthly_payment=monthly_payment,
+        vehicle_name=vehicle_name,
+    )
+    doc_caption = (caption or "Autosell — Tabla de amortización CrediAuto").strip()
+
+    try:
+        number = format_customer_phone(phone_raw)
+    except Exception as exc:
+        return CustomerNotifyResult(
+            sent=False,
+            message=message,
+            skipped_reason="invalid phone",
+            error=str(exc),
+        )
+
+    wa = whatsapp_client or WhatsAppWorkerClient()
+    try:
+        wa.send_text_message(number, message, branch=branch)
+    except Exception as exc:
+        print(
+            f"WARN financing WhatsApp text failed phone={number}: "
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        return CustomerNotifyResult(
+            sent=False,
+            phone=number,
+            message=message,
+            error=f"text: {exc}",
+        )
+
+    try:
+        wa.send_quote_pdf(number, path, caption=doc_caption, branch=branch)
+    except Exception as exc:
+        print(
+            f"WARN financing WhatsApp PDF failed phone={number}: "
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        return CustomerNotifyResult(
+            sent=False,
+            phone=number,
+            message=message,
+            error=f"pdf: {exc}",
+        )
+
+    return CustomerNotifyResult(sent=True, phone=number, message=message)
+
+
 __all__ = [
     "CustomerNotifyResult",
     "ENV_ENABLED",
     "ENV_MX_PREFIX",
     "customer_whatsapp_enabled",
     "format_customer_phone",
+    "format_financing_whatsapp_summary",
     "format_lead_confirmation",
+    "notify_financing_quote",
     "notify_lead_confirmation",
     "send_whatsapp_message",
 ]

@@ -401,7 +401,7 @@ class TestVoiceWebhookHTTP(unittest.TestCase):
             odoo.create_or_update_lead.assert_called_once()
             self.assertEqual(
                 odoo.create_or_update_lead.call_args.kwargs.get("stage_name"),
-                "Primer contacto",
+                "Beatriz Lead",
             )
 
             r2 = client.post(

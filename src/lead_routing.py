@@ -1,9 +1,9 @@
 """AI-first routing for ``MG Quote Lead`` — human only on appointment intent.
 
-Leads tagged ``MG Quote Lead`` stay with the WhatsApp AI responder at stage
-``Primer contacto``. Round-robin assignment and the rep WhatsApp alert fire
-only when the customer asks for an in-person visit / test drive
-(``Cita/Prueba de manejo``).
+Leads tagged ``MG Quote Lead`` stay with the WhatsApp / Vapi AI responder at
+stage ``Beatriz Lead``. Round-robin assignment and the rep WhatsApp alert fire
+when the customer confirms a visit (``Beatriz Cita``) or a financing quote is
+registered without a cita yet (still ``Beatriz Lead`` + agent alert).
 """
 from __future__ import annotations
 
@@ -18,8 +18,11 @@ from src.odoo_sync.client import OdooCRMClient
 from src.odoo_sync.crm import RepAssignment, assign_lead_owner, normalize_crm_branch
 
 MG_QUOTE_LEAD_TAG = "MG Quote Lead"
-STAGE_PRIMER_CONTACTO = "Primer contacto"
-STAGE_CITA = "Cita/Prueba de manejo"
+STAGE_BEATRIZ_LEAD = "Beatriz Lead"
+STAGE_BEATRIZ_CITA = "Beatriz Cita"
+# Backward-compatible aliases (historical Autosell pipeline names).
+STAGE_PRIMER_CONTACTO = STAGE_BEATRIZ_LEAD
+STAGE_CITA = STAGE_BEATRIZ_CITA
 
 AGENT_AI = "ai_whatsapp"
 AGENT_HUMAN = "human_rep"
@@ -1290,6 +1293,8 @@ __all__ = [
     "PAYMENT_TRADE_IN",
     "PaymentIntent",
     "QuoteVoiceContext",
+    "STAGE_BEATRIZ_CITA",
+    "STAGE_BEATRIZ_LEAD",
     "STAGE_CITA",
     "STAGE_PRIMER_CONTACTO",
     "TradeInDetails",

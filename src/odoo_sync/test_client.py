@@ -481,25 +481,35 @@ class TestArchiveOrphans(unittest.TestCase):
 
 
 class TestCrmStageResolve(unittest.TestCase):
-    def test_appointment_stage_or_search(self):
+    def test_beatriz_cita_exact(self):
         models = MagicMock()
 
         def execute_kw(db, uid, key, model, method, args, kwargs=None):
             if model == "crm.stage" and method == "search_read":
                 domain = args[0]
-                # First exact label miss
-                if domain and domain[0] == ("name", "ilike", "Cita/Prueba de manejo"):
-                    return []
-                # OR domain for Cita | Prueba de manejo
-                if domain and domain[0] == "|":
-                    return [{"id": 15, "name": "Cita/Prueba de manejo"}]
+                if domain and domain[0] == ("name", "ilike", "Beatriz Cita"):
+                    return [{"id": 22, "name": "Beatriz Cita"}]
                 return []
             raise AssertionError(f"unexpected {model}.{method}")
 
         models.execute_kw.side_effect = execute_kw
         client = _mock_client(models)
-        stage_id = client._resolve_crm_stage_id("Cita/Prueba de manejo")
-        self.assertEqual(stage_id, 15)
+        self.assertEqual(client._resolve_crm_stage_id("Beatriz Cita"), 22)
+
+    def test_beatriz_lead_exact(self):
+        models = MagicMock()
+
+        def execute_kw(db, uid, key, model, method, args, kwargs=None):
+            if model == "crm.stage" and method == "search_read":
+                domain = args[0]
+                if domain and domain[0] == ("name", "ilike", "Beatriz Lead"):
+                    return [{"id": 21, "name": "Beatriz Lead"}]
+                return []
+            raise AssertionError(f"unexpected {model}.{method}")
+
+        models.execute_kw.side_effect = execute_kw
+        client = _mock_client(models)
+        self.assertEqual(client._resolve_crm_stage_id("Beatriz Lead"), 21)
 
     def test_appointment_stage_fallback_id_2(self):
         models = MagicMock()

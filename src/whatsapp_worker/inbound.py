@@ -503,13 +503,82 @@ def _process_ai_turn(
     stage_cita: str,
     agent_ai: str,
 ) -> QualificationTurnResult:
-    """MG Quote Lead AI loop — handoff only on appointment / test-drive intent."""
+    """MG Quote Lead AI loop — Vapi text-first when enabled; else local scripts."""
     appointment = detect_appointment_intent(event.text)
     decision = route_inbound_lead(
         {"tags": tags or ["MG Quote Lead"], "handling_agent": agent_ai},
         tags=tags,
         appointment=appointment,
     )
+
+    # Evolution → Vapi Chat (Beatriz) → WhatsApp text; tools hit vapi-bridge.
+    try:
+        from src.voice_gateway.vapi_chat import (
+            chat_with_beatriz,
+            vapi_wa_text_first_enabled,
+        )
+
+        _use_vapi = vapi_wa_text_first_enabled()
+    except Exception:
+        _use_vapi = False
+        chat_with_beatriz = None  # type: ignore[assignment]
+
+    if (
+        _use_vapi
+        and chat_with_beatriz is not None
+        and session.state != STATE_HANDOFF_TO_HUMAN
+    ):
+        if session.state == STATE_NEW_LEAD:
+            session.state = STATE_AI_ACTIVE
+            session.handling_agent = agent_ai
+            if not session.vehicle_interest:
+                session.vehicle_interest = (
+                    session.initial_message or event.text.strip()
+                )
+        session.updated_at = now
+        vapi = chat_with_beatriz(
+            text=event.text,
+            phone=event.phone,
+            customer_name=session.contact_name or event.name,
+            instance=event.instance or "",
+            branch=session.branch,
+        )
+        if vapi.ok:
+            routing = {
+                **decision.as_dict(),
+                "vapi_chat_id": vapi.chat_id,
+                "brain": "vapi_chat",
+            }
+            if appointment.requested:
+                session.state = STATE_HANDOFF_TO_HUMAN
+                session.handling_agent = "human_rep"
+                session.appointment_time = appointment.when_text or appointment.raw
+                notes = build_qualification_notes(session)
+                notes += (
+                    f"\nCita solicitada: {session.appointment_time or 'sin horario'}"
+                )
+                return QualificationTurnResult(
+                    session=session,
+                    reply_text=vapi.reply_text,
+                    odoo_create=session.lead_id is None,
+                    odoo_handoff=True,
+                    appointment_handoff=True,
+                    odoo_notes=notes,
+                    odoo_stage=stage_cita,
+                    routing=routing,
+                )
+            return QualificationTurnResult(
+                session=session,
+                reply_text=vapi.reply_text,
+                odoo_create=session.lead_id is None,
+                odoo_stage=stage_primer,
+                routing=routing,
+            )
+        print(
+            f"WARN vapi_wa_text_first failed phone={event.phone}: {vapi.error}; "
+            "falling back to local AI scripts",
+            flush=True,
+        )
 
     if session.state == STATE_NEW_LEAD:
         session.state = STATE_AI_ACTIVE
@@ -718,7 +787,7 @@ def notify_rep_on_handoff(
 ) -> dict[str, Any] | None:
     """Alert the round-robin rep when a turn reaches ``HANDOFF_TO_HUMAN``.
 
-    Appointment handoffs also move the Odoo stage to ``Cita/Prueba de manejo``
+    Appointment handoffs also move the Odoo stage to ``Beatriz Cita``
     and assign the chosen rep. Non-appointment legacy handoffs only WhatsApp
     the rep. Returns ``None`` when the turn is not a handoff; never raises.
     """

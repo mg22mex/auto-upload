@@ -93,6 +93,37 @@ def format_rep_notification(
     return "\n".join(lines)
 
 
+def format_appointment_lead_alert(
+    *,
+    customer_name: str,
+    phone: str,
+    interested_vehicle: str | None = None,
+    branch_name: str = "",
+    appointment_date: str | None = None,
+    financing_summary: str | None = None,
+    stage_name: str | None = None,
+) -> str:
+    """Instant WhatsApp alert when Beatriz registers a lead / cita."""
+    stage = (stage_name or "").strip() or (
+        "Beatriz Cita" if (appointment_date or "").strip() else "Beatriz Lead"
+    )
+    lines = [
+        "🚨 ¡NUEVO LEAD EN REGISTRO!",
+        f"• Stage: {stage}",
+        f"• Cliente: {(customer_name or '').strip() or 'n/d'}",
+        f"• Teléfono: {(phone or '').strip() or 'n/d'}",
+        f"• Vehículo: {(interested_vehicle or '').strip() or 'Por confirmar'}",
+        f"• Sucursal: {(branch_name or '').strip() or 'Periférico'}",
+    ]
+    appt = (appointment_date or "").strip()
+    if appt:
+        lines.append(f"• Fecha/Hora Cita: {appt}")
+    fin = (financing_summary or "").strip()
+    if fin:
+        lines.append(f"• Financiamiento: {fin}")
+    return "\n".join(lines)
+
+
 def notify_rep(
     *,
     client_phone: str,
@@ -164,10 +195,81 @@ def notify_rep(
     )
 
 
+def notify_appointment_rep(
+    *,
+    customer_name: str,
+    client_phone: str,
+    branch: str | None = None,
+    interested_vehicle: str | None = None,
+    appointment_date: str | None = None,
+    financing_summary: str | None = None,
+    stage_name: str | None = None,
+    lead_id: int | None = None,
+    assignment: RepAssignment | None = None,
+    whatsapp_client: Any | None = None,
+) -> RepNotifyResult:
+    """Round-robin (or reuse ``assignment``) + WhatsApp Beatriz lead alert to agent."""
+    if not rep_notifications_enabled():
+        return RepNotifyResult(sent=False, skipped_reason=f"{ENV_ENABLED}=false")
+
+    pick = assignment or assign_lead_owner(branch)
+    rep_phone = normalize_rep_phone(pick.phone)
+    if not rep_phone:
+        return RepNotifyResult(
+            sent=False,
+            branch=pick.branch,
+            odoo_id=pick.odoo_id,
+            skipped_reason="no rep phone configured for branch",
+        )
+
+    message = format_appointment_lead_alert(
+        customer_name=customer_name,
+        phone=client_phone,
+        interested_vehicle=interested_vehicle,
+        branch_name=branch_label(pick.branch),
+        appointment_date=appointment_date,
+        financing_summary=financing_summary,
+        stage_name=stage_name,
+    )
+
+    client = whatsapp_client
+    if client is None:
+        from src.whatsapp_worker.client import WhatsAppWorkerClient
+
+        client = WhatsAppWorkerClient()
+
+    try:
+        client.send_text_message(rep_phone, message, branch=pick.branch)
+    except Exception as exc:
+        print(
+            f"WARN appointment rep notify failed (branch={pick.branch} "
+            f"lead={lead_id}): {type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        return RepNotifyResult(
+            sent=False,
+            phone=rep_phone,
+            odoo_id=pick.odoo_id,
+            branch=pick.branch,
+            message=message,
+            error=str(exc),
+        )
+
+    return RepNotifyResult(
+        sent=True,
+        phone=rep_phone,
+        odoo_id=pick.odoo_id,
+        branch=pick.branch,
+        message=message,
+    )
+
+
 __all__ = [
     "ENV_ENABLED",
     "RepNotifyResult",
+    "format_appointment_lead_alert",
     "format_rep_notification",
+    "notify_appointment_rep",
     "notify_rep",
     "odoo_lead_url",
     "payment_label",

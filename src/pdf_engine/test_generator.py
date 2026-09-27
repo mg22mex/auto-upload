@@ -119,5 +119,30 @@ class TestGenerateVehicleQuotePdf(unittest.TestCase):
             self.assertGreater(len(kwargs["content"]), 500)
 
 
+@unittest.skipUnless(_HAS_REPORTLAB, "reportlab not installed")
+class TestFinancingQuotePdf(unittest.TestCase):
+    def test_amortization_pdf_named_financing_quote(self):
+        from src.pdf_engine.generator import generate_financing_quote_pdf
+        from src.quote_engine.engine import CalibratedQuoteEngine
+
+        quote = CalibratedQuoteEngine().calculate(450000, 48, down_payment=90000)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = generate_financing_quote_pdf(
+                quote,
+                output_dir=tmp,
+                vehicle_data={"name": "Toyota Corolla 2022"},
+                customer_name="Luis",
+                filename="financing_quote.pdf",
+            )
+            self.assertEqual(path.name, "financing_quote.pdf")
+            self.assertTrue(path.is_file())
+            raw = path.read_bytes()
+            self.assertTrue(raw.startswith(b"%PDF"))
+            text = raw.decode("latin-1", errors="ignore")
+            self.assertIn("amortizaci", text.lower())
+            self.assertIn("CrediAuto", text)
+            self.assertIn("Calendario", text)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -256,7 +256,7 @@ class TestAiMgQuoteFlow(unittest.TestCase):
         self.assertEqual(turn.session.state, STATE_AI_ACTIVE)
         self.assertEqual(turn.session.handling_agent, "ai_whatsapp")
         self.assertTrue(turn.odoo_create)
-        self.assertEqual(turn.odoo_stage, "Primer contacto")
+        self.assertEqual(turn.odoo_stage, "Beatriz Lead")
         self.assertFalse(turn.odoo_handoff)
         self.assertFalse(turn.appointment_handoff)
         self.assertIn("San Felipe", turn.reply_text)
@@ -282,7 +282,7 @@ class TestAiMgQuoteFlow(unittest.TestCase):
         self.assertEqual(t2.session.state, STATE_HANDOFF_TO_HUMAN)
         self.assertTrue(t2.odoo_handoff)
         self.assertTrue(t2.appointment_handoff)
-        self.assertEqual(t2.odoo_stage, "Cita/Prueba de manejo")
+        self.assertEqual(t2.odoo_stage, "Beatriz Cita")
         self.assertIn("mañana", t2.session.appointment_time.lower())
         self.assertIn("asesor", t2.reply_text.lower())
 

@@ -18,7 +18,9 @@ from src.config import (  # noqa: E402
 )
 from src.notifications.whatsapp_rep import (  # noqa: E402
     ENV_ENABLED,
+    format_appointment_lead_alert,
     format_rep_notification,
+    notify_appointment_rep,
     notify_rep,
     odoo_lead_url,
     payment_label,
@@ -107,6 +109,51 @@ class TestMessageFormat(RepNotifyTestCase):
             "https://autosell.odoo.com/web#id=7&model=crm.lead&view_type=form",
         )
         self.assertEqual(odoo_lead_url(None), "")
+
+    def test_appointment_alert_template(self):
+        text = format_appointment_lead_alert(
+            customer_name="María López",
+            phone="6141234567",
+            interested_vehicle="Toyota Corolla 2022",
+            branch_name="Periférico",
+            appointment_date="mañana 11:00",
+            financing_summary="48 meses / $12,000",
+            stage_name="Beatriz Cita",
+        )
+        self.assertIn("🚨 ¡NUEVO LEAD EN REGISTRO!", text)
+        self.assertIn("• Stage: Beatriz Cita", text)
+        self.assertIn("• Cliente: María López", text)
+        self.assertIn("• Teléfono: 6141234567", text)
+        self.assertIn("• Vehículo: Toyota Corolla 2022", text)
+        self.assertIn("• Sucursal: Periférico", text)
+        self.assertIn("• Fecha/Hora Cita: mañana 11:00", text)
+        self.assertIn("• Financiamiento: 48 meses / $12,000", text)
+
+
+class TestNotifyAppointmentRep(RepNotifyTestCase):
+    def test_notify_appointment_rep_uses_assignment_phone(self):
+        os.environ[ENV_ENABLED] = "true"
+        pick = RepAssignment(
+            branch="periferico",
+            phone="+526149998877",
+            odoo_id=11,
+            rep_name="Carla",
+        )
+        result = notify_appointment_rep(
+            customer_name="Luis",
+            client_phone="6141112233",
+            interested_vehicle="Mazda CX-5",
+            appointment_date="viernes 16",
+            financing_summary="enganche 90 mil",
+            assignment=pick,
+            whatsapp_client=self.client,
+        )
+        self.assertTrue(result.sent)
+        self.assertEqual(result.phone, "+526149998877")
+        self.assertEqual(len(self.client.sent), 1)
+        self.assertIn("NUEVO LEAD EN REGISTRO", self.client.sent[0]["text"])
+        self.assertIn("Beatriz Cita", self.client.sent[0]["text"])
+        self.assertIn("Luis", self.client.sent[0]["text"])
 
 
 class TestNotifyRep(RepNotifyTestCase):
