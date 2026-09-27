@@ -1153,15 +1153,32 @@ def run_financing_quote(args: FinancingArgs) -> Any:
     from src.quote_engine.engine import CalibratedQuoteEngine
     from src.quote_engine.term_limits import extract_model_year
 
+    price = args.vehicle_price
+    try:
+        price_f = float(price) if price is not None else 0.0
+    except (TypeError, ValueError):
+        price_f = 0.0
+    if price_f <= 0:
+        raise ValueError("missing_vehicle_price")
+    down = args.down_payment
+    if down is None:
+        raise ValueError("missing_down_payment")
+    try:
+        term = int(args.term_months)
+    except (TypeError, ValueError):
+        term = 0
+    if term <= 0:
+        raise ValueError("missing_term_months")
+
     year = args.vehicle_year
     if year is None:
         year = extract_model_year(args.vehicle_name)
 
     engine = CalibratedQuoteEngine()
     return engine.calculate(
-        args.vehicle_price,
-        int(args.term_months),
-        down_payment=args.down_payment,
+        price_f,
+        term,
+        down_payment=down,
         net_trade_in_equity=args.net_trade_in_equity,
         vehicle_year=year,
     )
@@ -1359,11 +1376,30 @@ def handle_financing_payload(
                     logger.exception("financing session vehicle update failed")
         except Exception as exc:
             logger.exception("financing quote failed for %s", call_id)
-            speech = (
-                "No pude calcular la corrida de financiamiento en este momento. "
-                f"Detalle técnico: {type(exc).__name__}. "
-                "¿Me confirmas el precio del vehículo, el enganche y el plazo en meses?"
-            )
+            err = f"{type(exc).__name__}: {exc}".casefold()
+            if any(
+                token in err
+                for token in (
+                    "missing_vehicle_price",
+                    "missing_down_payment",
+                    "missing_term_months",
+                    "vehicle_price",
+                    "down_payment",
+                    "term_months",
+                )
+            ):
+                speech = (
+                    "Para armar la corrida de financiamiento necesito el precio "
+                    "del vehículo, el enganche y el plazo en meses. "
+                    "Si solo quieres agendar una cita o valuación física en sucursal, "
+                    "dímelo y la agendo sin cotizar."
+                )
+            else:
+                speech = (
+                    "No pude calcular la corrida de financiamiento en este momento. "
+                    "¿Me confirmas el precio del vehículo, el enganche y el plazo en meses? "
+                    "O si prefieres, agendamos solo la cita / valuación física."
+                )
             results.append(VapiToolResult(toolCallId=call_id, result=speech))
             continue
 

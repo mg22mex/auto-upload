@@ -848,6 +848,108 @@ def _finish_forced_tradein(
 
 
 
+def force_book_appointment(
+    *,
+    text: str,
+    phone: str,
+    customer_name: str = "",
+    branch: str | None = None,
+    instance: str = "",
+    meta: dict[str, Any] | None = None,
+    prior_tradein: Any | None = None,
+    vehicle_interest: str = "",
+    whatsapp_client: Any | None = None,
+    manager: Any | None = None,
+) -> dict[str, Any]:
+    """Confirm cita without calculate_financing (trade-in / inspection visits OK)."""
+    from src.lead_routing import detect_appointment_intent
+    from src.voice_gateway.vapi_bridge import LeadArgs, create_vapi_lead, format_lead_speech
+
+    del whatsapp_client  # reserved; inbound / CRM path alerts the rep
+    appt = detect_appointment_intent(text)
+    when = (appt.when_text or "").strip() or "el horario que prefieras"
+    meta = meta or {}
+    label = ""
+    if prior_tradein is not None:
+        bits = [
+            str(getattr(prior_tradein, "make", "") or "").strip(),
+            str(getattr(prior_tradein, "model", "") or "").strip(),
+            str(getattr(prior_tradein, "year", "") or "").strip(),
+            str(getattr(prior_tradein, "version", "") or "").strip(),
+        ]
+        label = " ".join(b for b in bits if b).strip()
+    if not label:
+        label = str(
+            meta.get("trade_in_label")
+            or meta.get("interested_vehicle")
+            or meta.get("vehicle_name")
+            or vehicle_interest
+            or ""
+        ).strip()
+    amount = meta.get("valor_compra") or meta.get("net_trade_in_equity")
+    try:
+        amount_f = float(amount) if amount not in (None, "") else None
+    except (TypeError, ValueError):
+        amount_f = None
+    if amount_f is None:
+        summary = str(meta.get("tradein_summary") or "")
+        m = re.search(r"~\$([0-9,]+)", summary)
+        if m:
+            try:
+                amount_f = float(m.group(1).replace(",", ""))
+            except ValueError:
+                amount_f = None
+
+    if label and amount_f is not None:
+        tradein_note = (
+            f"Cita para valuación física / prueba de manejo - {label} "
+            f"(Trade-in toma a cuenta: ${amount_f:,.0f})"
+        )
+        vehicle_for_crm = label
+    elif label:
+        tradein_note = (
+            f"Cita para valuación física / prueba de manejo - {label}"
+        )
+        vehicle_for_crm = label
+    else:
+        tradein_note = "Cita para valuación física / prueba de manejo (Trade-In Inspection)"
+        vehicle_for_crm = "Trade-In Inspection"
+
+    branch_key = (branch or "periferico").strip().lower() or "periferico"
+    name = (customer_name or "Cliente").strip() or "Cliente"
+    args = LeadArgs(
+        name=name,
+        phone=phone,
+        interested_vehicle=vehicle_for_crm,
+        tradein_summary=tradein_note,
+        appointment_date=when,
+    )
+    crm: dict[str, Any] = {}
+    try:
+        crm = create_vapi_lead(args, manager=manager)
+    except Exception as exc:
+        print(f"WARN force_book_appointment CRM failed phone={phone}: {exc}", flush=True)
+        crm = {"error": str(exc)}
+
+    speech = format_lead_speech(args, dry_run=bool(crm.get("dry_run")), status=str(crm.get("status") or "created"))
+    # Keep confirmation short — no financing prompts.
+    if "financi" in speech.casefold() or "enganche" in speech.casefold():
+        speech = (
+            f"¡Perfecto, {name}! Agendamos tu cita en Autosell "
+            f"{branch_label(branch)} ({when}). Te esperamos."
+        )
+    return {
+        "ok": True,
+        "speech": speech,
+        "tool": "book_appointment",
+        "when": when,
+        "vehicle": vehicle_for_crm,
+        "tradein_note": tradein_note,
+        "crm": crm,
+        "branch": branch_key,
+    }
+
+
 def force_calculate_financing(
     *,
     phone: str,
@@ -1036,6 +1138,51 @@ def chat_with_beatriz(
                 flush=True,
             )
 
+    # Appointment / valuación física — never force calculate_financing.
+    from src.lead_routing import detect_appointment_intent
+
+    appointment = detect_appointment_intent(message)
+    if appointment.requested and not detect_tradein_intent(message):
+        try:
+            booked = force_book_appointment(
+                text=message,
+                phone=phone,
+                customer_name=customer_name,
+                branch=branch,
+                instance=instance,
+                meta=meta_early,
+                prior_tradein=prior_tradein,
+                vehicle_interest=vehicle_interest,
+                manager=manager,
+            )
+            speech = str(booked.get("speech") or "").strip()
+            if speech:
+                try:
+                    session.update_meta(
+                        phone,
+                        instance,
+                        last_appointment=booked.get("when"),
+                        appointment_vehicle=booked.get("vehicle"),
+                        tradein_cita_note=booked.get("tradein_note"),
+                    )
+                except Exception:
+                    pass
+                return VapiChatResult(
+                    reply_text=speech,
+                    previous_chat_id=previous_chat_id
+                    or session.get_chat_id(phone, instance),
+                    tools_called=["book_appointment"],
+                    vehicle_name=str(booked.get("vehicle") or "") or None,
+                    interested_vehicle=str(booked.get("vehicle") or "") or None,
+                    tradein_summary=str(meta_early.get("tradein_summary") or "")
+                    or None,
+                )
+        except Exception as exc:
+            print(
+                f"WARN force_book_appointment failed phone={phone}: {exc}",
+                flush=True,
+            )
+
     key = _api_key()
     if not key:
         return VapiChatResult(reply_text="", error="missing VAPI_API_KEY")
@@ -1064,6 +1211,9 @@ def chat_with_beatriz(
     )
 
     down = detect_down_payment_amount(message)
+    # Appointment-only turns must never treat leftover engache / invent financing.
+    if appointment.requested:
+        down = None
     term_from_msg = detect_term_months(message)
 
     context_bits = [
@@ -1099,9 +1249,13 @@ def chat_with_beatriz(
         "cifras fijas: solo usa el resultado exacto de la herramienta. "
         "Si ya hay tradein_summary / valor_compra en contexto, reutilízalo o "
         "re-llama get_tradein_valuation al cambiar la versión. "
+        "Si el cliente quiere agendar cita / valuación física / prueba de manejo, "
+        "confirma la cita (create_crm_lead / book) SIN llamar calculate_financing "
+        "aunque falte precio o enganche — la cita de trade-in no requiere corrida. "
         "NUNCA reutilices calculate_financing ni el vehículo anterior (Mustang, etc.) "
         "para una valuación. "
-        "Si el cliente da un enganche/cantidad, DEBES llamar calculate_financing "
+        "Si el cliente da un enganche/cantidad (y NO está solo agendando cita), "
+        "DEBES llamar calculate_financing "
         + financing_hint
         + "USA el year del inventario (vehicle_year) en calculate_financing. "
         "Si el cliente cambia de unidad (otra marca/modelo), actualiza vehicle_name "
@@ -1239,7 +1393,7 @@ def chat_with_beatriz(
                 flush=True,
             )
 
-    if down is not None and not financing_sent and not tradein_forced:
+    if down is not None and not financing_sent and not tradein_forced and not appointment.requested:
         try:
             forced = force_calculate_financing(
                 phone=phone,
@@ -1345,6 +1499,7 @@ __all__ = [
     "extract_assistant_text",
     "extract_tools_called",
     "extract_tradein_version",
+    "force_book_appointment",
     "force_calculate_financing",
     "force_get_tradein_valuation",
     "get_chat_store",

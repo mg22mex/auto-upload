@@ -731,6 +731,25 @@ def _process_ai_turn(
                 notes += (
                     f"\nCita solicitada: {session.appointment_time or 'sin horario'}"
                 )
+                ti_summary = (tradein_summary or "").strip()
+                ti_vehicle = (session.trade_in_vehicle or "").strip()
+                if ti_summary or ti_vehicle or session.down_payment:
+                    label = ti_vehicle or session.vehicle_interest or "Trade-In Inspection"
+                    amount = (session.down_payment or "").strip()
+                    if amount and not amount.startswith("$"):
+                        try:
+                            amount = f"${float(amount.replace(',', '')):,.0f}"
+                        except ValueError:
+                            amount = f"${amount}"
+                    if amount:
+                        notes += (
+                            f"\nCita para valuación física / prueba de manejo - "
+                            f"{label} (Trade-in toma a cuenta: {amount})"
+                        )
+                    else:
+                        notes += (
+                            f"\nCita para valuación física / prueba de manejo - {label}"
+                        )
                 notes += (
                     f"\nVehículo de interés: "
                     f"{session.vehicle_interest or session.initial_message or 'n/a'}"

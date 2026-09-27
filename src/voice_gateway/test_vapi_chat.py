@@ -238,6 +238,67 @@ class TestTradeinOverridesMustangContext(unittest.TestCase):
         self.assertIn("Corolla", result.interested_vehicle or "")
 
 
+class TestAppointmentSkipsFinancing(unittest.TestCase):
+    def test_cita_after_tradein_books_without_financing(self):
+        from src.voice_gateway import vapi_chat as vc
+
+        booked = {
+            "ok": True,
+            "speech": (
+                "¡Perfecto, Test! Agendamos tu cita en Autosell Periférico "
+                "(mañana a las 4 pm). Te esperamos."
+            ),
+            "tool": "book_appointment",
+            "when": "mañana a las 4 pm",
+            "vehicle": "Toyota Corolla 2020 LE",
+            "tradein_note": (
+                "Cita para valuación física / prueba de manejo - "
+                "Toyota Corolla 2020 LE (Trade-in toma a cuenta: $201,200)"
+            ),
+            "crm": {"status": "created", "lead_id": 1, "dry_run": False},
+            "branch": "periferico",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            store = VapiChatSessionStore(Path(tmp) / "chats.db")
+            store.set_chat_id(
+                "6143231198",
+                "prev",
+                meta={
+                    "tradein_make": "Toyota",
+                    "tradein_model": "Corolla",
+                    "tradein_year": 2020,
+                    "tradein_version": "LE",
+                    "tradein_mileage_km": 50000,
+                    "valor_compra": 201200,
+                    "tradein_summary": (
+                        "Estimación de toma a cuenta para Toyota Corolla 2020 LE "
+                        "(50,000 km): ~$201,200 MXN"
+                    ),
+                },
+            )
+            with patch.object(vc, "_api_key", return_value="k"), patch.object(
+                vc, "_assistant_id", return_value="asst"
+            ), patch.object(vc, "_http_json") as http, patch.object(
+                vc, "force_book_appointment", return_value=booked
+            ) as book, patch.object(
+                vc, "force_calculate_financing"
+            ) as force_fin:
+                result = vc.chat_with_beatriz(
+                    text="Sí, quiero agendar una cita para mañana a las 4 pm",
+                    phone="6143231198",
+                    customer_name="Test",
+                    branch="periferico",
+                    store=store,
+                )
+        http.assert_not_called()
+        force_fin.assert_not_called()
+        book.assert_called_once()
+        self.assertIn("book_appointment", result.tools_called)
+        self.assertIn("Agendamos tu cita", result.reply_text)
+        self.assertNotIn("precio del vehículo", result.reply_text.casefold())
+        self.assertNotIn("ValueError", result.reply_text)
+
+
 class TestTermMonthsDetect(unittest.TestCase):
     def test_60_meses(self):
         from src.voice_gateway.vapi_chat import detect_term_months

@@ -107,15 +107,15 @@ _APPOINTMENT_PATTERNS = (
 
 _WHEN_RE = re.compile(
     r"(?P<when>"
-    r"ma[nñ]ana|"
-    r"hoy|"
+    r"ma[nñ]ana(?:\s+a\s+las\s+\d{1,2}(?::\d{2})?\s*(?:am|pm|hrs?|horas?)?)?|"
+    r"hoy(?:\s+a\s+las\s+\d{1,2}(?::\d{2})?\s*(?:am|pm|hrs?|horas?)?)?|"
     r"pasado\s+ma[nñ]ana|"
     r"el\s+\w+|"
     r"este\s+\w+|"
     r"la\s+pr[oó]xima\s+semana|"
     r"\d{1,2}[:.]\d{2}\s*(?:am|pm|hrs?|horas?)?|"
     r"\d{1,2}\s*(?:am|pm|hrs?|horas?)|"
-    r"a\s+las\s+\d{1,2}(?::\d{2})?"
+    r"a\s+las\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?"
     r")",
     re.IGNORECASE,
 )
