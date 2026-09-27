@@ -146,7 +146,7 @@ class WhatsAppWorkerClient:
       WHATSAPP_PROVIDER=evolution|openwa  (default evolution)
       WHATSAPP_API_URL / WHATSAPP_BASE_URL
       WHATSAPP_API_KEY
-      WHATSAPP_INSTANCE_NAME / WHATSAPP_INSTANCE  (default autosell_main)
+      WHATSAPP_INSTANCE_NAME / WHATSAPP_INSTANCE  (default autosell_periferico)
     """
 
     ENV_PROVIDER = "WHATSAPP_PROVIDER"
@@ -174,7 +174,11 @@ class WhatsAppWorkerClient:
         self.api_key = api_key if api_key is not None else _first_env(self.ENV_API_KEY)
         self.instance = (
             instance
-            or _first_env("WHATSAPP_INSTANCE_NAME", "WHATSAPP_INSTANCE", default="")
+            or _first_env(
+                "WHATSAPP_INSTANCE_NAME",
+                "WHATSAPP_INSTANCE",
+                default="autosell_periferico",
+            )
         )
         self.timeout_sec = timeout_sec
         self._session = session or requests.Session()
@@ -287,17 +291,13 @@ class WhatsAppWorkerClient:
         if not text:
             raise WhatsAppWorkerError("text_body is required")
         phone = normalize_phone_number(phone_number)
-        target_instance = instance
-        if not target_instance and branch:
-            from src.whatsapp_worker.routing import resolve_instance_for_branch
+        from src.whatsapp_worker.routing import resolve_outbound_instance
 
-            target_instance = resolve_instance_for_branch(branch)
-        if not target_instance:
-            target_instance = self.instance
-        if not target_instance:
-            from src.whatsapp_worker.routing import resolve_instance_for_branch
-
-            target_instance = resolve_instance_for_branch(None)
+        target_instance = resolve_outbound_instance(
+            instance=instance,
+            branch=branch,
+            fallback=self.instance,
+        )
 
         if self.provider == "openwa":
             payload = {
@@ -328,17 +328,13 @@ class WhatsAppWorkerClient:
             raise WhatsAppWorkerError(f"PDF not found: {path}")
         phone = normalize_phone_number(phone_number)
         caption_text = (caption or path.name).strip()
-        target_instance = instance
-        if not target_instance and branch:
-            from src.whatsapp_worker.routing import resolve_instance_for_branch
+        from src.whatsapp_worker.routing import resolve_outbound_instance
 
-            target_instance = resolve_instance_for_branch(branch)
-        if not target_instance:
-            target_instance = self.instance
-        if not target_instance:
-            from src.whatsapp_worker.routing import resolve_instance_for_branch
-
-            target_instance = resolve_instance_for_branch(None)
+        target_instance = resolve_outbound_instance(
+            instance=instance,
+            branch=branch,
+            fallback=self.instance,
+        )
 
         if self.provider == "openwa":
             return self._post_multipart(

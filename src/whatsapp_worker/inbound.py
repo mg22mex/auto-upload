@@ -388,12 +388,15 @@ def process_qualification_turn(
     except Exception:
         text_first = False
 
-    # Global AI unblock: any inbound → Beatriz unless a confirmed cita exists.
-    # Never emit the legacy sticky "Tu solicitud ya está con un asesor …".
+    # Global AI unblock: any inbound → Beatriz (Vapi / local AI).
+    # Confirmed cita no longer silences replies — Beatriz keeps answering;
+    # sticky "Tu solicitud ya está con un asesor" remains disabled.
     force_beatriz = text_first or ai_mg_quote_enabled()
-    if force_beatriz and not _has_confirmed_appointment(session):
+    if force_beatriz:
         if session.state == STATE_HANDOFF_TO_HUMAN:
             session.state = STATE_AI_ACTIVE
+            # Drop stale cita lock so inventory / engache turns resume.
+            session.appointment_time = ""
         session.handling_agent = AGENT_AI
         return _process_ai_turn(
             event,
@@ -407,12 +410,6 @@ def process_qualification_turn(
             stage_cita=STAGE_CITA,
             agent_ai=AGENT_AI,
         )
-
-    # Confirmed cita + AI path: stay quiet (human owns the thread). No canned text.
-    if force_beatriz and _has_confirmed_appointment(session):
-        session.state = STATE_HANDOFF_TO_HUMAN
-        session.updated_at = now
-        return QualificationTurnResult(session=session, reply_text="")
 
     use_ai = False
     if ai_mg_quote_enabled():

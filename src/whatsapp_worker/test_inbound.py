@@ -311,10 +311,11 @@ class TestAiMgQuoteFlow(unittest.TestCase):
         t1.session.state = STATE_HANDOFF_TO_HUMAN
         t1.session.appointment_time = "mañana 11am"
         t2 = self._turn("¿y ahora?", t1.session)
-        self.assertEqual(t2.session.state, STATE_HANDOFF_TO_HUMAN)
-        # Confirmed cita → silence (never canned sticky asesor spam).
-        self.assertEqual(t2.reply_text, "")
+        # Beatriz resumes; stale cita lock cleared; never canned sticky.
+        self.assertEqual(t2.session.state, STATE_AI_ACTIVE)
+        self.assertEqual(t2.session.appointment_time, "")
         self.assertNotIn("ya está con un asesor", t2.reply_text.lower())
+        self.assertTrue(t2.reply_text.strip())
 
     def test_reset_to_ai_active(self):
         t1 = self._turn("Hola")

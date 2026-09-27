@@ -58,6 +58,35 @@ def resolve_instance_for_branch(branch: str | None = None) -> str:
     return instance_name_periferico()
 
 
+# Retired on Oracle — never sendText here.
+_RETIRED_INSTANCES = frozenset({"autosell_main", ""})
+
+
+def resolve_outbound_instance(
+    *,
+    instance: str | None = None,
+    branch: str | None = None,
+    fallback: str | None = None,
+) -> str:
+    """Pick a live Evolution instance for ``/message/sendText/{instance}``.
+
+    Prefers the inbound webhook instance when it looks valid; otherwise maps
+    ``branch`` → ``autosell_periferico`` / ``autosell_san_felipe``. Never returns
+    the retired ``autosell_main`` name.
+    """
+    candidates = [
+        (instance or "").strip(),
+        (fallback or "").strip(),
+        resolve_instance_for_branch(branch) if branch else "",
+        instance_name_periferico(),
+        instance_name_san_felipe(),
+    ]
+    for name in candidates:
+        if name and name.lower() not in _RETIRED_INSTANCES:
+            return name
+    return instance_name_periferico()
+
+
 def branch_context_for_instance(instance: str) -> dict[str, Any]:
     """Build branch / location / team context from an Evolution instance name."""
     branch_key = branch_key_for_instance(instance)

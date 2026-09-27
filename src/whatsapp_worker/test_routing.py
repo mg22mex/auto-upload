@@ -89,6 +89,26 @@ class TestWhatsAppRouting(unittest.TestCase):
             self.assertEqual(resolve_instance_for_branch("periferico"), "autosell_periferico")
             self.assertEqual(resolve_instance_for_branch("san_felipe"), "autosell_san_felipe")
 
+    def test_resolve_outbound_skips_retired_main(self):
+        from src.whatsapp_worker.routing import resolve_outbound_instance
+
+        with patch.dict(
+            "os.environ",
+            {
+                "WHATSAPP_INSTANCE_PERIFERICO": "autosell_periferico",
+                "WHATSAPP_INSTANCE_SAN_FELIPE": "autosell_san_felipe",
+            },
+            clear=False,
+        ):
+            self.assertEqual(
+                resolve_outbound_instance(instance="autosell_main", branch="periferico"),
+                "autosell_periferico",
+            )
+            self.assertEqual(
+                resolve_outbound_instance(instance="autosell_san_felipe"),
+                "autosell_san_felipe",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

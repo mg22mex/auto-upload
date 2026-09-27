@@ -24,6 +24,7 @@ from src.whatsapp_worker.routing import (
     apply_whatsapp_branch_context,
     branch_context_for_instance,
     resolve_instance_for_branch,
+    resolve_outbound_instance,
 )
 
 __all__ = [
@@ -43,5 +44,6 @@ __all__ = [
     "process_qualification_turn",
     "qualification_enabled",
     "resolve_instance_for_branch",
+    "resolve_outbound_instance",
     "trigger_outbound_voice_after_quote",
 ]
