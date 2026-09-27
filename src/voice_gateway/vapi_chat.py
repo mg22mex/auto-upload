@@ -71,9 +71,12 @@ class VapiChatResult:
     error: str | None = None
     financing_sent: bool = False
     financing_forced: bool = False
+    tradein_sent: bool = False
+    tradein_forced: bool = False
     tools_called: list[str] = field(default_factory=list)
     vehicle_name: str | None = None
     interested_vehicle: str | None = None
+    tradein_summary: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -494,6 +497,90 @@ def get_chat_store() -> VapiChatSessionStore:
         return _STORE
 
 
+def detect_tradein_intent(text: str) -> bool:
+    """True when the user asks for trade-in / appraisal / toma a cuenta."""
+    from src.lead_routing import parse_payment_intent
+
+    return bool(parse_payment_intent(text).trade_in)
+
+
+def force_get_tradein_valuation(
+    *,
+    text: str,
+    phone: str = "",
+    whatsapp_client: Any | None = None,
+) -> dict[str, Any]:
+    """Parse trade-in vehicle from chat and run Autométrica via bridge."""
+    del whatsapp_client  # reserved
+    from src.lead_routing import apply_baseline_trim, parse_trade_in_details
+    from src.voice_gateway.vapi_bridge import handle_tradein_payload
+
+    details = apply_baseline_trim(parse_trade_in_details(text))
+    details.is_trade_in = True
+    if details.year is None or not details.make or not details.model:
+        return {
+            "speech": (
+                "Para valuar tu auto a cuenta con Autométrica necesito "
+                "marca, modelo, año y kilometraje. "
+                "Ejemplo: Toyota Corolla 2020 con 50 mil km."
+            ),
+            "ok": False,
+            "details": details.__dict__,
+        }
+    payload = {
+        "brand": details.make,
+        "model": details.model,
+        "year": int(details.year),
+        "mileage": int(details.mileage_km or 0),
+        "version": details.version or "",
+        "phone": phone or None,
+        "message": {
+            "toolCalls": [
+                {
+                    "id": "wa_forced_tradein",
+                    "function": {
+                        "name": "get_tradein_valuation",
+                        "arguments": {
+                            "brand": details.make,
+                            "model": details.model,
+                            "year": int(details.year),
+                            "mileage": int(details.mileage_km or 0),
+                            "version": details.version or "",
+                            "phone": phone or "",
+                        },
+                    },
+                }
+            ],
+            "artifact": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "message": (
+                            f"[whatsapp_phone={phone}] "
+                            f"[vehicle_name={details.make} {details.model} {details.year}]"
+                        ),
+                    }
+                ]
+            },
+        },
+    }
+    resp = handle_tradein_payload(payload)
+    speech = resp.results[0].result if resp.results else ""
+    return {
+        "speech": speech,
+        "ok": bool(speech),
+        "tool": "get_tradein_valuation",
+        "results": [r.model_dump() for r in resp.results],
+        "details": {
+            "make": details.make,
+            "model": details.model,
+            "year": details.year,
+            "version": details.version,
+            "mileage_km": details.mileage_km,
+        },
+    }
+
+
 def force_calculate_financing(
     *,
     phone: str,
@@ -653,6 +740,9 @@ def chat_with_beatriz(
     )
     instructions = (
         "Eres Beatriz de Autosell en WhatsApp. "
+        "Si el cliente pide valuación / avalúo / 'cuánto me dan por' / 'a cuenta' / "
+        "'estimas', DEBES llamar get_tradein_valuation (o estimate_tradein) con "
+        "brand, model, year, mileage y version si la da. "
         "Si el cliente da un enganche/cantidad, DEBES llamar calculate_financing "
         + financing_hint
         + "USA el year del inventario (vehicle_year) en calculate_financing. "
@@ -743,10 +833,58 @@ def chat_with_beatriz(
 
     financing_forced = False
     financing_sent = "calculate_financing" in tools or "get_financing" in tools
+    tradein_forced = False
+    tradein_sent = any(
+        t in tools
+        for t in (
+            "get_tradein_valuation",
+            "estimate_tradein",
+            "get_tradein",
+            "tradein",
+        )
+    )
     forced_speech = ""
+    tradein_summary: str | None = None
     term_for_quote = term_from_msg or int(meta.get("last_term_months") or 0) or DEFAULT_TERM_MONTHS
 
-    if down is not None and not financing_sent:
+    # Appraisal / toma a cuenta → force Autométrica (before financing).
+    if detect_tradein_intent(message) and not tradein_sent:
+        try:
+            forced_ti = force_get_tradein_valuation(text=message, phone=phone)
+            if forced_ti.get("speech"):
+                forced_speech = str(forced_ti["speech"])
+                tradein_summary = forced_speech
+                tradein_forced = True
+                tradein_sent = True
+                tools = [*tools, "get_tradein_valuation"]
+                meta_update["tradein_summary"] = forced_speech
+                if isinstance(forced_ti.get("details"), dict):
+                    d = forced_ti["details"]
+                    amount_m = re.search(r"~\$([0-9,]+)", forced_speech)
+                    if amount_m:
+                        try:
+                            meta_update["valor_compra"] = float(
+                                amount_m.group(1).replace(",", "")
+                            )
+                            meta_update["net_trade_in_equity"] = meta_update[
+                                "valor_compra"
+                            ]
+                        except ValueError:
+                            pass
+                    label = (
+                        f"{d.get('make', '')} {d.get('model', '')} {d.get('year', '')}"
+                    ).strip()
+                    if label:
+                        meta_update["vehicle_name"] = label
+                        meta_update["interested_vehicle"] = label
+                        vehicle_name = label
+        except Exception as exc:
+            print(
+                f"WARN force_get_tradein_valuation failed phone={phone}: {exc}",
+                flush=True,
+            )
+
+    if down is not None and not financing_sent and not tradein_forced:
         try:
             forced = force_calculate_financing(
                 phone=phone,
@@ -783,7 +921,7 @@ def chat_with_beatriz(
             )
 
     reply = extract_assistant_text(payload)
-    if financing_forced and forced_speech:
+    if (financing_forced or tradein_forced) and forced_speech:
         reply = forced_speech
     reply = rewrite_reply_keep_interactive(reply, branch=branch)
 
@@ -799,9 +937,12 @@ def chat_with_beatriz(
             error="empty assistant reply",
             financing_sent=financing_sent,
             financing_forced=financing_forced,
+            tradein_sent=tradein_sent,
+            tradein_forced=tradein_forced,
             tools_called=tools,
             vehicle_name=active_vehicle,
             interested_vehicle=active_vehicle,
+            tradein_summary=tradein_summary,
         )
     return VapiChatResult(
         reply_text=reply,
@@ -810,9 +951,12 @@ def chat_with_beatriz(
         raw=payload,
         financing_sent=financing_sent,
         financing_forced=financing_forced,
+        tradein_sent=tradein_sent,
+        tradein_forced=tradein_forced,
         tools_called=tools,
         vehicle_name=active_vehicle,
         interested_vehicle=active_vehicle,
+        tradein_summary=tradein_summary,
     )
 
 
@@ -825,9 +969,11 @@ __all__ = [
     "chat_with_beatriz",
     "detect_down_payment_amount",
     "detect_term_months",
+    "detect_tradein_intent",
     "extract_assistant_text",
     "extract_tools_called",
     "force_calculate_financing",
+    "force_get_tradein_valuation",
     "get_chat_store",
     "rewrite_reply_keep_interactive",
     "vapi_wa_text_first_enabled",

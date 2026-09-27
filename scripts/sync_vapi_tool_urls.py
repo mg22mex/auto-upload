@@ -156,7 +156,12 @@ def resolve_tool_ids(
         "/vapi/inventory": ("query_inventory", "get_inventory"),
         "/vapi/crm-lead": ("create_crm_lead", "create_lead", "crm_lead"),
         "/vapi/financing": ("calculate_financing", "get_financing"),
-        "/vapi/tradein": ("estimate_tradein", "get_tradein", "tradein"),
+        "/vapi/tradein": (
+            "get_tradein_valuation",
+            "estimate_tradein",
+            "get_tradein",
+            "tradein",
+        ),
     }
     for row in rows:
         tid = str(row.get("id") or "").strip()

@@ -22,7 +22,7 @@ class TestAutometricaLookup(unittest.TestCase):
         self.assertEqual(val.baseline_km, 75000)
         # +10k km × -3500 = -3500
         self.assertEqual(val.mileage_adjustment, Decimal("-3500.00"))
-        self.assertEqual(val.valor_compra, Decimal("194500.00"))
+        self.assertEqual(val.valor_compra, Decimal("188950.00"))
 
     def test_valor_compra_feeds_amortization(self):
         val = lookup_valor_compra(
@@ -40,6 +40,18 @@ class TestAutometricaLookup(unittest.TestCase):
         self.assertEqual(quote.net_trade_in_equity, val.valor_compra)
         self.assertEqual(quote.down_payment, val.valor_compra)
         self.assertLess(quote.financed_principal, Decimal("450000"))
+
+    def test_corolla_defaults_to_le_at_50k(self):
+        val = lookup_valor_compra(
+            year=2020,
+            make="Toyota",
+            model="Corolla",
+            version="",
+            mileage_km=50000,
+        )
+        self.assertTrue(val.matched)
+        self.assertEqual(val.version, "LE")
+        self.assertEqual(val.valor_compra, Decimal("201200.00"))
 
     def test_trade_in_engine_prefers_autometrica(self):
         engine = TradeInEngine(preferred_source=ValuationSource.AUTOMETRICA)

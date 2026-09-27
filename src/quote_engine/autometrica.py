@@ -79,8 +79,28 @@ def _score_row(row: dict[str, Any], *, year: int, make: str, model: str, version
     elif want_ver and want_ver in row_ver:
         score += 10
     elif not want_ver:
-        score += 5
+        # Prefer baseline market trims (LE) over "Base" when unspecified.
+        if row_ver in {"le", "sense", "i sport", "comfortline"}:
+            score += 12
+        else:
+            score += 5
     return score
+
+
+def resolve_version_for_lookup(*, make: str, model: str, version: str = "") -> str:
+    """Apply baseline trim defaults (Corolla → LE) before guide match."""
+    if (version or "").strip():
+        return version.strip()
+    try:
+        from src.lead_routing import apply_baseline_trim
+        from src.lead_routing import TradeInDetails
+
+        filled = apply_baseline_trim(
+            TradeInDetails(make=make, model=model, version="")
+        )
+        return (filled.version or "").strip()
+    except Exception:
+        return (version or "").strip()
 
 
 def apply_mileage_adjustment(
@@ -113,6 +133,7 @@ def lookup_valor_compra(
     table = valuations if valuations is not None else load_valuations()
     rows = list(table.get("vehicles") or [])
     per_10k = _q(table.get("mileage_adjustment_per_10000_km") or -3500)
+    version = resolve_version_for_lookup(make=make, model=model, version=version)
 
     best: dict[str, Any] | None = None
     best_score = -1
@@ -227,4 +248,5 @@ __all__ = [
     "fetch_session_token",
     "load_valuations",
     "lookup_valor_compra",
+    "resolve_version_for_lookup",
 ]

@@ -462,20 +462,44 @@ class TestTradeIn(unittest.TestCase):
             {"brand": "Toyota", "model": "Corolla", "year": 2020, "mileage": 80000}
         )
         text = resp.results[0].result
-        self.assertIn("Autométrica", text)
         self.assertIn("Toyota", text)
         self.assertIn("Corolla", text)
         self.assertIn("2020", text)
-        self.assertIn("inspección física", text)
-        self.assertNotIn("$", text)
+        self.assertIn("LE", text)
+        self.assertIn("toma a cuenta", text.casefold())
+        self.assertIn("inspección", text.casefold())
+        self.assertIn("$", text)
 
     def test_tradein_speech(self):
-        val = MagicMock(net_equity=Decimal("185000"), raw={"matched": True})
+        val = MagicMock(net_equity=Decimal("201200"), raw={"matched": True})
         text = format_tradein_speech(
-            TradeInArgs(brand="Toyota", model="Corolla", year=2020, mileage=80000),
+            TradeInArgs(
+                brand="Toyota",
+                model="Corolla",
+                year=2020,
+                mileage=50000,
+                version="LE",
+            ),
             val,
         )
-        self.assertIn("ciento ochenta y cinco mil pesos", text)
+        self.assertIn("Toyota Corolla 2020 LE", text)
+        self.assertIn("201,200", text)
+        self.assertIn("toma a cuenta", text.casefold())
+        self.assertIn("inspección", text.casefold())
+
+    def test_corolla_valuan_query(self):
+        resp = handle_tradein_payload(
+            {
+                "brand": "Toyota",
+                "model": "Corolla",
+                "year": 2020,
+                "mileage": 50000,
+            }
+        )
+        text = resp.results[0].result
+        self.assertIn("201,200", text)
+        self.assertIn("LE", text)
+        self.assertIn("50,000", text)
 
 
 class TestLead(unittest.TestCase):

@@ -195,6 +195,8 @@ class TradeInArgs(BaseModel):
     model: str = Field(min_length=1)
     year: int = Field(ge=1950, le=2100)
     mileage: int = Field(default=0, ge=0)
+    version: str | None = None
+    phone: str | None = None
 
 
 class LeadArgs(BaseModel):
@@ -554,8 +556,21 @@ def _parse_tradein_dict(raw: dict[str, Any]) -> TradeInArgs:
         or raw.get("km")
         or 0
     )
+    version = _coerce_optional_str(
+        raw.get("version") or raw.get("trim") or raw.get("version_name")
+    )
+    phone = _coerce_optional_str(
+        raw.get("phone") or raw.get("mobile") or raw.get("telefono") or raw.get("whatsapp_phone")
+    )
     return TradeInArgs.model_validate(
-        {"brand": brand, "model": model, "year": year, "mileage": mileage}
+        {
+            "brand": brand,
+            "model": model,
+            "year": year,
+            "mileage": mileage,
+            "version": version,
+            "phone": phone,
+        }
     )
 
 
@@ -1411,36 +1426,105 @@ def handle_financing_payload(
 
 
 def format_tradein_speech(args: TradeInArgs, valuation: Any) -> str:
-    label = f"{args.brand.strip().title()} {args.model.strip()} {args.year}"
-    amount = format_price_voice_es(valuation.net_equity)
-    matched_note = ""
     raw = getattr(valuation, "raw", None) or {}
-    if isinstance(raw, dict) and raw.get("matched") is False:
-        matched_note = (
-            " Esta es una estimación aproximada porque no hubo coincidencia "
-            "exacta en la guía."
+    version = ""
+    if isinstance(raw, dict):
+        # Prefer matched Autométrica version when present.
+        notes = str(raw.get("notes") or "")
+        version = (args.version or "").strip()
+    else:
+        version = (args.version or "").strip()
+    # Pull version from engine notes / label when args blank.
+    try:
+        from src.quote_engine.autometrica import resolve_version_for_lookup
+
+        version = resolve_version_for_lookup(
+            make=args.brand, model=args.model, version=version
         )
+    except Exception:
+        pass
+    km = int(args.mileage or 0)
+    km_txt = f"{km:,}".replace(",", ",")
+    label = (
+        f"{args.brand.strip().title()} {args.model.strip().title()} {args.year}"
+        + (f" {version}" if version else "")
+        + (f" ({km_txt} km)" if km else "")
+    )
+    amount = float(getattr(valuation, "net_equity", 0) or 0)
     return (
-        f"Basado en la guía Autométrica, el valor estimado a cuenta para tu "
-        f"{label} es de aproximadamente {amount}, sujeto a inspección física "
-        f"en la agencia.{matched_note}"
+        f"Estimación de toma a cuenta para {label}: "
+        f"~${amount:,.0f} MXN "
+        f"(Sujeto a inspección física y mecánica en sucursal)."
     )
 
 
 def run_tradein_valuation(args: TradeInArgs) -> Any:
     # Live path: src.quote_engine.trade_in (not src.trade_in)
+    from src.quote_engine.autometrica import resolve_version_for_lookup
     from src.quote_engine.trade_in import TradeInEngine, TradeInVehicle
 
+    version = resolve_version_for_lookup(
+        make=args.brand.strip(),
+        model=args.model.strip(),
+        version=(args.version or "").strip(),
+    )
     vehicle = TradeInVehicle(
         year=int(args.year),
         make=args.brand.strip(),
         model=args.model.strip(),
+        version=version,
         mileage_km=int(args.mileage or 0),
     )
     return TradeInEngine().value(vehicle)
 
 
+def persist_tradein_session(
+    args: TradeInArgs,
+    valuation: Any,
+    *,
+    phone: str | None = None,
+) -> str:
+    """Save tradein_summary + Valor Compra into qualification / Vapi meta."""
+    speech = format_tradein_speech(args, valuation)
+    amount = float(getattr(valuation, "net_equity", 0) or 0)
+    summary = speech
+    digits = re.sub(r"\D", "", (phone or args.phone or ""))
+    if not digits:
+        return summary
+    try:
+        from src.voice_gateway.session_vehicle import remember_interested_vehicle
+        from src.whatsapp_worker.inbound import QualificationStore
+
+        label = (
+            f"{args.brand.strip().title()} {args.model.strip().title()} {args.year}"
+        ).strip()
+        store = QualificationStore()
+        for sess in store.list_by_phone(digits):
+            sess.trade_in_vehicle = label
+            sess.down_payment = f"{amount:.2f}"
+            # Keep notes-style summary available via vehicle label + down_payment.
+            store.save(sess)
+        try:
+            from src.voice_gateway.vapi_chat import get_chat_store
+
+            get_chat_store().update_meta(
+                digits,
+                "",
+                tradein_summary=summary,
+                valor_compra=amount,
+                net_trade_in_equity=amount,
+                trade_in_label=label,
+            )
+        except Exception:
+            logger.exception("tradein vapi meta persist failed")
+        remember_interested_vehicle(label, phone=digits)
+    except Exception:
+        logger.exception("persist_tradein_session failed phone=%s", digits)
+    return summary
+
+
 def handle_tradein_payload(payload: dict[str, Any]) -> VapiToolResponse:
+    wa_ctx = extract_whatsapp_context(payload)
     calls = extract_typed_tool_calls(
         payload,
         parser=_parse_tradein_dict,
@@ -1456,13 +1540,19 @@ def handle_tradein_payload(payload: dict[str, Any]) -> VapiToolResponse:
             "mileage",
             "mileage_km",
             "kilometraje",
+            "version",
+            "trim",
+            "phone",
         ),
     )
     results: list[VapiToolResult] = []
     for call_id, args in calls:
+        if not (args.phone or "").strip() and wa_ctx.get("phone"):
+            args = args.model_copy(update={"phone": str(wa_ctx["phone"])})
         try:
             valuation = run_tradein_valuation(args)
             speech = format_tradein_speech(args, valuation)
+            persist_tradein_session(args, valuation, phone=args.phone)
         except Exception as exc:
             logger.exception("trade-in valuation failed for %s", call_id)
             speech = (

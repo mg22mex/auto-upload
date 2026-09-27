@@ -145,9 +145,9 @@ class TestTradeInQualification(unittest.TestCase):
         self.assertEqual(details.year, 2020)
         self.assertEqual(details.make, "Toyota")
         self.assertEqual(details.model, "Corolla")
+        self.assertEqual(details.version, "LE")  # baseline trim when omitted
         self.assertIsNotNone(reply)
         assert reply is not None
-        self.assertIn("Versión", reply)
         self.assertIn("Kilometraje", reply)
         self.assertIn("auto a cambio", reply.casefold())
         self.assertIsNone(meta)

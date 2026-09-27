@@ -653,14 +653,28 @@ def _process_ai_turn(
             )
             if active:
                 session.vehicle_interest = active
+            if (vapi.tradein_summary or "").strip():
+                session.trade_in_vehicle = (
+                    (vapi.vehicle_name or session.trade_in_vehicle or "").strip()
+                    or session.trade_in_vehicle
+                )
+                # Extract amount for down_payment engache reuse.
+                amount_m = re.search(
+                    r"~\$([0-9,]+)", vapi.tradein_summary or ""
+                )
+                if amount_m:
+                    session.down_payment = amount_m.group(1).replace(",", "")
             routing = {
                 **decision.as_dict(),
                 "vapi_chat_id": vapi.chat_id,
                 "brain": "vapi_chat",
                 "financing_sent": vapi.financing_sent,
                 "financing_forced": vapi.financing_forced,
+                "tradein_sent": getattr(vapi, "tradein_sent", False),
+                "tradein_forced": getattr(vapi, "tradein_forced", False),
                 "tools_called": list(vapi.tools_called or []),
                 "interested_vehicle": session.vehicle_interest,
+                "tradein_summary": getattr(vapi, "tradein_summary", None),
             }
             # Stay AI-active after financing PDF — handoff only on explicit cita.
             if appointment.requested:

@@ -360,6 +360,72 @@ _TRADE_IN_TOKENS = (
     "entregar mi",
     "forma de pago: permuta",
     "forma de pago: auto a cambio",
+    # Valuation / appraisal (regional MX)
+    "valuan",
+    "avaluan",
+    "avalúan",
+    "valuacion",
+    "valuación",
+    "avaluo",
+    "avalúo",
+    "estiman",
+    "estimas",
+    "cuanto me dan",
+    "cuánto me dan",
+    "cuanto me toman",
+    "cuánto me toman",
+    "en cuanto me reciben",
+    "en cuánto me reciben",
+    "cuanto me agarran",
+    "cuánto me agarran",
+    "cuanto me abonar",
+    "cuánto me abonar",
+    "dar a cuenta",
+    "reciben a cuenta",
+    "tomar a cuenta",
+    "tomar mi auto",
+    "toma a cuenta",
+)
+
+# Model-only mentions → (make, model) when brand omitted ("corolla 2020").
+_MODEL_MAKE_ALIASES: dict[str, tuple[str, str]] = {
+    "corolla": ("Toyota", "Corolla"),
+    "camry": ("Toyota", "Camry"),
+    "rav4": ("Toyota", "RAV4"),
+    "hilux": ("Toyota", "Hilux"),
+    "sentra": ("Nissan", "Sentra"),
+    "versa": ("Nissan", "Versa"),
+    "np300": ("Nissan", "NP300"),
+    "mazda3": ("Mazda", "Mazda3"),
+    "cx-5": ("Mazda", "CX-5"),
+    "cx5": ("Mazda", "CX-5"),
+    "jetta": ("Volkswagen", "Jetta"),
+    "vento": ("Volkswagen", "Vento"),
+    "mustang": ("Ford", "Mustang"),
+    "ranger": ("Ford", "Ranger"),
+}
+
+# When trim omitted, use market baseline (not stub) for Autométrica.
+_BASELINE_TRIM_BY_MODEL: dict[tuple[str, str], str] = {
+    ("toyota", "corolla"): "LE",
+    ("nissan", "sentra"): "Sense",
+    ("mazda", "cx-5"): "i Sport",
+    ("volkswagen", "jetta"): "Comfortline",
+}
+
+_VALUATION_INTENT_RE = re.compile(
+    r"\b(?:valuan|val[uú]an|aval[uú]an|valuaci[oó]n|aval[uú]o|estiman|estimas)\b|"
+    r"cu[aá]nto\s+me\s+(?:dan|toman|agarran|abonar\w*)\b|"
+    r"en\s+cu[aá]nto\s+me\s+(?:reciben|valuan|val[uú]an|aval[uú]an)\b|"
+    r"(?:dar|reciben|tomar|toma)\s+a\s+cuenta|"
+    r"tomar\s+mi\s+auto|"
+    r"toma\s+a\s+cuenta",
+    re.IGNORECASE,
+)
+
+_KM_MIL_RE = re.compile(
+    r"(?P<n>\d{1,3})\s*mil\s*(?:km|kms|kil[oó]metros?)?\b",
+    re.IGNORECASE,
 )
 
 _FINANCING_TOKENS = (
@@ -480,11 +546,36 @@ class TradeInDetails:
 def _mentions_trade_in(lowered: str) -> bool:
     if not lowered:
         return False
-    if "forma de pago" in lowered and (
-        "permuta" in lowered or "a cambio" in lowered or "trade" in lowered
+    # Accent-insensitive fold for valúan / cuánto / avalúo.
+    import unicodedata
+
+    folded = (
+        unicodedata.normalize("NFKD", lowered)
+        .encode("ascii", "ignore")
+        .decode("ascii")
+    )
+    if "forma de pago" in folded and (
+        "permuta" in folded or "a cambio" in folded or "trade" in folded
     ):
         return True
-    return any(token in lowered for token in _TRADE_IN_TOKENS)
+    if _VALUATION_INTENT_RE.search(lowered) or _VALUATION_INTENT_RE.search(folded):
+        return True
+    return any(token in folded or token in lowered for token in _TRADE_IN_TOKENS)
+
+
+def apply_baseline_trim(details: TradeInDetails) -> TradeInDetails:
+    """Fill default Autométrica trim (e.g. Corolla → LE) when version omitted."""
+    if (details.version or "").strip():
+        return details
+    key = (
+        (details.make or "").strip().casefold(),
+        (details.model or "").strip().casefold(),
+    )
+    trim = _BASELINE_TRIM_BY_MODEL.get(key)
+    if not trim:
+        return details
+    details.version = trim
+    return details
 
 
 def _mentions_financing(lowered: str) -> bool:
@@ -589,6 +680,9 @@ def _extract_mileage_km(text: str) -> int | None:
     if match:
         digits = re.sub(r"\D", "", match.group("km"))
         return int(digits) if digits else None
+    mil = _KM_MIL_RE.search(text or "")
+    if mil:
+        return int(mil.group("n")) * 1000
     # Bare 5–6 digit figure when version already present (e.g. "LE 85000")
     # Skip 4-digit values — those are almost always model years.
     bare = _KM_BARE_RE.search(text or "")
@@ -679,7 +773,17 @@ def parse_trade_in_details(
         base.make = make.title() if make.casefold() != "vw" else "Volkswagen"
         if model_bits:
             base.model = " ".join(model_bits).title()
+    elif not base.model or not base.make:
+        # Model-only: "corolla 2020", "un mustang"
+        for alias, (make, model) in _MODEL_MAKE_ALIASES.items():
+            if re.search(rf"\b{re.escape(alias)}\b", raw, re.IGNORECASE):
+                if not base.make:
+                    base.make = make
+                if not base.model:
+                    base.model = model
+                break
 
+    apply_baseline_trim(base)
     return base
 
 
@@ -815,6 +919,7 @@ def advance_trade_in_qualification(
     # Valor Compra as enganche once vehicle identity is complete.
     if details.wants_financing or (prior and prior.wants_financing):
         details.wants_financing = True
+    apply_baseline_trim(details)
     missing = details.missing_fields()
     if missing:
         return details, prompt_missing_trade_in_fields(details), None
@@ -1300,6 +1405,7 @@ __all__ = [
     "TradeInDetails",
     "advance_trade_in_qualification",
     "ai_mg_quote_enabled",
+    "apply_baseline_trim",
     "build_advisor_handoff_summary",
     "build_trade_in_quote_message",
     "build_voice_agent_script",
