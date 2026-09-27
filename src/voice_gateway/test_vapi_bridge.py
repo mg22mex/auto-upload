@@ -16,10 +16,13 @@ from src.voice_gateway.vapi_bridge import (
     format_inventory_speech,
     format_price_compact_mxn,
     format_price_voice_es,
+    format_qualify_inventory_payload,
     format_tradein_speech,
     handle_financing_payload,
     handle_inventory_payload,
     handle_tradein_payload,
+    has_inventory_preference,
+    is_open_inventory_query,
     is_specific_inventory_query,
     number_to_words_es,
 )
@@ -83,7 +86,24 @@ class TestFormatters(unittest.TestCase):
             is_specific_inventory_query(InventoryArgs(brand="Toyota", model="Corolla"))
         )
         self.assertFalse(is_specific_inventory_query(InventoryArgs(brand="Nissan")))
+        self.assertTrue(is_open_inventory_query(InventoryArgs()))
+        self.assertTrue(is_open_inventory_query(InventoryArgs(branch="san_felipe")))
+        self.assertFalse(
+            is_open_inventory_query(InventoryArgs(body_type="SUV", branch="san_felipe"))
+        )
+        self.assertTrue(has_inventory_preference(InventoryArgs(max_price=200000)))
         self.assertEqual(format_price_compact_mxn(285000), "$285,000 MXN")
+
+    def test_open_inventory_qualify_payload(self):
+        payload = format_qualify_inventory_payload(
+            InventoryArgs(branch="san_felipe")
+        )
+        self.assertTrue(payload["needs_qualification"])
+        self.assertFalse(payload["found"])
+        self.assertEqual(payload["vehicles"], [])
+        self.assertIn("San Felipe", payload["speak"])
+        self.assertIn("SUV", payload["speak"])
+        self.assertIn("presupuesto", payload["speak"].casefold())
 
     def test_location_markers(self):
         from src.voice_gateway.vapi_bridge import (

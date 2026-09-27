@@ -5,6 +5,9 @@ Fixes silence-timeouts when:
   1. tool was ``async: true`` with ``request-start`` filler, or
   2. assistant had **no** ``toolIds`` (prompt named tools that never ran).
 
+Also upserts qualify-first inventory instructions so open catalog questions
+("¿qué autos tienen?") ask type/budget before dumping stock.
+
 Always re-sends ``server`` so Vapi does not wipe the webhook URL on PATCH.
 
 Usage::
@@ -30,25 +33,20 @@ from dotenv import load_dotenv
 
 load_dotenv(ROOT / ".env")
 
+from src.voice_gateway.prompts import (  # noqa: E402
+    ANTI_SILENCE_BLOCK,
+    ANTI_SILENCE_MARKER,
+    INVENTORY_TOOL_DESCRIPTION,
+    QUALIFY_FIRST_BLOCK,
+    QUALIFY_FIRST_MARKER,
+    upsert_prompt_block,
+)
+
 DEFAULT_ASSISTANT_ID = "7b4bc492-b94b-40bc-a79c-754fe48c6f9b"
-
-ANTI_SILENCE_BLOCK = """
-
-## PROHIBIDO HABLAR ANTES DEL TOOL (CRÍTICO)
-- Cuando el cliente pida un vehículo, llama INMEDIATAMENTE a query_inventory con brand y model.
-- En el mismo turno del tool call, tu mensaje de texto DEBE estar vacío. Cero palabras. Solo el tool call.
-- Frases prohibidas (nunca): "un momento", "dame un momento", "déjame consultar", "ahora mismo consulto", "verifico", "consulto el inventario", "espera un segundo".
-- Flujo obligatorio: (1) tool call silencioso → (2) recibes JSON → (3) hablas modelo + precio en palabras + sucursal + pregunta de cita.
-"""
 
 INVENTORY_FUNCTION: dict[str, Any] = {
     "name": "query_inventory",
-    "description": (
-        "Busca vehículos disponibles en inventario Autosell (Odoo). "
-        "Usa brand y model juntos cuando el cliente pide un auto concreto "
-        "(ej. Toyota Corolla). Devuelve JSON compacto con precio y ubicación. "
-        "Espera el resultado antes de hablar; no digas frases de espera."
-    ),
+    "description": INVENTORY_TOOL_DESCRIPTION,
     "parameters": {
         "type": "object",
         "properties": {
@@ -68,6 +66,18 @@ INVENTORY_FUNCTION: dict[str, Any] = {
                 "type": "number",
                 "description": "Presupuesto máximo en pesos mexicanos",
             },
+            "body_type": {
+                "type": "string",
+                "description": "Tipo de carrocería: SUV, Sedan, Pickup, Hatchback",
+            },
+            "branch": {
+                "type": "string",
+                "description": "Sucursal: periferico | san_felipe",
+            },
+            "query": {
+                "type": "string",
+                "description": "Texto libre adicional para ilike en el título",
+            },
         },
         "required": [],
     },
@@ -81,6 +91,47 @@ def _load_sync_mod():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def patch_system_prompt(system: str) -> str:
+    """Upsert qualify-first + revised anti-silence blocks into system text."""
+    text = upsert_prompt_block(system, QUALIFY_FIRST_MARKER, QUALIFY_FIRST_BLOCK)
+    text = upsert_prompt_block(text, ANTI_SILENCE_MARKER, ANTI_SILENCE_BLOCK)
+    # Soften legacy "always call inventory immediately" lines that contradict qualify-first.
+    replacements = [
+        (
+            "En cuanto el cliente mencione una marca, modelo o tipo de vehículo",
+            "Cuando el cliente mencione una marca+modelo concretos, un tipo "
+            "(SUV/Sedán/Pickup) o un presupuesto — no ante preguntas abiertas —",
+        ),
+        (
+            "NUNCA solicites el presupuesto total, plazo de financiamiento ni enganche "
+            "antes de verificar la disponibilidad del vehículo en el inventario.",
+            "Ante preguntas ABIERTAS de catálogo (sin tipo/presupuesto/marca), "
+            "SÍ califica primero (tipo o presupuesto). Con marca+modelo concretos, "
+            "busca inventario de inmediato sin pedir plazo/enganche antes.",
+        ),
+        (
+            "Si no especificó año o precio, ejecuta la búsqueda únicamente con la marca o modelo.",
+            "Si solo dijo marca o modelo, busca con eso. Si no dio ni tipo ni "
+            "presupuesto ni marca/modelo, NO busques: califica primero.",
+        ),
+    ]
+    for old, new in replacements:
+        if old in text:
+            text = text.replace(old, new)
+    # Drop duplicate REGLA ANTI-SILENCIO that still forces immediate dump.
+    legacy = "## REGLA ANTI-SILENCIO (OBLIGATORIO)"
+    if legacy in text and QUALIFY_FIRST_MARKER in text:
+        start = text.find(legacy)
+        if start >= 0:
+            rest = text[start + len(legacy) :]
+            nxt = rest.find("\n## ")
+            if nxt < 0:
+                text = text[:start].rstrip()
+            else:
+                text = text[:start].rstrip() + rest[nxt:]
+    return text.rstrip() + "\n"
 
 
 def configure_inventory_tool(*, dry_run: bool = False) -> dict[str, Any]:
@@ -169,9 +220,17 @@ def configure_inventory_tool(*, dry_run: bool = False) -> dict[str, Any]:
         raise RuntimeError(f"messages still set: {after.get('messages')!r}")
     if "model" not in (after.get("function_keys") or []):
         raise RuntimeError("model parameter missing after PATCH")
+    if "body_type" not in (after.get("function_keys") or []):
+        raise RuntimeError("body_type parameter missing after PATCH")
     if not after.get("server_url"):
         raise RuntimeError("server.url missing after PATCH")
-    return {"id": tool_id, "dry_run": False, "before": before, "after": after, "all_tool_ids": list(ids.values())}
+    return {
+        "id": tool_id,
+        "dry_run": False,
+        "before": before,
+        "after": after,
+        "all_tool_ids": list(ids.values()),
+    }
 
 
 def configure_assistant_tools(
@@ -199,21 +258,32 @@ def configure_assistant_tools(
     sys_idx = next((i for i, m in enumerate(msgs) if m.get("role") == "system"), None)
     if sys_idx is None:
         raise RuntimeError("assistant has no system message")
-    sys_content = msgs[sys_idx].get("content") or ""
-    if "PROHIBIDO HABLAR ANTES DEL TOOL" not in sys_content:
-        sys_content = sys_content.rstrip() + ANTI_SILENCE_BLOCK
+    sys_content = patch_system_prompt(str(msgs[sys_idx].get("content") or ""))
     msgs[sys_idx] = {**msgs[sys_idx], "content": sys_content}
     model["messages"] = msgs
     model["toolIds"] = tool_ids
 
     before = {
         "toolIds": (current.get("model") or {}).get("toolIds"),
-        "has_anti_silence": "PROHIBIDO HABLAR ANTES DEL TOOL"
-        in (((current.get("model") or {}).get("messages") or [{}])[0].get("content") or ""),
+        "has_qualify_first": QUALIFY_FIRST_MARKER
+        in str(
+            (((current.get("model") or {}).get("messages") or [{}])[0].get("content") or "")
+        ),
+        "has_anti_silence": ANTI_SILENCE_MARKER
+        in str(
+            (((current.get("model") or {}).get("messages") or [{}])[0].get("content") or "")
+        ),
     }
     print("ASSISTANT BEFORE", json.dumps(before, ensure_ascii=False))
     if dry_run:
-        return {"id": aid, "dry_run": True, "before": before, "toolIds": tool_ids}
+        return {
+            "id": aid,
+            "dry_run": True,
+            "before": before,
+            "toolIds": tool_ids,
+            "sys_len": len(sys_content),
+            "has_qualify_first": QUALIFY_FIRST_MARKER in sys_content,
+        }
 
     updated = sync._http_json(
         "PATCH",
@@ -222,14 +292,18 @@ def configure_assistant_tools(
         body={"model": model},
     )
     um = (updated or {}).get("model") or {}
+    after_sys = str(((um.get("messages") or [{}])[0].get("content") or ""))
     after = {
         "toolIds": um.get("toolIds"),
-        "has_anti_silence": "PROHIBIDO HABLAR ANTES DEL TOOL"
-        in ((um.get("messages") or [{}])[0].get("content") or ""),
+        "has_qualify_first": QUALIFY_FIRST_MARKER in after_sys,
+        "has_anti_silence": ANTI_SILENCE_MARKER in after_sys,
+        "sys_len": len(after_sys),
     }
     print("ASSISTANT AFTER", json.dumps(after, ensure_ascii=False))
     if set(after.get("toolIds") or []) != set(tool_ids):
         raise RuntimeError(f"toolIds mismatch: {after.get('toolIds')!r}")
+    if not after.get("has_qualify_first"):
+        raise RuntimeError("qualify-first block missing after PATCH")
     if not after.get("has_anti_silence"):
         raise RuntimeError("anti-silence block missing after PATCH")
     return {"id": aid, "dry_run": False, "before": before, "after": after}

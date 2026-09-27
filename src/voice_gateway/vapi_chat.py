@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from src.voice_gateway.prompts import WA_QUALIFY_INVENTORY_SNIPPET
+
 ENV_ENABLED = "VAPI_WA_TEXT_FIRST"
 ENV_ASSISTANT_ID = "VAPI_ASSISTANT_ID"
 ENV_API_KEY = "VAPI_API_KEY"
@@ -1242,7 +1244,8 @@ def chat_with_beatriz(
     )
     instructions = (
         "Eres Beatriz de Autosell en WhatsApp. "
-        "Si el cliente pide valuación / avalúo / 'cuánto me dan por' / 'a cuenta' / "
+        + WA_QUALIFY_INVENTORY_SNIPPET
+        + "Si el cliente pide valuación / avalúo / 'cuánto me dan por' / 'a cuenta' / "
         "'estimas' / 'toman' / 'versión LE|Base|Sense', DEBES llamar get_tradein_valuation "
         "(o estimate_tradein) con brand, model, year, mileage y version — "
         "NUNCA inventes montos Autométrica ni digas 'ciento cincuenta mil' u otras "

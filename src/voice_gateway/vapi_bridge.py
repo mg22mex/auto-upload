@@ -115,6 +115,9 @@ class InventoryArgs(BaseModel):
     model: str | None = None
     max_price: float | None = Field(default=None, ge=0)
     year: int | None = Field(default=None, ge=1950, le=2100)
+    body_type: str | None = None
+    branch: str | None = None
+    query: str | None = None
 
 
 _EMPTY_TOKENS = frozenset(
@@ -421,16 +424,86 @@ def _parse_inventory_dict(raw: dict[str, Any]) -> InventoryArgs:
         year_raw = raw.get("anio")
     if year_raw is None:
         year_raw = raw.get("año")
+    body_type = _coerce_optional_str(
+        raw.get("body_type")
+        or raw.get("bodyType")
+        or raw.get("tipo")
+        or raw.get("vehicle_type")
+        or raw.get("categoria")
+    )
+    branch = _coerce_optional_str(
+        raw.get("branch") or raw.get("sucursal") or raw.get("location")
+    )
+    query = _coerce_optional_str(
+        raw.get("query") or raw.get("q") or raw.get("search")
+    )
+    # Treat bare body-style tokens stuffed into model/brand as body_type.
+    for token in (model, brand):
+        if token and _normalize_body_type(token) and not body_type:
+            body_type = _normalize_body_type(token)
+            if token is model:
+                model = None
+            else:
+                brand = None
     try:
         return InventoryArgs(
             brand=brand,
             model=model,
             max_price=_coerce_optional_float(max_price_raw),
             year=_coerce_optional_year(year_raw),
+            body_type=body_type,
+            branch=branch,
+            query=query,
         )
     except Exception:
         # Last resort: ignore filters rather than 4xx to Vapi.
         return InventoryArgs()
+
+
+_BODY_TYPE_ALIASES: dict[str, str] = {
+    "suv": "SUV",
+    "camioneta": "SUV",
+    "crossover": "SUV",
+    "sedan": "Sedan",
+    "sedán": "Sedan",
+    "auto": "Sedan",
+    "pickup": "Pickup",
+    "pick-up": "Pickup",
+    "pick up": "Pickup",
+    "troca": "Pickup",
+    "truck": "Pickup",
+    "hatchback": "Hatchback",
+    "hatch": "Hatchback",
+}
+
+
+def _normalize_body_type(value: str | None) -> str | None:
+    text = (value or "").strip().casefold()
+    if not text:
+        return None
+    if text in _BODY_TYPE_ALIASES:
+        return _BODY_TYPE_ALIASES[text]
+    for key, label in _BODY_TYPE_ALIASES.items():
+        if key in text:
+            return label
+    return None
+
+
+def has_inventory_preference(args: InventoryArgs) -> bool:
+    """True when the customer already gave a searchable preference."""
+    return bool(
+        (args.brand or "").strip()
+        or (args.model or "").strip()
+        or args.year is not None
+        or args.max_price is not None
+        or _normalize_body_type(args.body_type)
+        or (args.query or "").strip()
+    )
+
+
+def is_open_inventory_query(args: InventoryArgs) -> bool:
+    """Open catalog ask (branch-only / no filters) → qualify before search."""
+    return not has_inventory_preference(args)
 
 
 def _parse_financing_dict(raw: dict[str, Any]) -> FinancingArgs:
@@ -818,6 +891,87 @@ def is_specific_inventory_query(args: InventoryArgs) -> bool:
     return bool((args.brand or "").strip() and (args.model or "").strip())
 
 
+def format_qualify_inventory_payload(args: InventoryArgs) -> dict[str, Any]:
+    """Tool result that forces Beatriz to qualify instead of dumping stock."""
+    from src.voice_gateway.prompts import (
+        INVENTORY_QUALIFY_NEXT_PROMPT,
+        qualify_prompt_for_branch,
+    )
+
+    branch = (args.branch or "").strip() or None
+    spoken = qualify_prompt_for_branch(branch)
+    return {
+        "found": False,
+        "count": 0,
+        "vehicles": [],
+        "needs_qualification": True,
+        "speak": spoken,
+        "next_prompt": INVENTORY_QUALIFY_NEXT_PROMPT,
+    }
+
+
+def _filter_rows_by_branch(
+    rows: list[dict[str, Any]], branch: str | None
+) -> list[dict[str, Any]]:
+    key = (branch or "").strip().casefold().replace(" ", "_")
+    if not key:
+        return rows
+    if "felipe" in key:
+        want = "+"
+    elif "perifer" in key:
+        want = "*"
+    else:
+        return rows
+    matched = [
+        r
+        for r in rows
+        if branch_marker_from_title(str(r.get("name") or "")) == want
+    ]
+    return matched or rows
+
+
+def _filter_rows_by_body_type(
+    rows: list[dict[str, Any]], body_type: str | None
+) -> list[dict[str, Any]]:
+    label = _normalize_body_type(body_type)
+    if not label:
+        return rows
+    matched = [r for r in rows if _title_matches_body_type(str(r.get("name") or ""), label)]
+    return matched or rows
+
+
+def _title_matches_body_type(title: str, body_label: str) -> bool:
+    hay = title.casefold()
+    if body_label.casefold() in hay:
+        return True
+    try:
+        from src.facebook import categorize as cat
+    except Exception:
+        return False
+    markers: tuple[str, ...] = ()
+    key = body_label.casefold()
+    if key == "suv":
+        markers = cat.SUV_BODY_MARKERS
+    elif key == "pickup":
+        markers = cat.TRUCK_BODY_MARKERS
+    elif key == "hatchback":
+        markers = cat.HATCH_BODY_MARKERS
+    elif key == "sedan":
+        # Sedan ≈ not SUV/truck/van/coupe markers; prefer explicit sedan token.
+        if "sedan" in hay or "sedán" in hay:
+            return True
+        for group in (
+            cat.SUV_BODY_MARKERS,
+            cat.TRUCK_BODY_MARKERS,
+            cat.VAN_BODY_MARKERS,
+            cat.COUPE_BODY_MARKERS,
+        ):
+            if any(m in hay for m in group):
+                return False
+        return True
+    return any(m in hay for m in markers)
+
+
 def format_inventory_payload(
     rows: list[dict[str, Any]],
     args: InventoryArgs,
@@ -917,16 +1071,25 @@ def search_inventory(
     ) -> Any:
         return models.execute_kw(db, uid, password, model, method, args_, kwargs or {})
 
-    return query_inventory(
+    body = _normalize_body_type(args.body_type)
+    # Body-only (or body+branch) needs a wider pull so we can classify locally.
+    wide = bool(body and not ((args.brand or "").strip() or (args.model or "").strip()))
+    pull_limit = 40 if wide else max(1, min(int(limit), INV_LIMIT))
+    rows = query_inventory(
         execute_kw,
         brand=args.brand,
         model=args.model,
         max_price=float(args.max_price) if args.max_price is not None else None,
         year=args.year,
-        limit=min(int(limit), INV_LIMIT),
+        query=(args.query or None),
+        limit=pull_limit,
         available_only=True,
         use_cache=False,  # always live Odoo for /vapi/inventory
+        max_fetch=40 if wide else None,
     )
+    rows = _filter_rows_by_body_type(rows, body)
+    rows = _filter_rows_by_branch(rows, args.branch)
+    return rows[: max(1, min(int(limit), INV_LIMIT))]
 
 
 def _search_inventory_blocking(args: InventoryArgs) -> list[dict[str, Any]]:
@@ -943,13 +1106,26 @@ async def handle_inventory_payload(payload: dict[str, Any]) -> VapiToolResponse:
     calls = extract_tool_calls(payload)
     results: list[VapiToolResult] = []
     for call_id, args in calls:
+        if is_open_inventory_query(args):
+            logger.info(
+                "inventory toolCallId=%s open_query qualify_first branch=%r",
+                call_id,
+                args.branch,
+            )
+            payload_out = format_qualify_inventory_payload(args)
+            result_text = json.dumps(
+                payload_out, ensure_ascii=False, separators=(",", ":")
+            )
+            results.append(VapiToolResult(toolCallId=call_id, result=result_text))
+            continue
+
         specific = is_specific_inventory_query(args)
         timeout_sec = (
             INVENTORY_SPECIFIC_TIMEOUT_SEC if specific else INVENTORY_TIMEOUT_SEC
         )
         logger.info(
             "inventory toolCallId=%s specific=%s timeout=%.2fs "
-            "args brand=%r model=%r year=%r max_price=%r",
+            "args brand=%r model=%r year=%r max_price=%r body_type=%r branch=%r",
             call_id,
             specific,
             timeout_sec,
@@ -957,6 +1133,8 @@ async def handle_inventory_payload(payload: dict[str, Any]) -> VapiToolResponse:
             args.model,
             args.year,
             args.max_price,
+            args.body_type,
+            args.branch,
         )
         timed_out = False
         rows: list[dict[str, Any]] = []

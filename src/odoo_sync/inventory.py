@@ -274,13 +274,16 @@ def query_inventory(
     limit: int = RESULT_LIMIT,
     available_only: bool = True,
     use_cache: bool = True,
+    max_fetch: int | None = None,
 ) -> list[dict[str, Any]]:
     """``search_read`` for published stock only — empty list when none match.
 
     Never widens the domain to include sold/archived units. Never injects
     mock vehicles. Missing Studio state field → archive-as-sold filters only.
     """
-    cap = max(1, min(int(limit), RESULT_LIMIT))
+    hard_cap = int(max_fetch) if max_fetch is not None else RESULT_LIMIT
+    hard_cap = max(RESULT_LIMIT, min(hard_cap, 50))
+    cap = max(1, min(int(limit), hard_cap))
     key = cache_key(
         brand=brand,
         model=model,
