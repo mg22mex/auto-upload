@@ -259,7 +259,12 @@ class AutosellPipeline:
                 log.append({"step": "trade_in", "status": "skipped"})
             result.net_trade_in_equity = equity
 
-            # 2) Scotiabank loan estimate
+            # 2) Scotiabank loan estimate (year matrix caps plazo)
+            from src.quote_engine.term_limits import extract_model_year
+
+            vehicle_year = lead_data.get("vehicle_year") or lead_data.get("year")
+            if vehicle_year is None:
+                vehicle_year = extract_model_year(vehicle_name)
             quote = self.quote_engine.calculate(
                 vehicle_price,
                 term_months,
@@ -273,6 +278,7 @@ class AutosellPipeline:
                     lead_data.get("include_certificate_renewal", False)
                 ),
                 enforce_min_down=bool(lead_data.get("enforce_min_down", True)),
+                vehicle_year=vehicle_year,
             )
             result.estimated_monthly_payment = quote.estimated_monthly_payment
             log.append(
@@ -281,6 +287,9 @@ class AutosellPipeline:
                     "status": "ok",
                     "profile": quote.profile_name,
                     "term_months": quote.term_months,
+                    "requested_term_months": quote.requested_term_months,
+                    "vehicle_year": quote.vehicle_year,
+                    "term_cap_note": quote.term_cap_note,
                     "down_payment": str(quote.down_payment),
                     "cash_down_payment": str(quote.cash_down_payment),
                     "financed_principal": str(quote.financed_principal),

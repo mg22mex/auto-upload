@@ -20,6 +20,13 @@ from src.quote_engine.scotiabank_profile import (
     SCOTIABANK_PROFILE,
     ScotiabankProfile,
 )
+from src.quote_engine.term_limits import (
+    TERM_CAP_NOTE_TEMPLATE,
+    TermResolution,
+    extract_model_year,
+    max_term_months_for_year,
+    resolve_crediauto_term,
+)
 from src.quote_engine.trade_in import (
     TradeInEngine,
     TradeInValuation,
@@ -45,11 +52,16 @@ __all__ = [
     "TradeInEngine",
     "TradeInValuation",
     "TradeInVehicle",
+    "TermResolution",
+    "TERM_CAP_NOTE_TEMPLATE",
     "ValuationSource",
     "calculate_quote",
     "calculate_quote_scotiabank",
+    "extract_model_year",
     "french_payment",
     "lookup_valor_compra",
+    "max_term_months_for_year",
     "quote_matrix",
+    "resolve_crediauto_term",
     "resolve_down_with_trade_in",
 ]

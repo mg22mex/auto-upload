@@ -1,11 +1,13 @@
 """Calibrated Scotiabank quote facade for Phase 2 pipeline."""
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal
 from typing import Any
 
 from src.quote_engine.calculator import QuoteResult, calculate_quote
 from src.quote_engine.scotiabank_profile import SCOTIABANK_PROFILE, ScotiabankProfile
+from src.quote_engine.term_limits import extract_model_year, resolve_crediauto_term
 
 
 class CalibratedQuoteEngine:
@@ -25,11 +27,14 @@ class CalibratedQuoteEngine:
         include_additional_coverages: bool = True,
         include_certificate_renewal: bool = False,
         enforce_min_down: bool = True,
+        vehicle_year: int | str | None = None,
         **_: Any,
     ) -> QuoteResult:
-        return calculate_quote(
+        year = extract_model_year(vehicle_year)
+        resolution = resolve_crediauto_term(int(term_months), year)
+        quote = calculate_quote(
             vehicle_price,
-            term_months,
+            resolution.term_months,
             down_payment=down_payment,
             net_trade_in_equity=net_trade_in_equity,
             annual_auto_insurance=annual_auto_insurance,
@@ -37,4 +42,12 @@ class CalibratedQuoteEngine:
             include_additional_coverages=include_additional_coverages,
             include_certificate_renewal=include_certificate_renewal,
             enforce_min_down=enforce_min_down,
+        )
+        if not resolution.capped and year is None:
+            return quote
+        return replace(
+            quote,
+            requested_term_months=resolution.requested_term_months,
+            vehicle_year=year,
+            term_cap_note=resolution.note,
         )

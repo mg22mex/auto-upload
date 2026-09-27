@@ -60,6 +60,7 @@
 
 - **Secrets:** never hardcode tokens, passwords, Odoo creds, WhatsApp / Meta Page API keys. Use `.env`; document new keys in `.env.example` only as placeholders.
 - **Finance:** French Amortization and all quote math run **locally in Python** inside `src/quote_engine/` (ms-scale). Compute fully before any payload to Odoo, WhatsApp, Messenger, Telegram, or other external channels. No remote calc round-trips for amortization.
+- **CrediAuto term caps (year matrix):** `src/quote_engine/term_limits.py` — max plazo by model year vs calendar year: ≥(Y−2)→60m, (Y−3)/(Y−4)→48m, ≤(Y−5)→36m. `CalibratedQuoteEngine.calculate(..., vehicle_year=)` caps before schedule math; Beatriz speech + PDF use the capped term + note.
 - Do not log secrets, session cookies, or full `.env` contents.
 
 ## Phase 2 Module Contracts (scaffold)

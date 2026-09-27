@@ -533,6 +533,9 @@ def quote_result_to_dict(quote: Any) -> dict[str, Any]:
         "monthly_admin_fee": getattr(quote, "monthly_admin_fee", None),
         "profile_name": getattr(quote, "profile_name", "Scotiabank CrediAuto"),
         "schedule": schedule_rows,
+        "term_cap_note": getattr(quote, "term_cap_note", None),
+        "requested_term_months": getattr(quote, "requested_term_months", None),
+        "vehicle_year": getattr(quote, "vehicle_year", None),
     }
 
 
@@ -651,6 +654,12 @@ def build_financing_quote_pdf_bytes(
         )
         story.append(_kv_table(summary_rows))
         story.append(Spacer(1, 0.1 * inch))
+        term_note = _text(quote_data.get("term_cap_note"), "")
+        if term_note and term_note != "—":
+            story.append(
+                Paragraph(f"<b>{term_note}</b>", styles["disclaimer"])
+            )
+            story.append(Spacer(1, 0.08 * inch))
         story.append(
             Paragraph(
                 f"<b>{FINANCING_ESTIMATE_DISCLAIMER}</b>",

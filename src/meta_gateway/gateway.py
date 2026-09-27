@@ -254,10 +254,13 @@ class MetaWebhookGateway:
             price = Decimal(str(selected["list_price"]))
             vehicle_name = str(selected.get("name") or vehicle_name)
 
+        from src.quote_engine.term_limits import extract_model_year
+
         quote = self.quote_engine.calculate(
             price,
             term_months,
             down_payment=down_payment,
+            vehicle_year=extract_model_year(vehicle_name),
         )
         lead_name = str(
             _context_value(context, "customer_name", "lead_name")

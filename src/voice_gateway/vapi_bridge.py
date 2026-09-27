@@ -184,6 +184,7 @@ class FinancingArgs(BaseModel):
     phone: str | None = None
     customer_name: str | None = None
     vehicle_name: str | None = None
+    vehicle_year: int | None = Field(default=None, ge=1950, le=2100)
     branch: str | None = None
     send_whatsapp: bool = False
 
@@ -468,6 +469,23 @@ def _parse_financing_dict(raw: dict[str, Any]) -> FinancingArgs:
     # Phone present ⇒ deliver summary + PDF unless explicitly disabled.
     if phone and send_flag is None:
         send_whatsapp = True
+    vehicle_name = _coerce_optional_str(
+        raw.get("vehicle_name")
+        or raw.get("interested_vehicle")
+        or raw.get("vehicle")
+    )
+    year_raw = raw.get("vehicle_year")
+    if year_raw is None:
+        year_raw = raw.get("year")
+    if year_raw is None:
+        year_raw = raw.get("anio")
+    if year_raw is None:
+        year_raw = raw.get("año")
+    vehicle_year = _coerce_optional_year(year_raw)
+    if vehicle_year is None and vehicle_name:
+        from src.quote_engine.term_limits import extract_model_year
+
+        vehicle_year = extract_model_year(vehicle_name)
     return FinancingArgs.model_validate(
         {
             "vehicle_price": price,
@@ -478,11 +496,8 @@ def _parse_financing_dict(raw: dict[str, Any]) -> FinancingArgs:
             "customer_name": _coerce_optional_str(
                 raw.get("customer_name") or raw.get("name") or raw.get("client_name")
             ),
-            "vehicle_name": _coerce_optional_str(
-                raw.get("vehicle_name")
-                or raw.get("interested_vehicle")
-                or raw.get("vehicle")
-            ),
+            "vehicle_name": vehicle_name,
+            "vehicle_year": vehicle_year,
             "branch": _coerce_optional_str(raw.get("branch") or raw.get("sucursal")),
             "send_whatsapp": send_whatsapp,
         }
@@ -503,6 +518,14 @@ def _merge_wa_context_into_financing(
         updates["customer_name"] = str(ctx["customer_name"])
     if not (args.vehicle_name or "").strip() and ctx.get("vehicle_name"):
         updates["vehicle_name"] = str(ctx["vehicle_name"])
+    if args.vehicle_year is None:
+        from src.quote_engine.term_limits import extract_model_year
+
+        year = extract_model_year(
+            updates.get("vehicle_name") or args.vehicle_name or ctx.get("vehicle_name")
+        )
+        if year is not None:
+            updates["vehicle_year"] = year
     if not (args.branch or "").strip() and ctx.get("branch"):
         updates["branch"] = str(ctx["branch"])
     # WhatsApp text-first: always deliver PDF when we resolved a phone.
@@ -1041,6 +1064,9 @@ def format_financing_speech(args: FinancingArgs, quote: Any) -> str:
         f"Con un enganche de {down} a {months}, tu mensualidad estimada "
         f"con Scotiabank sería de {monthly}."
     )
+    note = getattr(quote, "term_cap_note", None)
+    if note:
+        base = f"{base} {note}"
     if args.send_whatsapp and (args.phone or "").strip():
         return (
             f"{base} Te envié el resumen y la tabla de amortización por WhatsApp. "
@@ -1051,18 +1077,19 @@ def format_financing_speech(args: FinancingArgs, quote: Any) -> str:
 
 def run_financing_quote(args: FinancingArgs) -> Any:
     from src.quote_engine.engine import CalibratedQuoteEngine
+    from src.quote_engine.term_limits import extract_model_year
 
-    # Scotiabank path requires term_months % 12 == 0
-    term = int(args.term_months)
-    if term % 12 != 0:
-        term = max(12, round(term / 12) * 12)
+    year = args.vehicle_year
+    if year is None:
+        year = extract_model_year(args.vehicle_name)
 
     engine = CalibratedQuoteEngine()
     return engine.calculate(
         args.vehicle_price,
-        term,
+        int(args.term_months),
         down_payment=args.down_payment,
         net_trade_in_equity=args.net_trade_in_equity,
+        vehicle_year=year,
     )
 
 
@@ -1218,6 +1245,9 @@ def handle_financing_payload(
             "customer_name",
             "name",
             "vehicle_name",
+            "vehicle_year",
+            "year",
+            "anio",
             "send_whatsapp",
         ),
     )

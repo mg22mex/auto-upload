@@ -493,7 +493,7 @@ Scaffolded modules under `src/` for lead-to-quote-to-message automation. They do
 
 | Module | Path | Responsibility |
 |--------|------|----------------|
-| **quote_engine** | `src/quote_engine/` | Local French Amortization calculator. Pure Python, no network I/O. All payment schedules and quote figures are computed in-process (milliseconds) **before** any CRM or messaging payload is built. |
+| **quote_engine** | `src/quote_engine/` | Local French Amortization calculator. Pure Python, no network I/O. All payment schedules and quote figures are computed in-process (milliseconds) **before** any CRM or messaging payload is built. **CrediAuto plazo caps** by model year live in `term_limits.py` (see matrix below); `CalibratedQuoteEngine.calculate(..., vehicle_year=)` applies them. |
 | **odoo_sync** | `src/odoo_sync/` | See modular breakdown below. Credentials from `.env` only. |
 | **whatsapp_worker** | `src/whatsapp_worker/` | Thin API wrapper for open-wa / Evolution API. Outbound dispatch of approved quotes and follow-ups. Separate config and process boundary from Playwright. |
 | **voice_gateway** | `src/voice_gateway/` | FastAPI: voice/Meta webhooks + standalone `vapi_bridge` (`POST /vapi/inventory` with `brand`+`model` AND filters, soft arg coercion, **2.8s** Odoo timeout, reused auth, **15m** TTL cache, concise TTS; financing, trade-in, lead/`crm-lead`). Pipeline: intent/STT → quote → Odoo → PDF. Public tool URL via user systemd `cloudflared-vapi-bridge` (`--protocol http2 --edge-ip-version 4`; named tunnel steps in `deploy/cloudflared-named-tunnel.md`). |
@@ -579,7 +579,7 @@ flowchart LR
 
 1. **Marketplace** — Scrape → inventory upsert + Playwright create/update/remove; Wed+Sun **relist** (repost) for listings ≥3d (browser reopen every N on VPS).
 2. **Capture** — Voice AI / form webhook / Messenger (`/webhook/facebook` after verify) / `process_incoming_webhook`.
-3. **Quote math** — Local `quote_engine` (Scotiabank profile; no remote calc).
+3. **Quote math** — Local `quote_engine` (Scotiabank profile; no remote calc). **Year-based CrediAuto max term** (`term_limits.py`): relative to calendar year *Y*: model year ≥ *Y*−2 → 60 months; *Y*−3 or *Y*−4 → 48; ≤ *Y*−5 → 36. Requested plazo above the cap is reduced; Beatriz/`term_cap_note` informs the customer; PDF `Plazo` shows the capped value.
 4. **CRM** — `CRMLeadManager` or pipeline `create_or_update_lead`: dedupe by phone, teams, tags/activity as configured; test-drive calendar optional.
 5. **Fleet** — VIN/plate link; **physical location** can reassign San Felipe sales team.
 6. **Spec sheet** — Stage `quoted`/`cotizado` → `QuotePDFManager` → `ir.attachment` + chatter.

@@ -21,7 +21,20 @@ docs/scotiabank_samples/
 
 1. Extract header fields: valor, enganche, tasa fija anual, comisión %, plazo, importe a financiar, mensualidad, seguros.
 2. Diff against local `calculate_quote` / schedule (rate, fee, IVA on interest).
-3. Tune calibrated constants in `calculator.py` only when multiple samples agree — do not fit a single PDF.
+3. Tune calibrated constants in `calculator.py` / `scotiabank_profile.py` only when multiple samples agree — do not fit a single PDF.
+
+## CrediAuto max term by model year
+
+Enforced in `src/quote_engine/term_limits.py` (used by `CalibratedQuoteEngine` / Beatriz `/vapi/financing`):
+
+| Model year (vs calendar year *Y*) | Max plazo |
+|-----------------------------------|-----------|
+| ≥ *Y* − 2 (e.g. 2024–2026 when *Y*=2026) | 60 months |
+| *Y* − 3 or *Y* − 4 (e.g. 2022–2023) | 48 months |
+| ≤ *Y* − 5 (e.g. 2021 or older) | 36 months |
+
+If the requested term exceeds the cap, the quote uses the capped plazo and surfaces:
+`Nota: Por el año del vehículo ({year}), el plazo máximo disponible con Scotiabank es de {max} meses.`
 
 ## Rules
 

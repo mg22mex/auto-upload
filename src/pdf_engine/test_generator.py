@@ -172,6 +172,29 @@ class TestFinancingQuotePdf(unittest.TestCase):
             # Disclaimer is rendered twice (under summary + footer block).
             self.assertGreaterEqual(text.count("IMPORTANTE"), 2)
 
+    def test_amortization_pdf_uses_capped_term_for_old_year(self):
+        from src.pdf_engine.generator import generate_financing_quote_pdf
+        from src.quote_engine.engine import CalibratedQuoteEngine
+
+        quote = CalibratedQuoteEngine().calculate(
+            450000, 60, down_payment=90000, vehicle_year=2021
+        )
+        self.assertEqual(quote.term_months, 36)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = generate_financing_quote_pdf(
+                quote,
+                output_dir=tmp,
+                vehicle_data={"name": "Ford Ranger XLT 2021"},
+                filename="financing_quote.pdf",
+            )
+            text = path.read_bytes().decode("latin-1", errors="ignore")
+            compact = text.replace(" ", "")
+            self.assertIn("36meses", compact)
+            self.assertNotIn("60meses", compact)
+            self.assertIn("Nota:", text)
+            self.assertIn("2021", text)
+            self.assertIn("plazom", compact.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

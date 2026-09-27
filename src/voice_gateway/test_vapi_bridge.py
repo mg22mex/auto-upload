@@ -399,6 +399,7 @@ class TestFinancing(unittest.TestCase):
             down_payment=Decimal("90000"),
             term_months=48,
             estimated_monthly_payment=Decimal("12345.67"),
+            term_cap_note=None,
         )
         text = format_financing_speech(
             FinancingArgs(vehicle_price=450000, term_months=48, down_payment=90000),
@@ -406,6 +407,37 @@ class TestFinancing(unittest.TestCase):
         )
         self.assertIn("noventa mil pesos", text)
         self.assertIn("cuarenta y ocho meses", text)
+
+    def test_financing_2021_caps_60_to_36_with_note(self):
+        resp = handle_financing_payload(
+            {
+                "vehicle_price": 450000,
+                "term_months": 60,
+                "down_payment": 90000,
+                "vehicle_name": "Ford Ranger XLT 2021",
+                "vehicle_year": 2021,
+            }
+        )
+        text = resp.results[0].result
+        self.assertIn("treinta y seis meses", text)
+        self.assertNotIn("sesenta meses", text)
+        self.assertIn("plazo máximo disponible", text.lower())
+        self.assertIn("2021", text)
+        self.assertIn("36", text)
+
+    def test_financing_year_from_vehicle_name(self):
+        resp = handle_financing_payload(
+            {
+                "vehicle_price": 450000,
+                "term_months": 60,
+                "down_payment": 90000,
+                "vehicle_name": "Toyota Corolla 2022",
+            }
+        )
+        text = resp.results[0].result
+        self.assertIn("cuarenta y ocho meses", text)
+        self.assertIn("2022", text)
+        self.assertIn("48", text)
 
 
 class TestTradeIn(unittest.TestCase):

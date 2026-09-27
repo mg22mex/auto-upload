@@ -70,6 +70,10 @@ class QuoteResult:
     profile_name: str = "simple"
     monthly_admin_fee: Decimal = Decimal("0.00")
     opening_fee_iva: Decimal = Decimal("0.00")
+    # CrediAuto year-matrix metadata (set by CalibratedQuoteEngine when capped).
+    requested_term_months: int | None = None
+    vehicle_year: int | None = None
+    term_cap_note: str | None = None
 
 
 def french_payment(principal: Decimal, monthly_rate: Decimal, term_months: int) -> Decimal:
