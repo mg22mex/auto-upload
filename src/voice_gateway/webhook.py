@@ -40,6 +40,7 @@ from src.whatsapp_worker.inbound import (
     QualificationTurnResult,
     apply_qualification_to_odoo,
     inbound_to_voice_payload,
+    is_banned_handoff_auto_reply,
     notify_rep_on_handoff,
     parse_evolution_inbound,
     process_qualification_turn,
@@ -195,17 +196,25 @@ async def _handle_whatsapp_qualification(
     )
     reply_error: str | None = None
     reply_sent = False
-    try:
-        await asyncio.to_thread(
-            whatsapp.send_text_message,
-            event.phone,
-            turn.reply_text,
-            instance=event.instance or None,
-            branch=turn.session.branch,
-        )
-        reply_sent = True
-    except Exception as exc:
-        reply_error = str(exc)
+    reply = (turn.reply_text or "").strip()
+    if not reply or is_banned_handoff_auto_reply(reply):
+        reply_sent = False
+        if is_banned_handoff_auto_reply(turn.reply_text or ""):
+            logger.warning(
+                "Blocked banned sticky handoff auto-reply for %s", event.phone
+            )
+    else:
+        try:
+            await asyncio.to_thread(
+                whatsapp.send_text_message,
+                event.phone,
+                turn.reply_text,
+                instance=event.instance or None,
+                branch=turn.session.branch,
+            )
+            reply_sent = True
+        except Exception as exc:
+            reply_error = str(exc)
     store.save(turn.session)
     logger.info(
         "WhatsApp qualification %s instance=%s state=%s branch=%s team=%s "

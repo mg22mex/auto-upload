@@ -1856,6 +1856,45 @@ async def vapi_reset_chat(request: Request) -> dict[str, Any]:
     }
 
 
+@app.post("/webhook/whatsapp")
+async def whatsapp_webhook_alias(request: Request) -> JSONResponse:
+    """Evolution ``MESSAGES_UPSERT`` alias on the bridge port (:8000).
+
+    Prefer the voice gateway on :8080 in production; this route exists so
+    ``scripts/disable_evolution_autoreply.py`` can target either port.
+    """
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"invalid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="payload must be a JSON object")
+
+    from src.whatsapp_worker.client import WhatsAppWorkerClient
+    from src.whatsapp_worker.inbound import QualificationStore
+    from src.whatsapp_worker.webhook import handle_inbound_payload
+
+    try:
+        from src.odoo_sync.client import OdooCRMClient
+
+        odoo: Any = OdooCRMClient()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("odoo client unavailable for WA alias: %s", exc)
+        odoo = None
+
+    store = QualificationStore()
+    try:
+        body = handle_inbound_payload(
+            payload,
+            store=store,
+            odoo=odoo,
+            whatsapp=WhatsAppWorkerClient(),
+        )
+    finally:
+        store.close()
+    return JSONResponse(status_code=200, content=body)
+
+
 if __name__ == "__main__":
     import uvicorn
 

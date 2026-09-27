@@ -281,11 +281,23 @@ def _handoff_message(session: QualificationSession) -> str:
     return "\n".join(lines)
 
 
+# Banned Evolution sticky reply — never send (legacy HANDOFF spam).
+_STICKY_HANDOFF_NEEDLE = "tu solicitud ya está con un asesor"
+
+
 def _post_handoff_message(branch_label: str) -> str:
-    return (
-        f"Tu solicitud ya está con un asesor de Autosell {branch_label}. "
-        "Te contactaremos pronto. 🙌"
-    )
+    """Disabled: previously sent a sticky asesor auto-reply. Always empty."""
+    return ""
+
+
+def is_banned_handoff_auto_reply(text: str) -> bool:
+    """True when ``text`` matches the legacy sticky HANDOFF auto-reply."""
+    return _STICKY_HANDOFF_NEEDLE in (text or "").casefold()
+
+
+def _has_confirmed_appointment(session: QualificationSession) -> bool:
+    """Active cita gate — SQLite appointment_time (Odoo cita handoff stamp)."""
+    return bool((session.appointment_time or "").strip())
 
 
 def _maybe_queue_voice_after_quote(
@@ -376,10 +388,12 @@ def process_qualification_turn(
     except Exception:
         text_first = False
 
-    # Text-first (Beatriz): every inbound message → Vapi. Never emit the legacy
-    # sticky "Tu solicitud ya está con un asesor …" auto-reply.
-    if text_first:
-        session.state = STATE_AI_ACTIVE
+    # Global AI unblock: any inbound → Beatriz unless a confirmed cita exists.
+    # Never emit the legacy sticky "Tu solicitud ya está con un asesor …".
+    force_beatriz = text_first or ai_mg_quote_enabled()
+    if force_beatriz and not _has_confirmed_appointment(session):
+        if session.state == STATE_HANDOFF_TO_HUMAN:
+            session.state = STATE_AI_ACTIVE
         session.handling_agent = AGENT_AI
         return _process_ai_turn(
             event,
@@ -394,27 +408,22 @@ def process_qualification_turn(
             agent_ai=AGENT_AI,
         )
 
+    # Confirmed cita + AI path: stay quiet (human owns the thread). No canned text.
+    if force_beatriz and _has_confirmed_appointment(session):
+        session.state = STATE_HANDOFF_TO_HUMAN
+        session.updated_at = now
+        return QualificationTurnResult(session=session, reply_text="")
+
     use_ai = False
     if ai_mg_quote_enabled():
         if session.handling_agent == AGENT_AI or session.state == STATE_AI_ACTIVE:
             use_ai = True
         elif session.state == STATE_NEW_LEAD:
-            # Fresh WhatsApp quote leads are stamped MG Quote Lead → AI first.
             use_ai = True
         elif tags:
             from src.lead_routing import has_mg_quote_tag
 
             use_ai = has_mg_quote_tag(tags)
-
-    # MG Quote (non–text-first): reopen AI unless a cita was already booked.
-    if (
-        session.state == STATE_HANDOFF_TO_HUMAN
-        and ai_mg_quote_enabled()
-        and not (session.appointment_time or "").strip()
-    ):
-        session.state = STATE_AI_ACTIVE
-        session.handling_agent = AGENT_AI
-        use_ai = True
 
     if use_ai and session.state != STATE_HANDOFF_TO_HUMAN:
         return _process_ai_turn(
@@ -431,11 +440,9 @@ def process_qualification_turn(
         )
 
     if session.state == STATE_HANDOFF_TO_HUMAN:
+        # Legacy FSM post-handoff: silence (never sticky asesor spam).
         session.updated_at = now
-        return QualificationTurnResult(
-            session=session,
-            reply_text=_post_handoff_message(session.physical_location),
-        )
+        return QualificationTurnResult(session=session, reply_text="")
 
     if session.state == STATE_NEW_LEAD:
         session.state = STATE_AWAITING_PAYMENT_METHOD
@@ -519,10 +526,7 @@ def process_qualification_turn(
 
     session.state = STATE_HANDOFF_TO_HUMAN
     session.updated_at = now
-    return QualificationTurnResult(
-        session=session,
-        reply_text=_post_handoff_message(session.physical_location),
-    )
+    return QualificationTurnResult(session=session, reply_text="")
 
 
 def _process_ai_turn(
@@ -762,6 +766,7 @@ def _process_ai_turn(
         return QualificationTurnResult(
             session=session,
             reply_text=trade_reply,
+            odoo_create=session.lead_id is None,
             odoo_stage=stage_primer,
             routing=routing,
         )

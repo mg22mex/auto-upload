@@ -62,16 +62,26 @@ def handle_inbound_event(
 
     reply_sent = False
     reply_error: str | None = None
-    try:
-        whatsapp.send_text_message(
-            event.phone,
-            turn.reply_text,
-            instance=event.instance or None,
-            branch=turn.session.branch,
-        )
-        reply_sent = True
-    except Exception as exc:
-        reply_error = str(exc)
+    from src.whatsapp_worker.inbound import is_banned_handoff_auto_reply
+
+    reply = (turn.reply_text or "").strip()
+    if not reply or is_banned_handoff_auto_reply(reply):
+        reply_sent = False
+        if is_banned_handoff_auto_reply(reply):
+            logger.warning(
+                "Blocked banned sticky handoff auto-reply for %s", event.phone
+            )
+    else:
+        try:
+            whatsapp.send_text_message(
+                event.phone,
+                turn.reply_text,
+                instance=event.instance or None,
+                branch=turn.session.branch,
+            )
+            reply_sent = True
+        except Exception as exc:
+            reply_error = str(exc)
 
     store.save(turn.session)
     return {

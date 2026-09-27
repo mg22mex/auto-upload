@@ -143,7 +143,10 @@ class TestQualificationFlow(unittest.TestCase):
             "branch_id": 5,
             "physical_location": "San Felipe",
         }
-        self._ai = patch.dict(os.environ, {"AI_MG_QUOTE_LEADS": "false"})
+        self._ai = patch.dict(
+            os.environ,
+            {"AI_MG_QUOTE_LEADS": "false", "VAPI_WA_TEXT_FIRST": "false"},
+        )
         self._ai.start()
         self.addCleanup(self._ai.stop)
 
@@ -227,7 +230,8 @@ class TestQualificationFlow(unittest.TestCase):
         t1.session.state = STATE_HANDOFF_TO_HUMAN
         t2 = self._turn("¿y ahora?", t1.session)
         self.assertEqual(t2.session.state, STATE_HANDOFF_TO_HUMAN)
-        self.assertIn("asesor", t2.reply_text.lower())
+        self.assertEqual(t2.reply_text, "")
+        self.assertNotIn("ya está con un asesor", t2.reply_text.lower())
 
 
 class TestAiMgQuoteFlow(unittest.TestCase):
@@ -308,7 +312,9 @@ class TestAiMgQuoteFlow(unittest.TestCase):
         t1.session.appointment_time = "mañana 11am"
         t2 = self._turn("¿y ahora?", t1.session)
         self.assertEqual(t2.session.state, STATE_HANDOFF_TO_HUMAN)
-        self.assertIn("asesor", t2.reply_text.lower())
+        # Confirmed cita → silence (never canned sticky asesor spam).
+        self.assertEqual(t2.reply_text, "")
+        self.assertNotIn("ya está con un asesor", t2.reply_text.lower())
 
     def test_reset_to_ai_active(self):
         t1 = self._turn("Hola")
@@ -347,7 +353,7 @@ class TestVapiTextFirstBypassesHandoff(unittest.TestCase):
             contact_name="Marco",
             branch="periferico",
             physical_location="Periférico",
-            appointment_time="mañana 11am",
+            appointment_time="",  # no confirmed cita → Beatriz
             handling_agent="human_rep",
         )
         fake = MagicMock()
