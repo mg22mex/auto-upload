@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -12,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.assigner import ENV_RR_CURSOR_DB, clear_cursors, load_cursors  # noqa: E402
 from src.config import (  # noqa: E402
     ENV_DEFAULT_REP_PHONE,
     ENV_REPS_PERIFERICO,
@@ -50,6 +52,9 @@ class RepEnvTestCase(unittest.TestCase):
         self.addCleanup(patcher.stop)
         for key in _REP_ENV:
             os.environ.pop(key, None)
+        self._rr_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._rr_tmp.cleanup)
+        os.environ[ENV_RR_CURSOR_DB] = str(Path(self._rr_tmp.name) / "rr.db")
         reset_round_robin()
         clear_odoo_team_roster_cache()
         self.addCleanup(reset_round_robin)
@@ -61,12 +66,19 @@ class RepEnvTestCase(unittest.TestCase):
         periferico: list[SalesRep] | None = None,
         san_felipe: list[SalesRep] | None = None,
         default: str = "",
+        persist: bool = False,
+        cursor_db: Path | None = None,
     ) -> RoundRobinAssigner:
         table = {
             PRIMARY_BRANCH: periferico or [],
             PLACEHOLDER_BRANCH: san_felipe or [],
         }
-        return RoundRobinAssigner(table, default_phone=default)
+        return RoundRobinAssigner(
+            table,
+            default_phone=default,
+            persist=persist,
+            cursor_db=cursor_db,
+        )
 
 
 class TestRosterParsing(RepEnvTestCase):
@@ -234,6 +246,42 @@ class TestOdooTeamFallback(RepEnvTestCase):
 
         mock_load.assert_not_called()
         self.assertEqual(pick.odoo_id, 99)
+
+
+class TestPersistentCursor(RepEnvTestCase):
+    def test_restart_keeps_san_felipe_rotation(self):
+        """Desk → Francisco → Aaron survives a fresh assigner (simulated restart)."""
+        db = Path(self._rr_tmp.name) / "sf_rr.db"
+        sf = [
+            SalesRep(phone="+526141111111", odoo_id=None, name="Desk"),
+            SalesRep(phone="+526142222222", odoo_id=None, name="Francisco"),
+            SalesRep(phone="+526143333333", odoo_id=8, name="Aaron"),
+        ]
+        a1 = self.assigner(san_felipe=sf, persist=True, cursor_db=db)
+        first = a1.next_rep(PLACEHOLDER_BRANCH)
+        second = a1.next_rep(PLACEHOLDER_BRANCH)
+        self.assertEqual(first.rep_name, "Desk")
+        self.assertEqual(second.rep_name, "Francisco")
+        self.assertEqual(load_cursors(db).get(PLACEHOLDER_BRANCH), 2)
+
+        # Simulate service restart: new process, empty memory, same SQLite.
+        a2 = RoundRobinAssigner(
+            {PRIMARY_BRANCH: [], PLACEHOLDER_BRANCH: sf},
+            persist=True,
+            cursor_db=db,
+        )
+        third = a2.next_rep(PLACEHOLDER_BRANCH)
+        self.assertEqual(third.rep_name, "Aaron")
+        self.assertEqual(third.rotation_index, 2)
+        self.assertEqual(load_cursors(db).get(PLACEHOLDER_BRANCH), 3)
+
+    def test_reset_clears_disk(self):
+        db = Path(self._rr_tmp.name) / "reset_rr.db"
+        a = self.assigner(periferico=PERIFERICO, persist=True, cursor_db=db)
+        a.next_rep(PRIMARY_BRANCH)
+        self.assertEqual(load_cursors(db).get(PRIMARY_BRANCH), 1)
+        a.reset(PRIMARY_BRANCH)
+        self.assertNotIn(PRIMARY_BRANCH, load_cursors(db))
 
 
 if __name__ == "__main__":

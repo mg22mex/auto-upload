@@ -403,7 +403,23 @@ _MODEL_MAKE_ALIASES: dict[str, tuple[str, str]] = {
     "vento": ("Volkswagen", "Vento"),
     "mustang": ("Ford", "Mustang"),
     "ranger": ("Ford", "Ranger"),
+    "aveo": ("Chevrolet", "Aveo"),
+    "spark": ("Chevrolet", "Spark"),
+    "trax": ("Chevrolet", "Trax"),
+    "equinox": ("Chevrolet", "Equinox"),
 }
+
+# Purchase / inventory intent near a known model (not "tengo un corolla a cuenta").
+_DESIRE_VEHICLE_RE = re.compile(
+    r"(?:quiero|busco|me\s+interesa|cotizar|para\s+(?:ver|comprar|cotizar))\s+"
+    r"(?:un|una|el|la|ese|esa)?\s*"
+    r"(?:(?P<make>toyota|nissan|mazda|volkswagen|vw|honda|ford|chevrolet|"
+    r"chevy|kia|hyundai|mg|bmw|mercedes|audi)\s+)?"
+    r"(?P<model>corolla|camry|rav4|hilux|sentra|versa|np300|mazda3|cx-?5|"
+    r"jetta|vento|mustang|ranger|aveo|spark|trax|equinox)"
+    r"(?:\s+(?P<year>19\d{2}|20\d{2}))?",
+    re.IGNORECASE,
+)
 
 # When trim omitted, use market baseline (not stub) for Autométrica.
 _BASELINE_TRIM_BY_MODEL: dict[tuple[str, str], str] = {
@@ -709,6 +725,82 @@ def _extract_version(text: str) -> str:
 def extract_trade_in_version(text: str) -> str:
     """Public wrapper for trim/version extraction from free text."""
     return _extract_version(text)
+
+
+def extract_desired_vehicle(text: str) -> str | None:
+    """Pull inventory / purchase interest from free text (not trade-in).
+
+    Examples::
+
+        "Quiero un Aveo 2020" → "Chevrolet Aveo 2020"
+        "Tengo un Corolla a cuenta" → None (ownership / trade-in only)
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    # Prefer the last desire match (client often leads with trade-in, ends with target).
+    matches = list(_DESIRE_VEHICLE_RE.finditer(raw))
+    if not matches:
+        return None
+    m = matches[-1]
+    model_raw = (m.group("model") or "").strip()
+    make_raw = (m.group("make") or "").strip()
+    year_raw = m.group("year")
+    # Skip if this match sits inside a pure trade-in ownership clause without desire.
+    start = max(0, m.start() - 40)
+    window = raw[start : m.end()].casefold()
+    if re.search(
+        r"\b(?:tengo|tenemos|mi\s+auto|a\s+cuenta|toma\s+a\s+cuenta|"
+        r"dar\s+a\s+cuenta|permuta)\b",
+        window,
+    ) and not re.search(
+        r"\b(?:quiero|busco|me\s+interesa|cotizar|lo\s+vi|la\s+vi)\b",
+        window,
+    ):
+        # Look for an earlier/later desire match that is purchase-flavored.
+        for cand in reversed(matches[:-1]):
+            cwin = raw[max(0, cand.start() - 40) : cand.end()].casefold()
+            if re.search(
+                r"\b(?:quiero|busco|me\s+interesa|cotizar|lo\s+vi|la\s+vi)\b",
+                cwin,
+            ):
+                m = cand
+                model_raw = (m.group("model") or "").strip()
+                make_raw = (m.group("make") or "").strip()
+                year_raw = m.group("year")
+                break
+        else:
+            return None
+
+    alias = _MODEL_MAKE_ALIASES.get(model_raw.casefold().replace(" ", ""))
+    if not alias and model_raw.casefold().replace("-", "") == "cx5":
+        alias = _MODEL_MAKE_ALIASES.get("cx5")
+    if alias:
+        make, model = alias
+    elif make_raw:
+        make = "Volkswagen" if make_raw.casefold() == "vw" else (
+            "Chevrolet" if make_raw.casefold() == "chevy" else make_raw.title()
+        )
+        model = model_raw.title()
+    else:
+        return None
+
+    year = None
+    if year_raw:
+        try:
+            year = int(year_raw)
+        except ValueError:
+            year = None
+    if year is None:
+        # Year may follow after punctuation: "aveo 2020; lo vi"
+        after = raw[m.end() : m.end() + 12]
+        ym = _YEAR_RE.search(after)
+        if ym:
+            year = int(ym.group(0))
+    parts = [make, model]
+    if year is not None:
+        parts.append(str(year))
+    return " ".join(parts)
 
 
 def parse_trade_in_details(
@@ -1426,6 +1518,7 @@ __all__ = [
     "detect_forma_pago_permuta",
     "extract_tags",
     "extract_trade_in_version",
+    "extract_desired_vehicle",
     "format_ai_reply",
     "handle_outbound_voice_request",
     "handle_voice_appointment_result",

@@ -1084,6 +1084,38 @@ def chat_with_beatriz(
     prior_tradein = _prior_tradein_from_meta(meta_early)
     version_followup = extract_tradein_version(message)
 
+    # Explicit purchase interest ("quiero un Aveo 2020") → lock interested_vehicle
+    # BEFORE trade-in handling so Corolla valuation cannot mask the inventory unit.
+    try:
+        from src.lead_routing import extract_desired_vehicle
+        from src.voice_gateway.session_vehicle import remember_interested_vehicle
+
+        desired = extract_desired_vehicle(message)
+        if desired:
+            remember_interested_vehicle(
+                desired,
+                phone=phone,
+                instance=instance,
+                qualification_store=None,
+                chat_store=session,
+            )
+            try:
+                session.update_meta(
+                    phone,
+                    instance,
+                    interested_vehicle=desired,
+                    vehicle_name=desired,
+                )
+            except Exception:
+                pass
+            meta_early = {**meta_early, "interested_vehicle": desired, "vehicle_name": desired}
+            vehicle_interest = desired
+    except Exception as exc:
+        print(
+            f"WARN desired-vehicle bind failed phone={phone}: {exc}",
+            flush=True,
+        )
+
     # Clarifying trim after a prior Autométrica quote → re-run guide lookup.
     if prior_tradein is not None and version_followup and not detect_tradein_intent(message):
         try:
@@ -1159,15 +1191,18 @@ def chat_with_beatriz(
     appointment = detect_appointment_intent(message)
     if appointment.requested and not detect_tradein_intent(message):
         try:
+            # Re-read meta so early Aveo bind is visible to CRM booking.
+            meta_book = session.get_meta(phone, instance) or meta_early
             booked = force_book_appointment(
                 text=message,
                 phone=phone,
                 customer_name=customer_name,
                 branch=branch,
                 instance=instance,
-                meta=meta_early,
+                meta=meta_book,
                 prior_tradein=prior_tradein,
-                vehicle_interest=vehicle_interest,
+                vehicle_interest=vehicle_interest
+                or str(meta_book.get("interested_vehicle") or ""),
                 manager=manager,
             )
             speech = str(booked.get("speech") or "").strip()

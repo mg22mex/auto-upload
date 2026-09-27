@@ -1168,10 +1168,12 @@ def clear_odoo_team_roster_cache(branch: str | None = None) -> None:
 class RoundRobinAssigner:
     """Index-based rotation over each branch's rep roster.
 
-    State is a per-branch counter held in this process. Rosters are re-read on
-    every pick (unless injected) so an env change lands without a restart; the
-    counter is modulo'd by the current roster length, so adding or removing a
-    rep never breaks the rotation.
+    Rosters are re-read on every pick (unless injected) so an env change lands
+    without a restart; the counter is modulo'd by the current roster length.
+
+    When ``persist`` is True (default for the process-wide assigner), the
+    next-index cursor is loaded from / saved to SQLite (``src.assigner``) so
+    deploy restarts do not reset rotation to index 0.
 
     When the env roster is empty (and no injected table), falls back to
     ``crm.team.member_ids`` via XML-RPC.
@@ -1182,11 +1184,39 @@ class RoundRobinAssigner:
         reps: dict[str, list[SalesRep]] | None = None,
         *,
         default_phone: str | None = None,
+        persist: bool | None = None,
+        cursor_db: Any | None = None,
     ) -> None:
         self._reps = reps
         self._default_phone = default_phone
+        # Injected test tables → memory-only unless explicitly persist=True.
+        if persist is None:
+            persist = reps is None
+        self._persist = bool(persist)
+        self._cursor_db = cursor_db
         self._cursor: dict[str, int] = {}
         self._lock = Lock()
+        if self._persist:
+            self._hydrate()
+
+    def _hydrate(self) -> None:
+        from src.assigner import load_cursors
+
+        try:
+            loaded = load_cursors(self._cursor_db)
+        except Exception:
+            loaded = {}
+        if loaded:
+            self._cursor.update(
+                {normalize_crm_branch(k): int(v) for k, v in loaded.items()}
+            )
+
+    def _persist_branch(self, branch: str, next_index: int) -> None:
+        if not self._persist:
+            return
+        from src.assigner import save_cursor
+
+        save_cursor(branch, next_index, path=self._cursor_db)
 
     def roster(self, branch: str) -> list[SalesRep]:
         table = self._reps if self._reps is not None else load_branch_reps()
@@ -1209,6 +1239,13 @@ class RoundRobinAssigner:
                 self._cursor.clear()
             else:
                 self._cursor.pop(normalize_crm_branch(branch), None)
+        if self._persist:
+            from src.assigner import clear_cursors
+
+            clear_cursors(
+                None if branch is None else normalize_crm_branch(branch),
+                path=self._cursor_db,
+            )
 
     def next_rep(
         self,
@@ -1248,6 +1285,8 @@ class RoundRobinAssigner:
         with self._lock:
             index = self._cursor.get(requested, 0) % len(roster)
             self._cursor[requested] = index + 1
+            next_idx = self._cursor[requested]
+        self._persist_branch(requested, next_idx)
         rep = roster[index]
         return RepAssignment(
             branch=requested,
@@ -1259,7 +1298,7 @@ class RoundRobinAssigner:
         )
 
 
-_ASSIGNER = RoundRobinAssigner()
+_ASSIGNER = RoundRobinAssigner(persist=True)
 
 
 def assign_lead_owner(

@@ -7,7 +7,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from src.lead_routing import parse_payment_intent, parse_trade_in_details
+from src.lead_routing import (
+    extract_desired_vehicle,
+    parse_payment_intent,
+    parse_trade_in_details,
+)
 from src.quote_engine.autometrica import lookup_valor_compra
 from src.voice_gateway.vapi_chat import (
     detect_tradein_intent,
@@ -96,6 +100,106 @@ class TestForceTradeinValuation(unittest.TestCase):
                         sess.down_payment.startswith("201200")
                         or "201200" in sess.down_payment.replace(",", "")
                     )
+                finally:
+                    store.close()
+                    reset_chat_store_for_tests()
+
+
+class TestDesiredVehicle(unittest.TestCase):
+    def test_aveo_purchase_intent(self):
+        label = extract_desired_vehicle(
+            "Hola. Tomas a cuenta vehiculos? Tengo un corolla 2020 le "
+            "con 50000kms. Quiero un aveo 2020; lo vi en san felipe."
+        )
+        self.assertEqual(label, "Chevrolet Aveo 2020")
+
+    def test_trade_in_only_no_desire(self):
+        self.assertIsNone(
+            extract_desired_vehicle(
+                "Tengo un corolla 2020 le con 50000 kms a cuenta"
+            )
+        )
+
+    def test_mustang_desire(self):
+        self.assertEqual(
+            extract_desired_vehicle("Quiero un mustang 2024"),
+            "Ford Mustang 2024",
+        )
+
+    def test_chat_binds_aveo_before_tradein(self):
+        from src.voice_gateway.vapi_chat import (
+            VapiChatSessionStore,
+            chat_with_beatriz,
+            reset_chat_store_for_tests,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            qpath = Path(tmp) / "q.db"
+            chat_path = Path(tmp) / "chat.db"
+            phone = "6149998877"
+            with patch.dict(
+                os.environ,
+                {
+                    "WA_QUALIFICATION_DB_PATH": str(qpath),
+                    "VAPI_WA_CHAT_DB_PATH": str(chat_path),
+                    "VAPI_API_KEY": "",
+                },
+                clear=False,
+            ):
+                reset_chat_store_for_tests()
+                store = QualificationStore(qpath)
+                chat = VapiChatSessionStore(chat_path)
+                try:
+                    store.save(
+                        QualificationSession(
+                            phone=phone,
+                            instance="autosell_san_felipe",
+                            state=STATE_AI_ACTIVE,
+                            branch="san_felipe",
+                            updated_at="2026-01-01T00:00:00Z",
+                        )
+                    )
+                    with patch(
+                        "src.voice_gateway.vapi_chat.force_get_tradein_valuation",
+                        return_value={
+                            "ok": True,
+                            "speech": (
+                                "Estimación de toma a cuenta para Toyota Corolla "
+                                "2020 LE (50,000 km): ~$201,200 MXN"
+                            ),
+                            "details": {
+                                "make": "Toyota",
+                                "model": "Corolla",
+                                "year": 2020,
+                                "mileage_km": 50000,
+                                "version": "LE",
+                            },
+                        },
+                    ):
+                        result = chat_with_beatriz(
+                            text=(
+                                "Tomas a cuenta? Tengo un corolla 2020 le "
+                                "con 50000kms. Quiero un aveo 2020; lo vi "
+                                "en san felipe."
+                            ),
+                            phone=phone,
+                            instance="autosell_san_felipe",
+                            branch="san_felipe",
+                            store=chat,
+                        )
+                    meta = chat.get_meta(phone, "autosell_san_felipe")
+                    self.assertEqual(
+                        meta.get("interested_vehicle"), "Chevrolet Aveo 2020"
+                    )
+                    self.assertTrue(
+                        result.tradein_sent
+                        or meta.get("trade_in_label")
+                        or meta.get("tradein_summary"),
+                        msg=f"trade-in missing: result={result!r} meta={meta}",
+                    )
+                    sess = store.get(phone, "autosell_san_felipe")
+                    assert sess is not None
+                    self.assertEqual(sess.vehicle_interest, "Chevrolet Aveo 2020")
                 finally:
                     store.close()
                     reset_chat_store_for_tests()
