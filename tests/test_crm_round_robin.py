@@ -28,6 +28,7 @@ from src.odoo_sync.crm import (  # noqa: E402
     PRIMARY_BRANCH,
     RoundRobinAssigner,
     assign_lead_owner,
+    clear_odoo_team_roster_cache,
     reset_round_robin,
 )
 
@@ -50,7 +51,9 @@ class RepEnvTestCase(unittest.TestCase):
         for key in _REP_ENV:
             os.environ.pop(key, None)
         reset_round_robin()
+        clear_odoo_team_roster_cache()
         self.addCleanup(reset_round_robin)
+        self.addCleanup(clear_odoo_team_roster_cache)
 
     @staticmethod
     def assigner(
@@ -198,6 +201,39 @@ class TestSharedRotation(RepEnvTestCase):
         os.environ[ENV_REPS_PERIFERICO] = '[{"odoo_id": 9, "phone": "+526149999999"}]'
 
         self.assertEqual(assign_lead_owner(PRIMARY_BRANCH).odoo_id, 9)
+
+
+class TestOdooTeamFallback(RepEnvTestCase):
+    def test_empty_env_loads_crm_team_members(self):
+        os.environ["ODOO_TEAM_PERIFERICO"] = "1"
+        odoo_reps = [
+            SalesRep(phone="+526141639458", odoo_id=2, name="Alfonso"),
+            SalesRep(phone="", odoo_id=13, name="Gonzalo"),
+        ]
+
+        with patch(
+            "src.odoo_sync.crm.load_reps_from_odoo_team",
+            return_value=odoo_reps,
+        ) as mock_load:
+            pick = RoundRobinAssigner().next_rep(PRIMARY_BRANCH)
+
+        mock_load.assert_called_once_with(PRIMARY_BRANCH)
+        self.assertEqual(pick.odoo_id, 2)
+        self.assertEqual(pick.phone, "+526141639458")
+        self.assertEqual(pick.rep_name, "Alfonso")
+
+    def test_env_roster_skips_odoo_fallback(self):
+        os.environ[ENV_REPS_PERIFERICO] = (
+            '[{"odoo_id": 99, "phone": "+526141111111", "name": "Env"}]'
+        )
+        with patch(
+            "src.odoo_sync.crm.load_reps_from_odoo_team",
+            return_value=[SalesRep(phone="+526149999999", odoo_id=2)],
+        ) as mock_load:
+            pick = RoundRobinAssigner().next_rep(PRIMARY_BRANCH)
+
+        mock_load.assert_not_called()
+        self.assertEqual(pick.odoo_id, 99)
 
 
 if __name__ == "__main__":

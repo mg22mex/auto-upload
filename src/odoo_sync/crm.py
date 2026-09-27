@@ -18,6 +18,7 @@ from src.config import (
     branch_for_tag,
     default_rep_phone,
     load_branch_reps,
+    normalize_rep_phone,
 )
 from src.odoo_sync.base import OdooCRMError
 from src.odoo_sync.client import OdooCRMClient
@@ -1022,6 +1023,148 @@ class RepAssignment:
         }
 
 
+_ODOO_TEAM_ROSTER_CACHE: dict[str, list[SalesRep]] = {}
+_ODOO_TEAM_ROSTER_LOCK = Lock()
+
+
+def _first_phone(*candidates: Any) -> str:
+    for raw in candidates:
+        if raw in (None, False, ""):
+            continue
+        phone = normalize_rep_phone(str(raw))
+        if phone:
+            return phone
+    return ""
+
+
+def fetch_team_member_reps(
+    client: OdooCRMClient,
+    team_id: int,
+) -> list[SalesRep]:
+    """Build a SalesRep roster from ``crm.team.member_ids`` (XML-RPC).
+
+    Phones come from ``res.users`` then the linked ``res.partner``. Entries
+    without a phone are kept (CRM assignment still works; WhatsApp uses
+    ``DEFAULT_REP_PHONE`` via ``RoundRobinAssigner``).
+    """
+    teams = client.execute_kw(
+        "crm.team",
+        "read",
+        [[int(team_id)]],
+        {"fields": ["member_ids", "name"]},
+    )
+    if not teams:
+        return []
+    member_ids = [int(x) for x in (teams[0].get("member_ids") or []) if x]
+    if not member_ids:
+        return []
+
+    users = client.execute_kw(
+        "res.users",
+        "read",
+        [member_ids],
+        {
+            "fields": [
+                "id",
+                "name",
+                "active",
+                "partner_id",
+                "phone",
+                "work_phone",
+                "mobile_phone",
+                "private_phone",
+                "phone_sanitized",
+            ]
+        },
+    )
+    partner_ids = [
+        int(u["partner_id"][0])
+        for u in users
+        if isinstance(u.get("partner_id"), (list, tuple)) and u["partner_id"]
+    ]
+    partners_by_id: dict[int, dict[str, Any]] = {}
+    if partner_ids:
+        partner_fields = ["id", "name", "phone", "phone_sanitized"]
+        partners = client.execute_kw(
+            "res.partner",
+            "read",
+            [partner_ids],
+            {"fields": partner_fields},
+        )
+        partners_by_id = {int(p["id"]): p for p in partners}
+
+    # Preserve crm.team member order.
+    by_id = {int(u["id"]): u for u in users}
+    reps: list[SalesRep] = []
+    for uid in member_ids:
+        user = by_id.get(uid)
+        if not user or user.get("active") is False:
+            continue
+        partner = {}
+        if isinstance(user.get("partner_id"), (list, tuple)) and user["partner_id"]:
+            partner = partners_by_id.get(int(user["partner_id"][0])) or {}
+        phone = _first_phone(
+            user.get("phone_sanitized"),
+            user.get("mobile_phone"),
+            user.get("private_phone"),
+            user.get("work_phone"),
+            user.get("phone"),
+            partner.get("phone_sanitized"),
+            partner.get("phone"),
+        )
+        reps.append(
+            SalesRep(
+                phone=phone,
+                odoo_id=uid,
+                name=str(user.get("name") or "").strip(),
+            )
+        )
+    return reps
+
+
+def load_reps_from_odoo_team(branch: str) -> list[SalesRep]:
+    """Env-roster miss → pull active ``crm.team`` members for the branch."""
+    key = normalize_crm_branch(branch)
+    with _ODOO_TEAM_ROSTER_LOCK:
+        cached = _ODOO_TEAM_ROSTER_CACHE.get(key)
+        if cached is not None:
+            return list(cached)
+
+    team_id = load_branch_teams().get(key)
+    if not team_id:
+        return []
+    try:
+        client = OdooCRMClient()
+        client.authenticate()
+        reps = fetch_team_member_reps(client, int(team_id))
+    except Exception as exc:
+        print(
+            f"WARN CRM Odoo team roster fallback branch={key!r} "
+            f"team_id={team_id}: {type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        return []
+
+    if reps:
+        print(
+            f"INFO CRM roster fallback: branch={key!r} team_id={team_id} "
+            f"loaded {len(reps)} rep(s) from crm.team.member_ids",
+            flush=True,
+        )
+    with _ODOO_TEAM_ROSTER_LOCK:
+        _ODOO_TEAM_ROSTER_CACHE[key] = list(reps)
+    return list(reps)
+
+
+def clear_odoo_team_roster_cache(branch: str | None = None) -> None:
+    """Drop cached Odoo team rosters (tests / after env edits)."""
+    with _ODOO_TEAM_ROSTER_LOCK:
+        if branch is None:
+            _ODOO_TEAM_ROSTER_CACHE.clear()
+        else:
+            _ODOO_TEAM_ROSTER_CACHE.pop(normalize_crm_branch(branch), None)
+
+
 class RoundRobinAssigner:
     """Index-based rotation over each branch's rep roster.
 
@@ -1029,6 +1172,9 @@ class RoundRobinAssigner:
     every pick (unless injected) so an env change lands without a restart; the
     counter is modulo'd by the current roster length, so adding or removing a
     rep never breaks the rotation.
+
+    When the env roster is empty (and no injected table), falls back to
+    ``crm.team.member_ids`` via XML-RPC.
     """
 
     def __init__(
@@ -1044,7 +1190,13 @@ class RoundRobinAssigner:
 
     def roster(self, branch: str) -> list[SalesRep]:
         table = self._reps if self._reps is not None else load_branch_reps()
-        return list(table.get(branch) or [])
+        env_reps = list(table.get(branch) or [])
+        if env_reps:
+            return env_reps
+        # Injected empty table (tests) stays empty — no live Odoo call.
+        if self._reps is not None:
+            return []
+        return load_reps_from_odoo_team(branch)
 
     def fallback_phone(self) -> str:
         if self._default_phone is not None:
@@ -1131,6 +1283,9 @@ __all__ = [
     "RepAssignment",
     "RoundRobinAssigner",
     "assign_lead_owner",
+    "clear_odoo_team_roster_cache",
+    "fetch_team_member_reps",
+    "load_reps_from_odoo_team",
     "reset_round_robin",
     "ENV_MEDIUM_ID",
     "ENV_SOURCE_ID",
