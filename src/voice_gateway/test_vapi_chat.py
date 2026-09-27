@@ -185,6 +185,7 @@ class TestTradeinVersionFollowup(unittest.TestCase):
 
 class TestTradeinOverridesMustangContext(unittest.TestCase):
     def test_tradein_short_circuits_before_vapi(self):
+        """Trade-in short-circuits Vapi; inventory interest stays sticky."""
         from src.voice_gateway import vapi_chat as vc
 
         forced = {
@@ -228,6 +229,7 @@ class TestTradeinOverridesMustangContext(unittest.TestCase):
                     vehicle_interest="Ford Mustang GT 2025",
                     store=store,
                 )
+            meta = store.get_meta("6143231198")
         http.assert_not_called()
         force_fin.assert_not_called()
         force_ti.assert_called_once()
@@ -235,7 +237,9 @@ class TestTradeinOverridesMustangContext(unittest.TestCase):
         self.assertIn("get_tradein_valuation", result.tools_called)
         self.assertIn("201,200", result.reply_text)
         self.assertNotIn("Mustang", result.reply_text)
-        self.assertIn("Corolla", result.interested_vehicle or "")
+        self.assertIn("Corolla", result.tradein_summary or "")
+        self.assertIn("Mustang", result.interested_vehicle or "")
+        self.assertIn("Corolla", str(meta.get("trade_in_label") or ""))
 
 
 class TestAppointmentSkipsFinancing(unittest.TestCase):
