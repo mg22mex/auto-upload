@@ -182,7 +182,46 @@ class TestCarAThenCarBThenAppointment(unittest.TestCase):
         # positional: name, phone, vehicle_name, branch_id
         self.assertEqual(_args[2], "Toyota Corolla 2022")
 
-    def test_lead_payload_binds_last_vehicle_on_appointment(self):
+    def test_lead_payload_prefers_explicit_vehicle_over_sticky(self):
+        from src.voice_gateway.vapi_bridge import handle_lead_payload
+
+        remember_interested_vehicle(
+            "Ford Mustang 2024",
+            phone=self.phone,
+            instance=self.instance,
+            qualification_store=self.qstore,
+            chat_store=self.cstore,
+        )
+        manager = MagicMock()
+        manager.create_or_update_lead.return_value = {
+            "status": "updated",
+            "lead_id": 55,
+            "branch": "san_felipe",
+            "dry_run": False,
+            "stage_name": "Beatriz Cita",
+            "assignment": {
+                "branch": "san_felipe",
+                "phone": "+526142417711",
+                "odoo_id": None,
+                "rep_name": "Francisco",
+            },
+        }
+        resp = handle_lead_payload(
+            {
+                "name": "Marco",
+                "phone": self.phone,
+                "interested_vehicle": "Chevrolet Aveo 2020",
+                "appointment_date": "lunes 10am",
+                "branch": "san_felipe",
+            },
+            manager=manager,
+        )
+        self.assertIn("Marco", resp.results[0].result)
+        payload = manager.create_or_update_lead.call_args.args[0]
+        self.assertEqual(payload["vehicle_name"], "Chevrolet Aveo 2020")
+        self.assertNotIn("Mustang", payload["vehicle_name"])
+
+    def test_lead_payload_fills_blank_from_session(self):
         from src.voice_gateway.vapi_bridge import handle_lead_payload
 
         remember_interested_vehicle(
@@ -209,8 +248,6 @@ class TestCarAThenCarBThenAppointment(unittest.TestCase):
                 {
                     "name": "Marco",
                     "phone": self.phone,
-                    # Stale LLM arg — should be overridden by session Car B.
-                    "interested_vehicle": "Ford Ranger XLT 2021",
                     "appointment_date": "mañana 11am",
                 },
                 manager=manager,
@@ -218,8 +255,6 @@ class TestCarAThenCarBThenAppointment(unittest.TestCase):
         self.assertIn("Marco", resp.results[0].result)
         payload = manager.create_or_update_lead.call_args.args[0]
         self.assertEqual(payload["vehicle_name"], "Toyota Corolla 2022")
-        self.assertNotIn("Ranger", payload["vehicle_name"])
-
 
 class TestFinancingUpdatesSession(unittest.TestCase):
     def test_handle_financing_remembers_vehicle(self):

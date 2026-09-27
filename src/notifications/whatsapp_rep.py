@@ -161,6 +161,23 @@ def notify_rep(
     pick = assignment or assign_lead_owner(branch, tag=tag)
     rep_phone = normalize_rep_phone(pick.phone)
     if not rep_phone:
+        from src.assigner import resolve_roster_phone
+
+        rep_phone = resolve_roster_phone(
+            branch=pick.branch or branch,
+            odoo_id=pick.odoo_id,
+            rep_name=pick.rep_name,
+        )
+    if not rep_phone:
+        fresh = assign_lead_owner(branch or pick.branch, tag=tag)
+        rep_phone = normalize_rep_phone(fresh.phone) or resolve_roster_phone(
+            branch=fresh.branch,
+            odoo_id=fresh.odoo_id,
+            rep_name=fresh.rep_name,
+        )
+        if rep_phone:
+            pick = fresh
+    if not rep_phone:
         return RepNotifyResult(
             sent=False,
             branch=pick.branch,
@@ -232,6 +249,25 @@ def notify_appointment_rep(
 
     pick = assignment or assign_lead_owner(branch)
     rep_phone = normalize_rep_phone(pick.phone)
+    if not rep_phone:
+        # Phone-only desk / cross-branch CRM user_id → resolve from REPS_*.
+        from src.assigner import resolve_roster_phone
+
+        rep_phone = resolve_roster_phone(
+            branch=pick.branch or branch,
+            odoo_id=pick.odoo_id,
+            rep_name=pick.rep_name,
+        )
+    if not rep_phone:
+        # Last resort: rotate a fresh roster pick that has a phone.
+        fresh = assign_lead_owner(branch or pick.branch)
+        rep_phone = normalize_rep_phone(fresh.phone) or resolve_roster_phone(
+            branch=fresh.branch,
+            odoo_id=fresh.odoo_id,
+            rep_name=fresh.rep_name,
+        )
+        if rep_phone:
+            pick = fresh
     if not rep_phone:
         return RepNotifyResult(
             sent=False,

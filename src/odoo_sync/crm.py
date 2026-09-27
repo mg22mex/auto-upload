@@ -377,9 +377,12 @@ class CRMLeadManager:
                     "phone": phone_digits,
                     "description": description,
                 }
+                # Force title onto existing leads when vehicle interest is known.
+                if vehicle_info:
+                    update_vals["name"] = title
                 if email:
                     update_vals["email_from"] = email
-                if team_id is not None and not preserve_owner:
+                if team_id is not None and (not preserve_owner or appointment):
                     update_vals["team_id"] = int(team_id)
                 if medium_id is not None:
                     update_vals["medium_id"] = int(medium_id)
@@ -391,18 +394,28 @@ class CRMLeadManager:
 
                 if assign_rr and (appointment or stage_name):
                     existing_owner = self._read_lead_user_id(int(existing_id))
-                    if existing_owner is None or not preserve_owner:
+                    # Appointments always rotate RR (WA phone + optional user_id).
+                    # Non-appointment updates only RR when owner unset / not preserved.
+                    do_rr = bool(appointment) or existing_owner is None or not preserve_owner
+                    if do_rr:
                         try:
                             assignment = assign_lead_owner(effective_branch)
                             assignment_meta = assignment.as_dict()
                             if assignment.odoo_id:
                                 assigned_user_id = int(assignment.odoo_id)
                                 update_vals["user_id"] = assigned_user_id
+                            elif existing_owner is not None:
+                                assigned_user_id = int(existing_owner)
                         except Exception as exc:
                             print(
                                 f"WARN CRMLeadManager RR on update "
                                 f"lead={existing_id}: {exc}"
                             )
+                            if existing_owner is not None:
+                                assigned_user_id = int(existing_owner)
+                                assignment_meta = self._assignment_from_user_id(
+                                    effective_branch, assigned_user_id
+                                )
                     elif existing_owner is not None:
                         assigned_user_id = int(existing_owner)
                         assignment_meta = self._assignment_from_user_id(
@@ -789,6 +802,7 @@ class CRMLeadManager:
         self, branch: str, user_id: int
     ) -> dict[str, Any] | None:
         """Map an existing Odoo salesperson to a roster phone for WhatsApp."""
+        from src.assigner import resolve_roster_phone
         from src.config import load_branch_reps
 
         roster = load_branch_reps().get(normalize_crm_branch(branch)) or []
@@ -800,9 +814,10 @@ class CRMLeadManager:
                     odoo_id=rep.odoo_id,
                     rep_name=rep.name,
                 ).as_dict()
+        phone = resolve_roster_phone(branch=branch, odoo_id=int(user_id))
         return RepAssignment(
             branch=normalize_crm_branch(branch),
-            phone="",
+            phone=phone,
             odoo_id=int(user_id),
             rep_name="",
         ).as_dict()

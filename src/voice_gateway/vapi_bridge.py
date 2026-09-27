@@ -2055,33 +2055,47 @@ def handle_lead_payload(
     for call_id, args in calls:
         if args.lead_id is None and context_lead_id is not None:
             args = args.model_copy(update={"lead_id": context_lead_id})
-        # Appointment / CRM bind LAST inventory vehicle from session.
-        # Trade-in must never occupy interested_vehicle (see persist_tradein /
-        # _tradein_meta_fields) so sticky Corolla cannot beat Mustang.
+        # Explicit tool/session vehicle wins. Sticky resolve only fills blanks —
+        # never overwrite Chevrolet Aveo with a stale Mustang from another instance.
         try:
-            from src.voice_gateway.session_vehicle import resolve_interested_vehicle
+            from src.voice_gateway.session_vehicle import (
+                remember_interested_vehicle,
+                resolve_interested_vehicle,
+            )
             from src.voice_gateway.vapi_chat import get_chat_store
 
             wa_ctx = extract_whatsapp_context(payload)
             phone = (args.phone or wa_ctx.get("phone") or "").strip()
             digits = re.sub(r"\D", "", phone)
+            instance = str(wa_ctx.get("instance") or "").strip()
             updates: dict[str, Any] = {}
-            last_vehicle = resolve_interested_vehicle(
-                phone,
-                fallback=args.interested_vehicle,
-            )
-            if last_vehicle and (
-                (args.appointment_date or "").strip()
-                or not (args.interested_vehicle or "").strip()
-                or last_vehicle.casefold()
-                != (args.interested_vehicle or "").strip().casefold()
-            ):
-                updates["interested_vehicle"] = last_vehicle
+            explicit = (args.interested_vehicle or "").strip()
+            if explicit:
+                updates["interested_vehicle"] = explicit
+                try:
+                    remember_interested_vehicle(
+                        explicit,
+                        phone=phone,
+                        instance=instance or None,
+                    )
+                except Exception:
+                    logger.exception("lead remember_interested_vehicle failed")
+            else:
+                last_vehicle = resolve_interested_vehicle(
+                    phone,
+                    instance=instance or None,
+                    fallback=None,
+                )
+                if last_vehicle:
+                    updates["interested_vehicle"] = last_vehicle
             if not (args.branch or "").strip() and wa_ctx.get("branch"):
                 updates["branch"] = str(wa_ctx["branch"]).strip()
             if not (args.tradein_summary or "").strip() and digits:
                 try:
-                    meta = get_chat_store().get_meta(digits, "")
+                    cs = get_chat_store()
+                    meta = cs.get_meta(digits, instance or "")
+                    if not meta.get("tradein_summary") and not meta.get("trade_in_label"):
+                        meta = cs.get_meta(digits, "")
                     summary = str(meta.get("tradein_summary") or "").strip()
                     label = str(meta.get("trade_in_label") or "").strip()
                     amount = meta.get("valor_compra") or meta.get("net_trade_in_equity")

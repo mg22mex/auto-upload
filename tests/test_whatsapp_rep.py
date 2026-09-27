@@ -167,6 +167,33 @@ class TestNotifyAppointmentRep(RepNotifyTestCase):
         self.assertIn("Beatriz Cita", self.client.sent[0]["text"])
         self.assertIn("Luis", self.client.sent[0]["text"])
 
+    def test_phone_only_rep_falls_back_to_env_roster(self):
+        """CRM user_id without phone → resolve Francisco from REPS_SAN_FELIPE."""
+        os.environ[ENV_ENABLED] = "true"
+        os.environ[ENV_REPS_SAN_FELIPE] = (
+            '[{"phone": "+526142274381", "name": "Desk"},'
+            ' {"phone": "+526142417711", "name": "Francisco"},'
+            ' {"odoo_id": 8, "phone": "+526142349504", "name": "Aaron"}]'
+        )
+        pick = RepAssignment(
+            branch="san_felipe",
+            phone="",
+            odoo_id=None,
+            rep_name="Francisco",
+        )
+        result = notify_appointment_rep(
+            customer_name="Marco",
+            client_phone="5216141754852",
+            branch="san_felipe",
+            interested_vehicle="Chevrolet Aveo 2020",
+            appointment_date="lunes 10am",
+            assignment=pick,
+            whatsapp_client=self.client,
+        )
+        self.assertTrue(result.sent)
+        self.assertEqual(result.phone, "+526142417711")
+        self.assertIn("Aveo", self.client.sent[0]["text"])
+
 
 class TestNotifyRep(RepNotifyTestCase):
     def test_sends_to_rotated_rep(self):
