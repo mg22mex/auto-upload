@@ -273,6 +273,7 @@ flowchart TD
 | Enable **account_3** in scheduled sync | High | After operator clears old FB listings; add to `active_accounts` |
 | **Repost with holds** | Done | `run_repost.py`, `fb_repost_hold.py`, `repost_holds` table |
 | Scheduled listing repost/relist | Done | `.github/workflows/repost.yml` — Wed+Sun 09:00 Chihuahua; default repost ≥3d |
+| Sales rep Round Robin + Evolution notify | Done | `data/rr_cursor.db`, `REPS_*`, identity + `wa.me` on rep cards (2026-09) |
 | Richer **update** (photos, title, mileage) | Medium | Today: price + description only |
 | Inventory FB dashboard (discover untracked listings) | Low | Avoids manual wipe; complex / fragile |
 | One-off `fb_clear_listings.py` (mark sold) | Low | Only if inventory is huge; prefer manual |
@@ -286,6 +287,30 @@ flowchart TD
 | Live sync account_1 + account_2 | Done | Jul 2026; `DRY_RUN=false` |
 | Account scoping (`active_accounts`) | Done | config.yaml + `--accounts` + `SYNC_ACCOUNTS` |
 | Slot cap + FIFO waitlist rotation | Done | Sep 2026; cap 40, overflow removals, FIFO yields |
+
+---
+
+## Pending Integration Backlog
+
+Cross-cutting ops blockers and the next CRM product module. Mirrored in [STATUS.md](../STATUS.md#pending-integration-backlog).
+
+### Environment Secrets
+- [ ] **`WEB_LEADS_IMAP_PASSWORD`** (with `WEB_LEADS_IMAP_HOST` / `USER` / `PORT`) for **`marketing@autosell.mx`** web-lead ingestion (`src/web_leads/`, `scripts/parse_web_leads.py`, `deploy/web-leads-imap.timer`).
+- [ ] On Oracle: write secrets to `.env`, then `systemctl enable --now web-leads-imap.timer`.
+
+### DNS Migration
+- [ ] Neubox DNS: **CNAME** `vapi.autosell.mx` → Cloudflare named-tunnel hostname (connector already registered on the VPS). Until then, Beatriz tools use ephemeral `*.trycloudflare.com` + `scripts/sync_vapi_tool_urls.py`.
+
+### Meta Manager
+- [ ] **Page Access Tokens** — `FB_VERIFY_TOKEN`, `FB_PAGE_ACCESS_TOKEN` so `src/meta_gateway/` can verify webhooks and reply via Graph `/me/messages`.
+- [ ] **Meta WhatsApp API** credentials — set `ODOO_WA_ACCOUNT_PERIFERICO` / `ODOO_WA_ACCOUNT_SAN_FELIPE`; until then native Odoo templates stay `queued_pending_meta` (`src/odoo_sync/whatsapp.py` / triggers).
+
+### Lead Conversion & Commission Attribution Module
+- [ ] **Not started.** Design and implement commission tracking tied to **CRM closed deals** (won / sold stage or linked sale order):
+  1. Capture closing event on `crm.lead` / opportunity.
+  2. Resolve selling advisor (`user_id` / Round Robin roster `odoo_id` + phone).
+  3. Persist commission amount / rate / branch / vehicle SKU for reporting or payroll export.
+- **Dependency:** phone-only roster entries (e.g. Francisco without `res.users` id) need a durable advisor key before payout attribution is reliable.
 
 ---
 
