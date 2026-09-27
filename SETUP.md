@@ -515,6 +515,8 @@ grep -Eo 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/oracle_quick_tunnel.l
 # Manual one-shot sync (any live base URL):
 #   .venv/bin/python scripts/sync_vapi_tool_urls.py --from-log /tmp/oracle_quick_tunnel.log
 #   .venv/bin/python scripts/sync_vapi_tool_urls.py --base-url https://….trycloudflare.com
+# Force inventory tool sync (async=false, no request-start, model param):
+#   .venv/bin/python scripts/configure_vapi_inventory_tool.py
 
 # Ad-hoc (no systemd): also syncs when VAPI_SYNC_ON_QUICK_TUNNEL=1 (default)
 #   bash scripts/start_quick_tunnel.sh
