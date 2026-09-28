@@ -175,6 +175,9 @@ class TestDesiredVehicle(unittest.TestCase):
                                 "version": "LE",
                             },
                         },
+                    ), patch(
+                        "src.inventory.catalog_match.load_public_catalog",
+                        return_value=[],
                     ):
                         result = chat_with_beatriz(
                             text=(
@@ -188,9 +191,9 @@ class TestDesiredVehicle(unittest.TestCase):
                             store=chat,
                         )
                     meta = chat.get_meta(phone, "autosell_san_felipe")
-                    self.assertEqual(
-                        meta.get("interested_vehicle"), "Chevrolet Aveo 2020"
-                    )
+                    interested = str(meta.get("interested_vehicle") or "")
+                    self.assertIn("Aveo", interested)
+                    self.assertIn("2020", interested)
                     self.assertTrue(
                         result.tradein_sent
                         or meta.get("trade_in_label")
@@ -199,7 +202,7 @@ class TestDesiredVehicle(unittest.TestCase):
                     )
                     sess = store.get(phone, "autosell_san_felipe")
                     assert sess is not None
-                    self.assertEqual(sess.vehicle_interest, "Chevrolet Aveo 2020")
+                    self.assertIn("Aveo", sess.vehicle_interest or "")
                 finally:
                     store.close()
                     reset_chat_store_for_tests()

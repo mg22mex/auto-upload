@@ -167,7 +167,17 @@ def apply_vehicle_location_team(
         )
         return PLACEHOLDER_BRANCH, team_id, fell_back, True
 
-    # periferico or unknown → inbound branch parameter logic
+    if physical_location == PRIMARY_BRANCH and inbound != PRIMARY_BRANCH:
+        pe_team = table.get(PRIMARY_BRANCH)
+        if pe_team is not None:
+            return PRIMARY_BRANCH, pe_team, False, True
+        print(
+            f"WARN CRM physical location is {PRIMARY_BRANCH!r} but "
+            f"Periférico team unset; team stays {inbound!r}/{team_id}"
+        )
+        return PRIMARY_BRANCH, team_id, fell_back, True
+
+    # unknown → inbound branch parameter logic
     return inbound, team_id, fell_back, location_overrode
 
 

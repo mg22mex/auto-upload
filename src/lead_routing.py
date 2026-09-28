@@ -110,6 +110,8 @@ _WHEN_RE = re.compile(
     r"ma[nñ]ana(?:\s+a\s+las\s+\d{1,2}(?::\d{2})?\s*(?:am|pm|hrs?|horas?)?)?|"
     r"hoy(?:\s+a\s+las\s+\d{1,2}(?::\d{2})?\s*(?:am|pm|hrs?|horas?)?)?|"
     r"pasado\s+ma[nñ]ana|"
+    r"en\s+media\s+hora|"
+    r"media\s+hora|"
     r"el\s+\w+|"
     r"este\s+\w+|"
     r"la\s+pr[oó]xima\s+semana|"

@@ -858,6 +858,7 @@ def force_book_appointment(
     vehicle_interest: str = "",
     whatsapp_client: Any | None = None,
     manager: Any | None = None,
+    channel_branch: str | None = None,
 ) -> dict[str, Any]:
     """Confirm cita without calculate_financing (trade-in / inspection visits OK)."""
     from src.lead_routing import detect_appointment_intent
@@ -867,8 +868,16 @@ def force_book_appointment(
     appt = detect_appointment_intent(text)
     when = (appt.when_text or "").strip() or "el horario que prefieras"
     meta = meta or {}
+    explicit_tradein = detect_tradein_intent(text) or bool(
+        re.search(
+            r"valuaci[oó]n\s+f[ií]sica|inspecci[oó]n\s+f[ií]sica|"
+            r"toma\s+a\s+cuenta|a\s+cambio|permuta",
+            text or "",
+            re.IGNORECASE,
+        )
+    )
     trade_label = ""
-    if prior_tradein is not None:
+    if explicit_tradein and prior_tradein is not None:
         bits = [
             str(getattr(prior_tradein, "make", "") or "").strip(),
             str(getattr(prior_tradein, "model", "") or "").strip(),
@@ -876,7 +885,7 @@ def force_book_appointment(
             str(getattr(prior_tradein, "version", "") or "").strip(),
         ]
         trade_label = " ".join(b for b in bits if b).strip()
-    if not trade_label:
+    if explicit_tradein and not trade_label:
         trade_label = str(meta.get("trade_in_label") or "").strip()
     inventory = str(
         meta.get("interested_vehicle")
@@ -886,36 +895,42 @@ def force_book_appointment(
     ).strip()
     # If sticky meta still equals trade-in (legacy), treat as trade-in-only.
     if (
-        inventory
+        explicit_tradein
+        and inventory
         and trade_label
         and inventory.casefold() == trade_label.casefold()
     ):
         inventory = ""
-    amount = meta.get("valor_compra") or meta.get("net_trade_in_equity")
-    try:
-        amount_f = float(amount) if amount not in (None, "") else None
-    except (TypeError, ValueError):
-        amount_f = None
-    if amount_f is None:
-        summary = str(meta.get("tradein_summary") or "")
-        m = re.search(r"~\$([0-9,]+)", summary)
-        if m:
-            try:
-                amount_f = float(m.group(1).replace(",", ""))
-            except ValueError:
-                amount_f = None
+    amount_f = None
+    if explicit_tradein:
+        amount = meta.get("valor_compra") or meta.get("net_trade_in_equity")
+        try:
+            amount_f = float(amount) if amount not in (None, "") else None
+        except (TypeError, ValueError):
+            amount_f = None
+        if amount_f is None:
+            summary = str(meta.get("tradein_summary") or "")
+            m = re.search(r"~\$([0-9,]+)", summary)
+            if m:
+                try:
+                    amount_f = float(m.group(1).replace(",", ""))
+                except ValueError:
+                    amount_f = None
 
-    if trade_label and amount_f is not None:
+    if explicit_tradein and trade_label and amount_f is not None:
         tradein_note = (
             f"{trade_label} · Autométrica ~${amount_f:,.0f} "
             f"(valuación física / prueba de manejo)"
         )
-    elif trade_label:
+    elif explicit_tradein and trade_label:
         tradein_note = f"{trade_label} (valuación física / prueba de manejo)"
-    elif amount_f is not None:
+    elif explicit_tradein and amount_f is not None:
         tradein_note = f"Auto a cambio · Autométrica ~${amount_f:,.0f}"
-    else:
+    elif explicit_tradein:
         tradein_note = str(meta.get("tradein_summary") or "").strip() or None
+    else:
+        # Catalog viewing / purchase cita — never reattach sticky Autométrica.
+        tradein_note = None
 
     if inventory:
         vehicle_for_crm = inventory
@@ -924,9 +939,29 @@ def force_book_appointment(
     else:
         vehicle_for_crm = "Consulta general"
 
+    from src.config import branch_label as cfg_branch_label
     from src.odoo_sync.crm import normalize_crm_branch
+    from src.voice_gateway.vapi_bridge import branch_from_vehicle_title
 
-    branch_key = normalize_crm_branch(branch)
+    channel_key = normalize_crm_branch(channel_branch or branch)
+    vehicle_branch = str(meta.get("vehicle_branch") or meta.get("physical_location") or "").strip()
+    if vehicle_branch:
+        vehicle_branch = normalize_crm_branch(vehicle_branch)
+    else:
+        lot_branch, _ = branch_from_vehicle_title(vehicle_for_crm)
+        vehicle_branch = lot_branch or None
+
+    # Prefer the vehicle's physical lot over the WhatsApp channel branch.
+    if vehicle_branch:
+        branch_key = vehicle_branch
+    else:
+        branch_key = channel_key
+    cross_branch = bool(
+        vehicle_branch
+        and channel_key
+        and vehicle_branch != channel_key
+    )
+
     name = (customer_name or "Cliente").strip() or "Cliente"
     args = LeadArgs(
         name=name,
@@ -943,13 +978,24 @@ def force_book_appointment(
         print(f"WARN force_book_appointment CRM failed phone={phone}: {exc}", flush=True)
         crm = {"error": str(exc)}
 
-    speech = format_lead_speech(args, dry_run=bool(crm.get("dry_run")), status=str(crm.get("status") or "created"))
-    # Keep confirmation short — no financing prompts.
-    if "financi" in speech.casefold() or "enganche" in speech.casefold():
+    if cross_branch:
+        dest = cfg_branch_label(branch_key)
         speech = (
-            f"¡Perfecto, {name}! Agendamos tu cita en Autosell "
-            f"{branch_label(branch)} ({when}). Te esperamos."
+            f"El {vehicle_for_crm} está físicamente en nuestra sucursal {dest}. "
+            f"Agendamos tu cita allá ({when}). "
+            f"¿Te confirmo esa visita en {dest} o prefieres que programemos "
+            f"otra opción?"
         )
+    else:
+        speech = format_lead_speech(
+            args, dry_run=bool(crm.get("dry_run")), status=str(crm.get("status") or "created")
+        )
+        # Keep confirmation short — no financing prompts.
+        if "financi" in speech.casefold() or "enganche" in speech.casefold():
+            speech = (
+                f"¡Perfecto, {name}! Agendamos tu cita en Autosell "
+                f"{branch_label(branch_key)} ({when}). Te esperamos."
+            )
     return {
         "ok": True,
         "speech": speech,
@@ -959,6 +1005,9 @@ def force_book_appointment(
         "tradein_note": tradein_note,
         "crm": crm,
         "branch": branch_key,
+        "channel_branch": channel_key,
+        "cross_branch": cross_branch,
+        "vehicle_price": meta.get("vehicle_price"),
     }
 
 
@@ -1084,32 +1133,53 @@ def chat_with_beatriz(
     prior_tradein = _prior_tradein_from_meta(meta_early)
     version_followup = extract_tradein_version(message)
 
-    # Explicit purchase interest ("quiero un Aveo 2020") → lock interested_vehicle
-    # BEFORE trade-in handling so Corolla valuation cannot mask the inventory unit.
+    # Explicit purchase interest ("quiero un Aveo 2020" / "para ver un Corolla")
+    # → lock interested_vehicle from live catalog BEFORE trade-in handling.
     try:
+        from src.inventory.catalog_match import match_desired_in_catalog, match_to_meta
         from src.lead_routing import extract_desired_vehicle
         from src.voice_gateway.session_vehicle import remember_interested_vehicle
 
         desired = extract_desired_vehicle(message)
         if desired:
+            catalog_hit = match_desired_in_catalog(desired)
+            bind_label = catalog_hit.display_name if catalog_hit else desired
             remember_interested_vehicle(
-                desired,
+                bind_label,
                 phone=phone,
                 instance=instance,
+                price=catalog_hit.price if catalog_hit else None,
+                vehicle_year=(
+                    int(catalog_hit.vehicle.year)
+                    if catalog_hit and str(catalog_hit.vehicle.year).isdigit()
+                    else None
+                ),
                 qualification_store=None,
                 chat_store=session,
+                clear_tradein=True,
             )
+            meta_patch: dict[str, Any] = {
+                "interested_vehicle": bind_label,
+                "vehicle_name": bind_label,
+                # Wipe sticky Autométrica so catalog viewing cannot reattach it.
+                "tradein_summary": "",
+                "trade_in_label": "",
+                "valor_compra": "",
+                "net_trade_in_equity": "",
+                "tradein_make": "",
+                "tradein_model": "",
+                "tradein_year": "",
+                "tradein_mileage_km": "",
+            }
+            if catalog_hit:
+                meta_patch.update(match_to_meta(catalog_hit))
             try:
-                session.update_meta(
-                    phone,
-                    instance,
-                    interested_vehicle=desired,
-                    vehicle_name=desired,
-                )
+                session.update_meta(phone, instance, **meta_patch)
             except Exception:
                 pass
-            meta_early = {**meta_early, "interested_vehicle": desired, "vehicle_name": desired}
-            vehicle_interest = desired
+            meta_early = {**meta_early, **meta_patch}
+            vehicle_interest = bind_label
+            prior_tradein = None
     except Exception as exc:
         print(
             f"WARN desired-vehicle bind failed phone={phone}: {exc}",
@@ -1198,9 +1268,10 @@ def chat_with_beatriz(
                 phone=phone,
                 customer_name=customer_name,
                 branch=branch,
+                channel_branch=branch,
                 instance=instance,
                 meta=meta_book,
-                prior_tradein=prior_tradein,
+                prior_tradein=None if meta_book.get("interested_vehicle") else prior_tradein,
                 vehicle_interest=vehicle_interest
                 or str(meta_book.get("interested_vehicle") or ""),
                 manager=manager,
@@ -1213,7 +1284,8 @@ def chat_with_beatriz(
                         instance,
                         last_appointment=booked.get("when"),
                         appointment_vehicle=booked.get("vehicle"),
-                        tradein_cita_note=booked.get("tradein_note"),
+                        tradein_cita_note=booked.get("tradein_note") or "",
+                        vehicle_branch=booked.get("branch"),
                     )
                 except Exception:
                     pass
@@ -1224,8 +1296,7 @@ def chat_with_beatriz(
                     tools_called=["book_appointment"],
                     vehicle_name=str(booked.get("vehicle") or "") or None,
                     interested_vehicle=str(booked.get("vehicle") or "") or None,
-                    tradein_summary=str(meta_early.get("tradein_summary") or "")
-                    or None,
+                    tradein_summary=None,
                 )
         except Exception as exc:
             print(
