@@ -195,17 +195,23 @@ def allocate_slots(
         if prev is None or key < prev:
             oldest_posted[aid] = key
 
-    def waitlist_priority(aid: str) -> tuple:
-        # 0 = never posted (no live row) → fill first
-        # 1 = previously/overflow live → older posted_at first (stale)
+    vehicles_by_id = {v.autosell_id: v for v in vehicles}
+
+    def waitlist_primary(aid: str) -> tuple:
+        # 0 = never posted → fill first; 1 = stale prior live.
+        # Within tier: catalog order already newest-first from scrape; brand
+        # round-robin applied below so one marque cannot monopolize creates.
         idx = catalog_index.get(aid, 10_000)
         if aid not in oldest_posted:
             return (0, "", idx)
         return (1, oldest_posted[aid], idx)
 
-    waitlist = sorted(
+    from src.sync.fair_queue import brand_fair_ids
+
+    waitlist = brand_fair_ids(
         (aid for aid in catalog_ids if aid not in occupying),
-        key=waitlist_priority,
+        vehicles_by_id,
+        primary_key=waitlist_primary,
     )
     creates: list[tuple[str, str]] = []
 

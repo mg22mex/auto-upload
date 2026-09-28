@@ -46,19 +46,26 @@ class AutosellScraper:
         )
 
     def fetch_all_public_vehicles(self) -> list[Vehicle]:
+        # Preserve catalog page discovery order (no alphabetical slug sort —
+        # that forced Audi-first batches under daily FB caps). Then prefer
+        # newest year / highest obj id for waitlist + create sequencing.
+        from src.sync.fair_queue import order_vehicles_newest_first
+
         slugs = self._fetch_all_slugs()
         vehicles: list[Vehicle] = []
-        for index, slug in enumerate(sorted(slugs), start=1):
+        for index, slug in enumerate(slugs, start=1):
             vehicle = self._fetch_vehicle_detail(slug)
             if vehicle is None:
                 continue
             vehicles.append(vehicle)
             if index < len(slugs):
                 time.sleep(self.delay_between_details_sec)
-        return vehicles
+        return order_vehicles_newest_first(vehicles)
 
-    def _fetch_all_slugs(self) -> set[str]:
-        slugs: set[str] = set()
+    def _fetch_all_slugs(self) -> list[str]:
+        """Unique slugs in first-seen catalog page order (not A→Z)."""
+        ordered: list[str] = []
+        seen: set[str] = set()
         page = 1
         max_page = 1
 
@@ -70,18 +77,23 @@ class AutosellScraper:
 
             html = self._get(url)
             soup = BeautifulSoup(html, "html.parser")
-            slugs.update(self._extract_slugs(soup))
+            for slug in self._extract_slugs(soup):
+                if slug in seen:
+                    continue
+                seen.add(slug)
+                ordered.append(slug)
             max_page = max(max_page, self._extract_max_page(soup))
             page += 1
             if page <= max_page:
                 time.sleep(self.delay_between_pages_sec)
 
-        if not slugs:
+        if not ordered:
             raise AutosellCatalogError("No vehicle slugs found on public catalog.")
-        return slugs
+        return ordered
 
-    def _extract_slugs(self, soup: BeautifulSoup) -> set[str]:
-        slugs: set[str] = set()
+    def _extract_slugs(self, soup: BeautifulSoup) -> list[str]:
+        """Slugs in HTML document order (dedupe later in ``_fetch_all_slugs``)."""
+        slugs: list[str] = []
         for anchor in soup.find_all("a", href=True):
             href = anchor["href"]
             if href.startswith("http"):
@@ -90,7 +102,7 @@ class AutosellScraper:
                 path = href
             match = SLUG_PATTERN.match(path.split("?", 1)[0])
             if match:
-                slugs.add(match.group(1).lower())
+                slugs.append(match.group(1).lower())
         return slugs
 
     def _extract_max_page(self, soup: BeautifulSoup) -> int:

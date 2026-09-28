@@ -204,8 +204,16 @@ def plan_repost_actions(
                     continue
                 posted_at = row["posted_at"] if "posted_at" in row.keys() else None
                 candidates.append((aid, posted_at))
-            candidates.sort(key=lambda item: item[1] or "")  # FIFO: oldest posted_at first
-            for autosell_id, _ in candidates:
+            # Oldest first, then brand round-robin so one marque (Audi) cannot
+            # consume the whole daily cap when many share an old posted_at.
+            from src.sync.fair_queue import brand_fair_round_robin, brand_key
+
+            ordered = brand_fair_round_robin(
+                candidates,
+                brand_of=lambda item: brand_key(active_by_id.get(item[0])),
+                primary_key=lambda item: (item[1] or "", item[0]),
+            )
+            for autosell_id, _ in ordered:
                 if budget[account_id] <= 0:
                     break
                 consider(autosell_id, account_id)
