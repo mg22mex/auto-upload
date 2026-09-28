@@ -708,7 +708,10 @@ def _process_ai_turn(
                 "tradein_summary": tradein_summary or None,
             }
             # Stay AI-active after financing PDF — handoff only on explicit cita.
-            if appointment.requested:
+            tools = list(vapi.tools_called or [])
+            booked_now = "book_appointment" in tools
+            pending_ask = "pending_appointment_confirmation" in tools
+            if booked_now or (appointment.requested and not pending_ask):
                 # Re-resolve last vehicle right before cita bind (Car B wins).
                 try:
                     from src.voice_gateway.session_vehicle import (
@@ -724,9 +727,42 @@ def _process_ai_turn(
                         session.vehicle_interest = last
                 except Exception:
                     pass
+                # Prefer chat-meta vehicle lot over WA channel for RR.
+                handoff_branch = session.branch
+                try:
+                    from src.voice_gateway.vapi_chat import get_chat_store
+
+                    meta = get_chat_store().get_meta(
+                        event.phone, event.instance or ""
+                    )
+                    lot = str(
+                        meta.get("vehicle_branch")
+                        or meta.get("pending_appointment_branch")
+                        or ""
+                    ).strip()
+                    if lot:
+                        handoff_branch = lot
+                        session.branch = lot
+                except Exception:
+                    pass
                 session.state = STATE_HANDOFF_TO_HUMAN
                 session.handling_agent = "human_rep"
-                session.appointment_time = appointment.when_text or appointment.raw
+                session.appointment_time = (
+                    appointment.when_text
+                    or (getattr(vapi, "reply_text", "") and "")
+                    or appointment.raw
+                )
+                try:
+                    from src.voice_gateway.vapi_chat import get_chat_store
+
+                    meta = get_chat_store().get_meta(
+                        event.phone, event.instance or ""
+                    )
+                    when_meta = str(meta.get("last_appointment") or "").strip()
+                    if when_meta:
+                        session.appointment_time = when_meta
+                except Exception:
+                    pass
                 notes = build_qualification_notes(session)
                 notes += (
                     f"\nCita solicitada: {session.appointment_time or 'sin horario'}"
@@ -754,6 +790,7 @@ def _process_ai_turn(
                     f"\nVehículo de interés: "
                     f"{session.vehicle_interest or session.initial_message or 'n/a'}"
                 )
+                notes += f"\nSucursal cita: {handoff_branch}"
                 return QualificationTurnResult(
                     session=session,
                     reply_text=vapi.reply_text,
@@ -762,7 +799,16 @@ def _process_ai_turn(
                     appointment_handoff=True,
                     odoo_notes=notes,
                     odoo_stage=stage_cita,
-                    routing=routing,
+                    routing={**routing, "handoff_branch": handoff_branch},
+                )
+            if pending_ask:
+                # Waiting for sí / confirma — stay AI, do not handoff yet.
+                return QualificationTurnResult(
+                    session=session,
+                    reply_text=vapi.reply_text,
+                    odoo_create=session.lead_id is None,
+                    odoo_stage=stage_primer,
+                    routing={**routing, "pending_appointment_confirmation": True},
                 )
             return QualificationTurnResult(
                 session=session,

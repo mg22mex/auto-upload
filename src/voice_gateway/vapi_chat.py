@@ -859,15 +859,33 @@ def force_book_appointment(
     whatsapp_client: Any | None = None,
     manager: Any | None = None,
     channel_branch: str | None = None,
+    confirm: bool = False,
 ) -> dict[str, Any]:
-    """Confirm cita without calculate_financing (trade-in / inspection visits OK)."""
-    from src.lead_routing import detect_appointment_intent
+    """Confirm cita without calculate_financing (trade-in / inspection visits OK).
+
+    Cross-branch catalog hits first return a soft ask (``pending_confirmation``)
+    without CRM writes until ``confirm=True`` (sí / confirma / …).
+    """
+    from src.lead_routing import (
+        detect_appointment_confirmation,
+        detect_appointment_intent,
+    )
     from src.voice_gateway.vapi_bridge import LeadArgs, create_vapi_lead, format_lead_speech
 
     del whatsapp_client  # reserved; inbound / CRM path alerts the rep
     appt = detect_appointment_intent(text)
-    when = (appt.when_text or "").strip() or "el horario que prefieras"
+    if not appt.requested and confirm:
+        appt = detect_appointment_confirmation(text)
+    when = (appt.when_text or "").strip()
     meta = meta or {}
+    if not when:
+        when = str(
+            meta.get("pending_appointment_when")
+            or meta.get("last_appointment")
+            or ""
+        ).strip()
+    if not when:
+        when = "el horario que prefieras"
     explicit_tradein = detect_tradein_intent(text) or bool(
         re.search(
             r"valuaci[oó]n\s+f[ií]sica|inspecci[oó]n\s+f[ií]sica|"
@@ -890,6 +908,7 @@ def force_book_appointment(
     inventory = str(
         meta.get("interested_vehicle")
         or meta.get("vehicle_name")
+        or meta.get("pending_appointment_vehicle")
         or vehicle_interest
         or ""
     ).strip()
@@ -944,7 +963,12 @@ def force_book_appointment(
     from src.voice_gateway.vapi_bridge import branch_from_vehicle_title
 
     channel_key = normalize_crm_branch(channel_branch or branch)
-    vehicle_branch = str(meta.get("vehicle_branch") or meta.get("physical_location") or "").strip()
+    vehicle_branch = str(
+        meta.get("pending_appointment_branch")
+        or meta.get("vehicle_branch")
+        or meta.get("physical_location")
+        or ""
+    ).strip()
     if vehicle_branch:
         vehicle_branch = normalize_crm_branch(vehicle_branch)
     else:
@@ -963,6 +987,29 @@ def force_book_appointment(
     )
 
     name = (customer_name or "Cliente").strip() or "Cliente"
+    dest = cfg_branch_label(branch_key)
+
+    # Soft ask — stash pending context; do not CRM / RR yet.
+    if cross_branch and not confirm:
+        speech = (
+            f"El {vehicle_for_crm} está físicamente en nuestra sucursal {dest}. "
+            f"¿Te confirmo esa visita en {dest} {when}?"
+        )
+        return {
+            "ok": True,
+            "speech": speech,
+            "tool": "pending_appointment_confirmation",
+            "when": when,
+            "vehicle": vehicle_for_crm,
+            "tradein_note": None,
+            "crm": {},
+            "branch": branch_key,
+            "channel_branch": channel_key,
+            "cross_branch": True,
+            "pending_confirmation": True,
+            "vehicle_price": meta.get("vehicle_price"),
+        }
+
     args = LeadArgs(
         name=name,
         phone=phone,
@@ -978,13 +1025,10 @@ def force_book_appointment(
         print(f"WARN force_book_appointment CRM failed phone={phone}: {exc}", flush=True)
         crm = {"error": str(exc)}
 
-    if cross_branch:
-        dest = cfg_branch_label(branch_key)
+    if confirm or cross_branch:
         speech = (
-            f"El {vehicle_for_crm} está físicamente en nuestra sucursal {dest}. "
-            f"Agendamos tu cita allá ({when}). "
-            f"¿Te confirmo esa visita en {dest} o prefieres que programemos "
-            f"otra opción?"
+            f"¡Cita confirmada, {name}! Te esperamos {when} en nuestra "
+            f"sucursal {dest} para ver el {vehicle_for_crm}."
         )
     else:
         speech = format_lead_speech(
@@ -1007,6 +1051,7 @@ def force_book_appointment(
         "branch": branch_key,
         "channel_branch": channel_key,
         "cross_branch": cross_branch,
+        "pending_confirmation": False,
         "vehicle_price": meta.get("vehicle_price"),
     }
 
@@ -1256,13 +1301,31 @@ def chat_with_beatriz(
             )
 
     # Appointment / valuación física — never force calculate_financing.
-    from src.lead_routing import detect_appointment_intent
+    from src.lead_routing import (
+        detect_appointment_confirmation,
+        detect_appointment_intent,
+    )
 
+    pending_confirm = str(
+        meta_early.get("pending_appointment_confirmation") or ""
+    ).strip() in {"1", "true", "yes", "pending"}
+    confirm_intent = detect_appointment_confirmation(message) if pending_confirm else None
     appointment = detect_appointment_intent(message)
-    if appointment.requested and not detect_tradein_intent(message):
+    if pending_confirm and confirm_intent and confirm_intent.requested:
+        appointment = confirm_intent
+
+    if (
+        (appointment.requested or (pending_confirm and confirm_intent and confirm_intent.requested))
+        and not detect_tradein_intent(message)
+    ):
         try:
             # Re-read meta so early Aveo bind is visible to CRM booking.
             meta_book = session.get_meta(phone, instance) or meta_early
+            is_confirm = bool(
+                pending_confirm
+                and confirm_intent
+                and confirm_intent.requested
+            )
             booked = force_book_appointment(
                 text=message,
                 phone=phone,
@@ -1273,27 +1336,49 @@ def chat_with_beatriz(
                 meta=meta_book,
                 prior_tradein=None if meta_book.get("interested_vehicle") else prior_tradein,
                 vehicle_interest=vehicle_interest
-                or str(meta_book.get("interested_vehicle") or ""),
+                or str(meta_book.get("interested_vehicle") or "")
+                or str(meta_book.get("pending_appointment_vehicle") or ""),
                 manager=manager,
+                confirm=is_confirm,
             )
             speech = str(booked.get("speech") or "").strip()
             if speech:
                 try:
-                    session.update_meta(
-                        phone,
-                        instance,
-                        last_appointment=booked.get("when"),
-                        appointment_vehicle=booked.get("vehicle"),
-                        tradein_cita_note=booked.get("tradein_note") or "",
-                        vehicle_branch=booked.get("branch"),
-                    )
+                    if booked.get("pending_confirmation"):
+                        session.update_meta(
+                            phone,
+                            instance,
+                            pending_appointment_confirmation="1",
+                            pending_appointment_when=booked.get("when") or "",
+                            pending_appointment_vehicle=booked.get("vehicle") or "",
+                            pending_appointment_branch=booked.get("branch") or "",
+                            vehicle_branch=booked.get("branch") or "",
+                            interested_vehicle=booked.get("vehicle") or "",
+                            vehicle_name=booked.get("vehicle") or "",
+                            last_appointment=booked.get("when") or "",
+                        )
+                    else:
+                        session.update_meta(
+                            phone,
+                            instance,
+                            pending_appointment_confirmation="",
+                            pending_appointment_when="",
+                            pending_appointment_vehicle="",
+                            pending_appointment_branch="",
+                            last_appointment=booked.get("when"),
+                            appointment_vehicle=booked.get("vehicle"),
+                            tradein_cita_note=booked.get("tradein_note") or "",
+                            vehicle_branch=booked.get("branch"),
+                            interested_vehicle=booked.get("vehicle") or "",
+                        )
                 except Exception:
                     pass
+                tool_name = str(booked.get("tool") or "book_appointment")
                 return VapiChatResult(
                     reply_text=speech,
                     previous_chat_id=previous_chat_id
                     or session.get_chat_id(phone, instance),
-                    tools_called=["book_appointment"],
+                    tools_called=[tool_name],
                     vehicle_name=str(booked.get("vehicle") or "") or None,
                     interested_vehicle=str(booked.get("vehicle") or "") or None,
                     tradein_summary=None,

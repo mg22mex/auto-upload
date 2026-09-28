@@ -41,13 +41,11 @@ class TestCatalogMatchCorolla(unittest.TestCase):
 
 
 class TestForceBookNoStickyTradein(unittest.TestCase):
-    def test_viewing_cita_drops_autometrica_note(self):
-        with patch.object(vc, "create_vapi_lead", create=True):
-            pass
+    def test_viewing_cita_asks_pending_not_crm(self):
         with patch(
             "src.voice_gateway.vapi_bridge.create_vapi_lead",
             return_value={"status": "created", "lead_id": 1, "dry_run": True},
-        ):
+        ) as crm:
             booked = force_book_appointment(
                 text="Quiero agendar una cita para ver un Corolla",
                 phone="5216141754852",
@@ -63,17 +61,48 @@ class TestForceBookNoStickyTradein(unittest.TestCase):
                     "tradein_summary": "Autométrica ~$195,500",
                 },
             )
-        self.assertIsNone(booked.get("tradein_note"))
+        crm.assert_not_called()
+        self.assertTrue(booked.get("pending_confirmation"))
+        self.assertEqual(booked["tool"], "pending_appointment_confirmation")
         self.assertEqual(booked["branch"], "periferico")
-        self.assertTrue(booked["cross_branch"])
+        self.assertIn("Periférico", booked["speech"])
+        self.assertNotIn("195,500", booked["speech"])
+
+    def test_confirm_books_periferico(self):
+        with patch(
+            "src.voice_gateway.vapi_bridge.create_vapi_lead",
+            return_value={"status": "created", "lead_id": 2, "dry_run": True},
+        ) as crm:
+            booked = force_book_appointment(
+                text="Confirma a esa hora, 5:30 pm",
+                phone="5216141754852",
+                customer_name="Marco Gastelum",
+                branch="san_felipe",
+                channel_branch="san_felipe",
+                confirm=True,
+                meta={
+                    "pending_appointment_confirmation": "1",
+                    "pending_appointment_when": "en media hora",
+                    "pending_appointment_vehicle": "2022 Toyota Corolla XLE *",
+                    "pending_appointment_branch": "periferico",
+                    "interested_vehicle": "2022 Toyota Corolla XLE *",
+                    "vehicle_branch": "periferico",
+                    "vehicle_price": 365000,
+                },
+            )
+        crm.assert_called_once()
+        args = crm.call_args[0][0]
+        self.assertEqual(args.branch, "periferico")
+        self.assertIsNone(args.tradein_summary)
+        self.assertIn("5:30", booked["when"])
+        self.assertIn("Cita confirmada", booked["speech"])
         self.assertIn("Periférico", booked["speech"])
         self.assertIn("Corolla", booked["speech"])
-        self.assertNotIn("195,500", booked["speech"])
-        self.assertNotIn("Autométrica", booked["speech"] or "")
+        self.assertFalse(booked.get("pending_confirmation"))
 
 
 class TestChatWithBeatrizCatalogCita(unittest.TestCase):
-    def test_cita_ver_corolla_no_tradein_tool(self):
+    def test_cita_ver_corolla_asks_pending_then_confirm_books(self):
         msg = (
             "Hola. Quiero agendar una cita para ver un Corolla que tienen, "
             "por favor. Se puede en media hora?"
@@ -105,7 +134,7 @@ class TestChatWithBeatrizCatalogCita(unittest.TestCase):
                     "branch": "periferico",
                 },
             ) as crm:
-                result = vc.chat_with_beatriz(
+                pending = vc.chat_with_beatriz(
                     text=msg,
                     phone="5216141754852",
                     customer_name="Marco Gastelum",
@@ -113,19 +142,49 @@ class TestChatWithBeatrizCatalogCita(unittest.TestCase):
                     instance="autosell_san_felipe",
                     store=store,
                 )
-                meta = store.get_meta("5216141754852", "autosell_san_felipe")
+                meta_pending = store.get_meta(
+                    "5216141754852", "autosell_san_felipe"
+                )
+                self.assertIn(
+                    "pending_appointment_confirmation", pending.tools_called
+                )
+                self.assertNotIn("get_tradein_valuation", pending.tools_called)
+                self.assertIsNone(pending.tradein_summary)
+                self.assertIn("Corolla", pending.interested_vehicle or "")
+                self.assertEqual(
+                    meta_pending.get("pending_appointment_confirmation"), "1"
+                )
+                self.assertEqual(
+                    meta_pending.get("pending_appointment_branch"), "periferico"
+                )
+                self.assertIn(
+                    "confirmo esa visita", pending.reply_text.casefold()
+                )
+                self.assertNotIn("195,500", pending.reply_text)
+                crm.assert_not_called()
+
+                confirmed = vc.chat_with_beatriz(
+                    text="Confirma a esa hora, 5:30 pm",
+                    phone="5216141754852",
+                    customer_name="Marco Gastelum",
+                    branch="san_felipe",
+                    instance="autosell_san_felipe",
+                    store=store,
+                )
+                meta_done = store.get_meta(
+                    "5216141754852", "autosell_san_felipe"
+                )
         http.assert_not_called()
-        self.assertIn("book_appointment", result.tools_called)
-        self.assertNotIn("get_tradein_valuation", result.tools_called)
-        self.assertIsNone(result.tradein_summary)
-        self.assertIn("Corolla", result.interested_vehicle or "")
-        self.assertEqual(float(meta.get("vehicle_price") or 0), 365000.0)
-        self.assertIn("Periférico", result.reply_text)
-        self.assertNotIn("195,500", result.reply_text)
+        self.assertIn("book_appointment", confirmed.tools_called)
+        self.assertIn("Cita confirmada", confirmed.reply_text)
+        self.assertIn("5:30", confirmed.reply_text)
+        self.assertIn("Periférico", confirmed.reply_text)
+        self.assertEqual(meta_done.get("pending_appointment_confirmation"), "")
         crm.assert_called_once()
         args = crm.call_args[0][0]
         self.assertEqual(args.branch, "periferico")
         self.assertIsNone(args.tradein_summary)
+
 
 
 if __name__ == "__main__":

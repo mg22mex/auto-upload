@@ -105,6 +105,26 @@ _APPOINTMENT_PATTERNS = (
     r"\bcuando\s+(puedo|podemos)\s+(ir|pasar|visitar)\b",
 )
 
+# Affirmative replies after Beatriz asks "¿Te confirmo esa visita…?"
+_APPOINTMENT_CONFIRM_RE = re.compile(
+    r"(?:"
+    r"\bconfirm(?:a|o|amos|ado|ada|arme|arlo)?\b|"
+    r"\bs[ií]\b|"
+    r"\bok(?:ay)?\b|"
+    r"\bva\b|"
+    r"\bdale\b|"
+    r"\blisto\b|"
+    r"\bperfecto\b|"
+    r"\best[aá]\s+bien\b|"
+    r"\bde\s+acuerdo\b|"
+    r"\bte\s+confirmo\b|"
+    r"\ba\s+esa\s+hora\b|"
+    r"\bah[ií]\s+estoy\b|"
+    r"\bnos\s+vemos\b"
+    r")",
+    re.IGNORECASE,
+)
+
 _WHEN_RE = re.compile(
     r"(?P<when>"
     r"ma[nñ]ana(?:\s+a\s+las\s+\d{1,2}(?::\d{2})?\s*(?:am|pm|hrs?|horas?)?)?|"
@@ -112,12 +132,13 @@ _WHEN_RE = re.compile(
     r"pasado\s+ma[nñ]ana|"
     r"en\s+media\s+hora|"
     r"media\s+hora|"
-    r"el\s+\w+|"
-    r"este\s+\w+|"
-    r"la\s+pr[oó]xima\s+semana|"
+    r"a\s+esa\s+hora|"
+    r"a\s+las?\s+\d{1,2}(?::\d{2})?\s*(?:am|pm|hrs?|horas?)?|"
     r"\d{1,2}[:.]\d{2}\s*(?:am|pm|hrs?|horas?)?|"
     r"\d{1,2}\s*(?:am|pm|hrs?|horas?)|"
-    r"a\s+las\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?"
+    r"el\s+\w+|"
+    r"este\s+\w+|"
+    r"la\s+pr[oó]xima\s+semana"
     r")",
     re.IGNORECASE,
 )
@@ -266,6 +287,45 @@ def detect_appointment_intent(text: str) -> AppointmentIntent:
     if match:
         when = match.group("when").strip()
     return AppointmentIntent(requested=True, kind=kind, when_text=when, raw=raw)
+
+
+_CLOCK_WHEN_RE = re.compile(
+    r"(?:"
+    r"a\s+las?\s+\d{1,2}(?::\d{2})?\s*(?:am|pm|hrs?|horas?)?|"
+    r"\d{1,2}[:.]\d{2}\s*(?:am|pm|hrs?|horas?)?|"
+    r"\d{1,2}\s*(?:am|pm|hrs?|horas?)"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def detect_appointment_confirmation(text: str) -> AppointmentIntent:
+    """Affirmative reply that confirms a pending cross-branch (or soft) cita.
+
+    Matches ``confirma``, ``sí``, ``está bien``, ``a esa hora``, ``5:30 pm``, …
+    Prefer explicit clock times over filler like ``a esa hora``.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return AppointmentIntent(requested=False, raw=raw)
+    affirmative = bool(_APPOINTMENT_CONFIRM_RE.search(raw))
+    when = ""
+    clock = _CLOCK_WHEN_RE.search(raw)
+    if clock:
+        when = clock.group(0).strip()
+    else:
+        match = _WHEN_RE.search(raw)
+        if match:
+            when = match.group("when").strip()
+            if when.casefold() in {"a esa hora", "esa hora"}:
+                when = ""
+    # Bare clock time after a pending ask (e.g. "5:30 pm") counts as confirm.
+    if not affirmative:
+        if when and len(raw) <= 32 and not re.search(r"\?", raw):
+            affirmative = True
+        else:
+            return AppointmentIntent(requested=False, raw=raw)
+    return AppointmentIntent(requested=True, kind="cita", when_text=when, raw=raw)
 
 
 def format_ai_reply(
@@ -1515,6 +1575,7 @@ __all__ = [
     "build_trade_in_quote_message",
     "build_voice_agent_script",
     "complete_voice_appointment_handoff",
+    "detect_appointment_confirmation",
     "detect_appointment_intent",
     "detect_forma_pago_financing",
     "detect_forma_pago_permuta",

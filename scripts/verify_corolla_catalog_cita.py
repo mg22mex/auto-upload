@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reset WA/Vapi session and verify Corolla catalog cita (no Autométrica).
+"""Reset WA/Vapi session and verify Corolla pending→confirm cita (no Autométrica).
 
 Usage:
   PYTHONPATH=. python scripts/verify_corolla_catalog_cita.py
@@ -25,6 +25,7 @@ MSG = (
     "Hola. Quiero agendar una cita para ver un Corolla que tienen, "
     "por favor. Se puede en media hora?"
 )
+CONFIRM = "Confirma a esa hora, 5:30 pm"
 
 
 def main() -> int:
@@ -75,7 +76,7 @@ def main() -> int:
     )
     ctx = crm_patch if not args.live_crm else nullcontext()
     with ctx as crm:
-        result = chat_with_beatriz(
+        pending = chat_with_beatriz(
             text=MSG,
             phone=phone,
             customer_name=args.name,
@@ -83,30 +84,47 @@ def main() -> int:
             instance=args.instance,
             store=store,
         )
+        meta_pending = store.get_meta(phone, args.instance)
+        confirmed = chat_with_beatriz(
+            text=CONFIRM,
+            phone=phone,
+            customer_name=args.name,
+            branch=args.branch,
+            instance=args.instance,
+            store=store,
+        )
+        meta_done = store.get_meta(phone, args.instance)
 
-    meta = store.get_meta(phone, args.instance)
+    crm_branch = None
+    if not args.live_crm and crm and crm.call_args:
+        crm_branch = crm.call_args[0][0].branch
+
     report = {
         "ok": (
-            "book_appointment" in (result.tools_called or [])
-            and "get_tradein_valuation" not in (result.tools_called or [])
-            and "Corolla" in (result.interested_vehicle or "")
-            and "XLE" in (result.interested_vehicle or meta.get("interested_vehicle") or "")
-            and float(meta.get("vehicle_price") or 0) == 365000.0
-            and "195,500" not in (result.reply_text or "")
-            and "Autométrica" not in (result.reply_text or "")
-            and "Periférico" in (result.reply_text or "")
+            "pending_appointment_confirmation" in (pending.tools_called or [])
+            and "book_appointment" in (confirmed.tools_called or [])
+            and "get_tradein_valuation" not in (pending.tools_called or [])
+            and "Corolla" in (pending.interested_vehicle or "")
+            and meta_pending.get("pending_appointment_confirmation") == "1"
+            and meta_pending.get("pending_appointment_branch") == "periferico"
+            and "confirmo esa visita" in (pending.reply_text or "").casefold()
+            and "195,500" not in (pending.reply_text or "")
+            and "Cita confirmada" in (confirmed.reply_text or "")
+            and "5:30" in (confirmed.reply_text or "")
+            and "Periférico" in (confirmed.reply_text or "")
+            and not meta_done.get("pending_appointment_confirmation")
+            and (args.live_crm or crm_branch == "periferico")
+            and (args.live_crm or (crm and crm.call_count == 1))
         ),
-        "tools_called": result.tools_called,
-        "interested_vehicle": result.interested_vehicle,
-        "vehicle_price": meta.get("vehicle_price"),
-        "vehicle_branch": meta.get("vehicle_branch"),
-        "tradein_summary": result.tradein_summary,
-        "reply_text": result.reply_text,
-        "crm_mock_branch": (
-            None
-            if args.live_crm
-            else (crm.call_args[0][0].branch if crm and crm.call_args else None)
-        ),
+        "pending_tools": pending.tools_called,
+        "confirm_tools": confirmed.tools_called,
+        "interested_vehicle": confirmed.interested_vehicle or pending.interested_vehicle,
+        "vehicle_branch": meta_done.get("vehicle_branch")
+        or meta_pending.get("vehicle_branch"),
+        "pending_reply": pending.reply_text,
+        "confirm_reply": confirmed.reply_text,
+        "crm_mock_branch": crm_branch,
+        "crm_calls": None if args.live_crm else (crm.call_count if crm else 0),
     }
     print(json.dumps(report, indent=2, ensure_ascii=False))
     return 0 if report["ok"] else 1
