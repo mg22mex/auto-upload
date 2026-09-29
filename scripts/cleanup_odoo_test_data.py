@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Clean CRM test leads and draft/test sales orders in Odoo.
 
-By default only targets clearly test-named leads (ATTR TEST, Prueba, Marco Test,
-etc.) and sale.order drafts with $0 / test markers. Does **not** wipe all
-``MG Quote Lead`` production opportunities unless ``--purge-mg-quote-leads``.
+By default targets test-named leads (Prueba, Test, ATTR TEST, Llamada Paulina,
+etc.) and optional draft/test sale.order rows. Use ``--hard-delete`` to
+permanently ``unlink`` (not just archive).
+
+Does **not** wipe all production opportunities tagged ``MG Quote Lead`` unless
+``--purge-mg-quote-leads`` (name match for \"MG Quote Lead\" is always included).
 
 Usage::
 
   PYTHONPATH=. python scripts/cleanup_odoo_test_data.py --dry-run
-  PYTHONPATH=. python scripts/cleanup_odoo_test_data.py
-  PYTHONPATH=. python scripts/cleanup_odoo_test_data.py --purge-mg-quote-leads
+  PYTHONPATH=. python scripts/cleanup_odoo_test_data.py --hard-delete
+  PYTHONPATH=. python scripts/cleanup_odoo_test_data.py --hard-delete --purge-mg-quote-leads
 """
 from __future__ import annotations
 
@@ -29,15 +32,21 @@ from src.odoo_sync.client import OdooCRMClient, OdooCRMError  # noqa: E402
 
 # Name / phone patterns for setup & pipeline smoke tests.
 LEAD_NAME_PATTERNS = (
+    "Prueba",
     "ATTR TEST",
-    "Prueba Lead",
-    "Prueba Pipeline",
-    "Prueba Local",
-    "Marco Test",
     "RR Fresh Test",
+    "Llamada Paulina",
+    "Marco Test",
+    "MG Quote Lead",
     "[TEST]",
-    "test lead",
     "Prospecto Messenger",
+    " test ",  # spaced to avoid matching Contesta*
+    "Test —",
+    "Test -",
+)
+LEAD_PHONE_EXACT = (
+    "6140000000",
+    "6140000002",
 )
 LEAD_PHONE_PREFIXES = (
     "61490010",  # attribution validate batch
@@ -79,6 +88,8 @@ def find_test_leads(
     clauses: list[list[Any]] = [
         [("name", "ilike", pat)] for pat in LEAD_NAME_PATTERNS
     ]
+    for phone in LEAD_PHONE_EXACT:
+        clauses.append([("phone", "=", phone)])
     for prefix in LEAD_PHONE_PREFIXES:
         clauses.append([("phone", "=like", f"{prefix}%")])
 
@@ -115,6 +126,39 @@ def find_test_leads(
         seen.add(lid)
         out.append(row)
     return out
+
+
+def _unlink_lead(client: OdooCRMClient, lead_id: int) -> None:
+    """Permanently delete a lead; clear activities first when needed."""
+    lid = int(lead_id)
+    try:
+        act_ids = client.execute_kw(
+            "mail.activity",
+            "search",
+            [[("res_model", "=", "crm.lead"), ("res_id", "=", lid)]],
+            {"limit": 200},
+        )
+        if act_ids:
+            client.execute_kw("mail.activity", "unlink", [list(act_ids)])
+    except Exception:
+        pass
+    try:
+        client.execute_kw("crm.lead", "unlink", [[lid]])
+        return
+    except Exception:
+        # Archived records sometimes unlink only after active=False
+        client.execute_kw(
+            "crm.lead",
+            "write",
+            [[lid], {"active": False}],
+            {"context": {"active_test": False}},
+        )
+        client.execute_kw(
+            "crm.lead",
+            "unlink",
+            [[lid]],
+            {"context": {"active_test": False}},
+        )
 
 
 def find_test_sale_orders(client: OdooCRMClient) -> list[dict[str, Any]]:
@@ -176,7 +220,7 @@ def archive_or_unlink_leads(
             continue
         try:
             if hard_delete:
-                client.execute_kw("crm.lead", "unlink", [[lid]])
+                _unlink_lead(client, lid)
                 deleted.append(lid)
                 print(f"  deleted {label}")
             else:
@@ -195,6 +239,7 @@ def archive_or_unlink_leads(
                         "crm.lead",
                         "write",
                         [[lid], {"active": False}],
+                        {"context": {"active_test": False}},
                     )
                     archived.append(lid)
                     print(f"  archived (unlink blocked) {label}")

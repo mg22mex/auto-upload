@@ -99,9 +99,14 @@ def fetch_leads(
     *,
     days: int = 90,
     limit: int = 2500,
-    include_lost: bool = True,
+    include_lost: bool = False,
 ) -> list[dict[str, Any]]:
-    """Fetch opportunities created/updated within ``days`` (plus all active)."""
+    """Fetch production opportunities within ``days``.
+
+    Default: **active only** + exclude known test-name markers so KPI /
+    Control Diario stay clean. Pass ``include_lost=True`` for lost-reason tabs
+    (still excludes test-name noise).
+    """
     crm = client or get_odoo_client()
     since = (datetime.now(timezone.utc) - timedelta(days=max(1, days))).strftime(
         "%Y-%m-%d %H:%M:%S"
@@ -111,6 +116,22 @@ def fetch_leads(
         ("create_date", ">=", since),
         ("write_date", ">=", since),
     ]
+    if not include_lost:
+        domain = [("active", "=", True), *domain]
+
+    # Exclude smoke / pipeline test titles from live BI.
+    for pat in (
+        "Prueba",
+        "ATTR TEST",
+        "RR Fresh Test",
+        "Llamada Paulina",
+        "Marco Test",
+        "[TEST]",
+        "Prospecto Messenger",
+        "MG Quote Lead",
+    ):
+        domain = ["!", ("name", "ilike", pat), *domain]
+
     kwargs: dict[str, Any] = {
         "fields": LEAD_FIELDS,
         "limit": int(limit),
