@@ -559,8 +559,213 @@ def setter_user_id_from_mapping(
     return n if n > 0 else None
 
 
+@dataclass
+class EmployeeSyncEntry:
+    user_id: int
+    name: str
+    work_email: str = ""
+    employee_id: int | None = None
+    created: bool = False
+    skipped: bool = False
+    error: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class EmployeeSyncResult:
+    employees: list[EmployeeSyncEntry] = field(default_factory=list)
+    created: int = 0
+    existing: int = 0
+    errors: int = 0
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "created": self.created,
+            "existing": self.existing,
+            "errors": self.errors,
+            "employees": [e.as_dict() for e in self.employees],
+        }
+
+
+def _mapped_closer_users(mapping: dict[str, Any]) -> list[dict[str, Any]]:
+    """Flatten closer reps (and optional setter) that have an odoo user id."""
+    seen: set[int] = set()
+    out: list[dict[str, Any]] = []
+    for branch_entries in (mapping.get("reps") or {}).values():
+        if not isinstance(branch_entries, list):
+            continue
+        for entry in branch_entries:
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("role") or "") != "closer":
+                continue
+            try:
+                uid = int(entry.get("odoo_id"))
+            except (TypeError, ValueError):
+                continue
+            if uid <= 0 or uid in seen:
+                continue
+            seen.add(uid)
+            out.append(entry)
+    return out
+
+
+def sync_hr_employees(
+    *,
+    client: OdooCRMClient | None = None,
+    mapping: dict[str, Any] | None = None,
+    mapping_path: Path | str | None = None,
+    create_missing: bool = True,
+    include_setter: bool = False,
+) -> EmployeeSyncResult:
+    """Ensure ``hr.employee`` exists for each closer in ``odoo_mapping.json``.
+
+    Links ``name``, ``work_email`` (from ``res.users.login`` / email), and ``user_id``.
+    """
+    crm = client or OdooCRMClient()
+    if crm.uid is None:
+        crm.authenticate()
+
+    data = mapping if mapping is not None else load_mapping(mapping_path)
+    if not data:
+        return EmployeeSyncResult()
+
+    targets = _mapped_closer_users(data)
+    if include_setter:
+        setter = data.get("setter") if isinstance(data.get("setter"), dict) else None
+        try:
+            sid = int((setter or {}).get("odoo_id") or data.get("setter_user_id"))
+        except (TypeError, ValueError):
+            sid = 0
+        if sid > 0 and sid not in {int(t.get("odoo_id") or 0) for t in targets}:
+            targets.append(
+                setter
+                or {
+                    "odoo_id": sid,
+                    "name": "Marco",
+                    "login": "",
+                    "role": "setter",
+                }
+            )
+
+    result = EmployeeSyncResult()
+    for entry in targets:
+        uid = int(entry["odoo_id"])
+        name = str(entry.get("name") or "").strip() or f"User {uid}"
+        login = str(entry.get("login") or "").strip()
+        row = EmployeeSyncEntry(user_id=uid, name=name, work_email=login)
+
+        try:
+            existing = crm.execute_kw(
+                "hr.employee",
+                "search_read",
+                [[["user_id", "=", uid]]],
+                {"fields": ["id", "name", "work_email", "user_id"], "limit": 1},
+            )
+        except Exception as exc:
+            row.error = _short_err(exc)
+            result.errors += 1
+            result.employees.append(row)
+            continue
+
+        if existing:
+            row.employee_id = int(existing[0]["id"])
+            row.work_email = str(
+                existing[0].get("work_email") or login or ""
+            )
+            row.name = str(existing[0].get("name") or name)
+            row.skipped = True
+            result.existing += 1
+            result.employees.append(row)
+            continue
+
+        if not create_missing:
+            row.error = "missing hr.employee"
+            result.errors += 1
+            result.employees.append(row)
+            continue
+
+        # Prefer live user name / login for email.
+        try:
+            users = crm.execute_kw(
+                "res.users",
+                "read",
+                [[uid]],
+                {"fields": ["id", "name", "login", "email"]},
+            )
+            if users:
+                name = str(users[0].get("name") or name).strip() or name
+                login = (
+                    str(users[0].get("email") or users[0].get("login") or login)
+                    .strip()
+                )
+                row.name = name
+                row.work_email = login
+        except Exception:
+            pass
+
+        vals: dict[str, Any] = {
+            "name": name,
+            "user_id": uid,
+        }
+        if login and "@" in login:
+            vals["work_email"] = login
+        try:
+            emp_id = int(crm.execute_kw("hr.employee", "create", [vals]))
+            row.employee_id = emp_id
+            row.created = True
+            result.created += 1
+        except Exception as exc:
+            row.error = _short_err(exc)
+            result.errors += 1
+        result.employees.append(row)
+
+    # Persist employee ids back into mapping when path known.
+    path = Path(mapping_path) if mapping_path else (
+        Path(DEFAULT_MAPPING_PATH) if (mapping is None) else None
+    )
+    if path is not None and data:
+        by_user = {
+            int(e.user_id): int(e.employee_id)
+            for e in result.employees
+            if e.employee_id
+        }
+        data["employees"] = {
+            str(uid): emp_id for uid, emp_id in sorted(by_user.items())
+        }
+        for branch_entries in (data.get("reps") or {}).values():
+            if not isinstance(branch_entries, list):
+                continue
+            for rep in branch_entries:
+                if not isinstance(rep, dict):
+                    continue
+                try:
+                    uid = int(rep.get("odoo_id"))
+                except (TypeError, ValueError):
+                    continue
+                if uid in by_user:
+                    rep["employee_id"] = by_user[uid]
+        setter = data.get("setter")
+        if isinstance(setter, dict):
+            try:
+                sid = int(setter.get("odoo_id"))
+            except (TypeError, ValueError):
+                sid = 0
+            if sid in by_user:
+                setter["employee_id"] = by_user[sid]
+        try:
+            save_mapping(data, path)
+        except OSError:
+            pass
+
+    return result
+
+
 __all__ = [
     "DEFAULT_MAPPING_PATH",
+    "EmployeeSyncResult",
     "StructureResult",
     "closer_odoo_ids_from_mapping",
     "ensure_setter",
@@ -569,4 +774,5 @@ __all__ = [
     "save_mapping",
     "setter_user_id_from_mapping",
     "setup_odoo_structure",
+    "sync_hr_employees",
 ]
