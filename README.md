@@ -6,7 +6,7 @@ Sync [autosell.mx](https://www.autosell.mx) public catalog to **Facebook Marketp
 
 - **AI Voice & lead webhook:** Live. FastAPI `POST /webhook/voice-lead` (also `/voice/webhook`, `/voice/stream`) → intent/STT → quote → Odoo lead (`MG Quote Lead` + UTM) + 24h follow-up → optional test-drive calendar → PDF → TTS text.
 - **Inbound VoIP:** Live in code. `POST /voice/inbound` parses caller/DID → branch team (`ODOO_TEAM_*`) → CRM upsert + **Llamada Entrante** activity → TwiML/JSON forward.
-- **WhatsApp (Evolution):** Live. Dual instances `autosell_periferico` / `autosell_san_felipe` → qualification state machine → Odoo handoff (`HANDOFF_TO_HUMAN`) + branch auto-reply.
+- **WhatsApp (Evolution):** Live. Dual instances `autosell_periferico` / `autosell_san_felipe` → qualification FSM. Welcome menu **once** per conversation; follow-ups answer price/stock (Odoo inventory), financing, or requisitos — handoff only on cita / prueba de manejo.
 - **Webform leads:** Code live; IMAP poll of `marketing@autosell.mx` **paused** until Gmail App Password (`scripts/parse_web_leads.py` / `web-leads-imap.timer` soft-fail). Alternate: `POST /webhook/web-lead-email` → Odoo `Website` / `Formulario Web` + Beatriz WA + rep notify.
 - **Marketplace WhatsApp CTAs:** Live in description builder. Branch-mapped `wa.me` links appended to every FB listing text.
 - **Meta Messenger / Lead Ads:** Live redirect path. Inbound Page messages + leadgen → Odoo (`Facebook` / `FB Messenger` or `Facebook Ads` / `FB Lead Form`) + WA CTA `https://wa.me/526142274381`. Full Graph quoting optional.

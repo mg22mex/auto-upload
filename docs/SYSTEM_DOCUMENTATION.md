@@ -2,7 +2,7 @@
 
 **Related:** [PROJECT_GUIDE.md](PROJECT_GUIDE.md) (FB Marketplace sync) · [SETUP.md](../SETUP.md) · [STATUS.md](../STATUS.md) · [README.md](../README.md)
 
-Last updated: **2026-09-28**
+Last updated: **2026-09-29**
 
 ---
 
@@ -129,6 +129,17 @@ PYTHONPATH=. python scripts/sync_and_clean_inventory.py --from-snapshot data/cat
 | **Facebook Lead Ads** | Facebook Ads | FB Lead Form | Register lead + WA redirect template |
 | **Web Forms** | Website | Formulario Web | IMAP / webhook ingest |
 | Voice / Phone | Phone | Inbound Call | Vapi voice path |
+
+### WhatsApp AI turn rules (`src/lead_routing.py` + `src/whatsapp_worker/inbound.py`)
+
+| Turn | Behavior |
+|------|----------|
+| **First message** (no prior session / `NEW_LEAD`) | Welcome menu once; parse vehicle (e.g. Corolla → `Toyota Corolla`); create CRM `MG Quote Lead` |
+| **Follow-up** (session `AI_ACTIVE`, or menu-like text if session missed) | **No** re-greeting. Route to price/stock, financing, requisitos, or cita |
+| **Precio / disponibilidad / ¿cuánto cuesta?** | Live Odoo inventory (≤3 units): model, `$… MXN`, lot (`*` Periférico / `+` San Felipe) |
+| **Cita / prueba de manejo** | `HANDOFF_TO_HUMAN` + rep RR notify |
+
+Env: `AI_MG_QUOTE_LEADS=true` (default). Optional `VAPI_WA_TEXT_FIRST=true` sends turns to Beatriz Chat first; local scripts remain the fallback.
 
 **Facebook → WhatsApp redirect:**
 

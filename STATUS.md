@@ -1,6 +1,6 @@
 # Autosell Auto-upload — Status & Roadmap
 
-Last updated: **2026-09-28**
+Last updated: **2026-09-29**
 
 Companion to [README.md](./README.md), [docs/SYSTEM_DOCUMENTATION.md](./docs/SYSTEM_DOCUMENTATION.md), and [docs/PROJECT_GUIDE.md](./docs/PROJECT_GUIDE.md).
 
@@ -19,7 +19,7 @@ Companion to [README.md](./README.md), [docs/SYSTEM_DOCUMENTATION.md](./docs/SYS
 | **Beatriz Vapi bridge** | **Live on Oracle** | `:8000`; published-stock only; audit logs; timeout **5s**; quick tunnel + **auto Vapi tool URL sync**; TTS lots `*`/`+`; CRM lot→`team_id` RR |
 | WhatsApp Evolution | **Live on Oracle** | Docker → `127.0.0.1:8082`; instances `autosell_periferico` + `autosell_san_felipe` |
 | Cloudflare tunnel | **Connector live** | Named token on VPS; **Neubox DNS for `vapi.autosell.mx` deferred** — use quick `*.trycloudflare.com` until CNAME |
-| WhatsApp qualification bot | **Live** | FSM → `HANDOFF_TO_HUMAN` + Odoo |
+| WhatsApp qualification bot | **Live** | Welcome **once**; price/disponibilidad → Odoo stock; cita → `HANDOFF_TO_HUMAN` |
 | Sales rep Round Robin + notify | **Live** | `REPS_*` + `data/rr_cursor.db`; Evolution 1-on-1 cards |
 | VoIP inbound | **Code live** | `/voice/inbound` — configure `VOICE_DID_*` / forward numbers on VPS |
 | Marketplace `wa.me` CTAs | **Live** | Branch phones in `listing_cta.py` / env overrides |
@@ -44,6 +44,8 @@ Companion to [README.md](./README.md), [docs/SYSTEM_DOCUMENTATION.md](./docs/SYS
 - [x] Inbound webhook `POST /webhook/whatsapp`
 - [x] Stateful lead qualification (payment method → trade-in / down payment → handoff)
 - [x] Soft-capture CRM upsert + branch auto-reply via Evolution
+- [x] Anti-welcome-loop: `format_ai_reply(..., already_greeted=)` greets only on first turn; menu picks / price asks never re-emit `Recibimos tu mensaje…`
+- [x] Price / disponibilidad → Odoo published stock (`lookup_inventory_for_interest` / `parse_stock_vehicle_query`) with price + lot
 
 ### Voice / VoIP
 - [x] Quote pipeline webhook (STT / structured JSON)
