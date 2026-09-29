@@ -45,10 +45,12 @@ flowchart LR
 
 ### Branch closers (round robin)
 
-| Branch | Closers |
-|--------|---------|
-| **Periférico** | Ivan, Alfonso, Veronica |
+| Branch | Closers (WhatsApp RR / `REPS_*`) |
+|--------|----------------------------------|
+| **Periférico** | Ivan, Alfonso, Veronica, **Karen Quiñonez** (`+526142861334`, `res.users` 21) |
 | **San Felipe** | Francisco, Aaron, Charly, Loreto |
+
+**Removed (archived in Odoo, out of RR):** Irving / Iriving Robles Padilla (`res.users` 14), Gonzalo Bernal “Chalo” (`res.users` 13).
 
 Mapping source of truth: `data/odoo_mapping.json` (from `scripts/setup_odoo_structure.py`). Env rosters: `REPS_PERIFERICO` / `REPS_SAN_FELIPE`.
 

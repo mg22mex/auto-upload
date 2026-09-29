@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-29T00:27:09.015644+00:00",
+  "generated_at": "2026-09-29T23:46:34.631539+00:00",
   "teams": {
     "periferico": {
       "team_id": 1,
@@ -18,9 +18,8 @@
     "branch": "",
     "role": "setter",
     "login": "marco.setter@autosell.mx",
-    "created": true,
-    "error": "",
-    "employee_id": 11
+    "created": false,
+    "error": ""
   },
   "reps": {
     "periferico": [
@@ -42,8 +41,7 @@
         "role": "closer",
         "login": "ivan@autosell.mx",
         "created": false,
-        "error": "",
-        "employee_id": 3
+        "error": ""
       },
       {
         "name": "Alfonso Gastélum García ",
@@ -53,8 +51,7 @@
         "role": "closer",
         "login": "contabilidad@autosell.mx",
         "created": false,
-        "error": "",
-        "employee_id": 1
+        "error": ""
       },
       {
         "name": "Veronica Miranda",
@@ -64,8 +61,17 @@
         "role": "closer",
         "login": "veronica@autosell.mx",
         "created": false,
-        "error": "",
-        "employee_id": 5
+        "error": ""
+      },
+      {
+        "name": "Karen Quiñonez",
+        "phone": "+526142861334",
+        "odoo_id": 21,
+        "branch": "periferico",
+        "role": "closer",
+        "login": "karen.quinonez@autosell.mx",
+        "created": true,
+        "error": ""
       }
     ],
     "san_felipe": [
@@ -86,9 +92,8 @@
         "branch": "san_felipe",
         "role": "closer",
         "login": "francisco.sf@autosell.mx",
-        "created": true,
-        "error": "",
-        "employee_id": 9
+        "created": false,
+        "error": ""
       },
       {
         "name": "Aaron Rios",
@@ -98,8 +103,7 @@
         "role": "closer",
         "login": "aaron@autosell.mx",
         "created": false,
-        "error": "",
-        "employee_id": 4
+        "error": ""
       },
       {
         "name": "Charly",
@@ -108,9 +112,8 @@
         "branch": "san_felipe",
         "role": "closer",
         "login": "charly.sf@autosell.mx",
-        "created": true,
-        "error": "",
-        "employee_id": 10
+        "created": false,
+        "error": ""
       },
       {
         "name": "Loreto Ramos",
@@ -120,8 +123,7 @@
         "role": "closer",
         "login": "loreto@autosell.mx",
         "created": false,
-        "error": "",
-        "employee_id": 6
+        "error": ""
       }
     ]
   },
@@ -129,7 +131,8 @@
     "periferico": [
       7,
       2,
-      10
+      10,
+      21
     ],
     "san_felipe": [
       19,
@@ -138,15 +141,5 @@
       11
     ]
   },
-  "warnings": [],
-  "employees": {
-    "2": 1,
-    "7": 3,
-    "8": 4,
-    "10": 5,
-    "11": 6,
-    "18": 11,
-    "19": 9,
-    "20": 10
-  }
+  "warnings": []
 }

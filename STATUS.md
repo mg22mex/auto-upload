@@ -20,7 +20,7 @@ Companion to [README.md](./README.md), [docs/SYSTEM_DOCUMENTATION.md](./docs/SYS
 | WhatsApp Evolution | **Live on Oracle** | Docker → `127.0.0.1:8082`; instances `autosell_periferico` + `autosell_san_felipe` |
 | Cloudflare tunnel | **Connector live** | Named token on VPS; **Neubox DNS for `vapi.autosell.mx` deferred** — use quick `*.trycloudflare.com` until CNAME |
 | WhatsApp qualification bot | **Live** | Welcome **once**; price/disponibilidad → Odoo stock; cita → `HANDOFF_TO_HUMAN` |
-| Sales rep Round Robin + notify | **Live** | `REPS_*` + `data/rr_cursor.db`; Evolution 1-on-1 cards |
+| Sales rep Round Robin + notify | **Live** | `REPS_*` + `data/rr_cursor.db`; PE: Ivan/Alfonso/Veronica/**Karen**; SF: Francisco/Aaron/Charly/Loreto |
 | VoIP inbound | **Code live** | `/voice/inbound` — configure `VOICE_DID_*` / forward numbers on VPS |
 | Marketplace `wa.me` CTAs | **Live** | Branch phones in `listing_cta.py` / env overrides |
 | Odoo CRM attribution | **Live** | Tag `MG Quote Lead` + UTM (WA Directo / FB Messenger / FB Lead Form / Formulario Web / Inbound Call). XML-RPC user **`contabilidad@autosell.mx`** |
