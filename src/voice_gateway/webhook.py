@@ -22,7 +22,11 @@ load_dotenv(_ROOT / ".env")
 
 from src.odoo_sync.client import OdooCRMClient
 from src.odoo_sync.crm import CRMLeadManager
-from src.meta_gateway.gateway import MetaWebhookGateway, parse_messenger_events
+from src.meta_gateway.gateway import (
+    MetaWebhookGateway,
+    parse_leadgen_events,
+    parse_messenger_events,
+)
 from src.whatsapp_worker.client import WhatsAppWorkerClient
 from src.voice_gateway.intent import (
     VOICE_CHANNEL,
@@ -656,6 +660,7 @@ def create_app(
         try:
             payload = await request.json()
             events = parse_messenger_events(payload)
+            lead_ads = parse_leadgen_events(payload)
         except (ValueError, TypeError) as exc:
             raise HTTPException(status_code=400, detail=f"invalid Meta payload: {exc}") from exc
 
@@ -673,9 +678,26 @@ def create_app(
                         "error": str(exc),
                     }
                 )
+        for lead_ad in lead_ads:
+            try:
+                results.append(gateway.process_lead_ad(lead_ad))
+            except Exception as exc:
+                results.append(
+                    {
+                        "status": "error",
+                        "leadgen_id": lead_ad.leadgen_id,
+                        "error": str(exc),
+                    }
+                )
         return JSONResponse(
             status_code=200,
-            content={"status": "event_received", "processed": len(events), "results": results},
+            content={
+                "status": "event_received",
+                "processed": len(events) + len(lead_ads),
+                "messenger": len(events),
+                "lead_ads": len(lead_ads),
+                "results": results,
+            },
         )
 
     @app.post("/webhook/whatsapp")

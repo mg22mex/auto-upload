@@ -260,7 +260,7 @@ class TestCreateOrUpdateLead(unittest.TestCase):
             if c.args[3] == "utm.source" and c.args[4] == "search_read"
         ]
         self.assertIn("WhatsApp", medium_names)
-        self.assertIn("Facebook Marketplace", source_names)
+        self.assertIn("WA Directo", source_names)
 
     def test_voice_attribution_medium_source(self):
         client, models = self._client()

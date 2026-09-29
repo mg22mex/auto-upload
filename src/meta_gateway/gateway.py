@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import parse_qs
 
 from src.meta_gateway.client import MessengerClient
+from src.meta_gateway.messenger_autoreply import facebook_to_whatsapp_redirect
 from src.odoo_sync.client import OdooCRMClient
 from src.quote_engine.engine import CalibratedQuoteEngine
 
@@ -42,6 +43,53 @@ class MessengerEvent:
     sender_id: str
     text: str
     context: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class LeadAdEvent:
+    """Facebook Lead Ads (leadgen) webhook change."""
+
+    leadgen_id: str
+    page_id: str = ""
+    form_id: str = ""
+    ad_id: str = ""
+    created_time: str = ""
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+def parse_leadgen_events(payload: dict[str, Any]) -> list[LeadAdEvent]:
+    """Extract Lead Ads ``leadgen`` changes from a Page webhook payload."""
+    if not isinstance(payload, dict) or payload.get("object") != "page":
+        return []
+    events: list[LeadAdEvent] = []
+    for entry in payload.get("entry") or []:
+        if not isinstance(entry, dict):
+            continue
+        page_id = str(entry.get("id") or "").strip()
+        for change in entry.get("changes") or []:
+            if not isinstance(change, dict):
+                continue
+            if str(change.get("field") or "") != "leadgen":
+                continue
+            value = change.get("value") or {}
+            if not isinstance(value, dict):
+                continue
+            leadgen_id = str(
+                value.get("leadgen_id") or value.get("lead_id") or ""
+            ).strip()
+            if not leadgen_id:
+                continue
+            events.append(
+                LeadAdEvent(
+                    leadgen_id=leadgen_id,
+                    page_id=page_id or str(value.get("page_id") or ""),
+                    form_id=str(value.get("form_id") or ""),
+                    ad_id=str(value.get("ad_id") or ""),
+                    created_time=str(value.get("created_time") or ""),
+                    raw=dict(value),
+                )
+            )
+    return events
 
 
 def _number(value: Any) -> Decimal | None:
@@ -187,8 +235,56 @@ class MetaWebhookGateway:
         )
 
     def process_event(self, event: MessengerEvent) -> dict[str, Any]:
-        """Process one financing request. Non-financial messages are ignored."""
+        """Create Odoo lead (FB Messenger attribution) + WhatsApp redirect reply.
+
+        Financing quotes remain available when the user sends cotización cues;
+        every inbound message still receives the WA redirect CTA.
+        """
         context = event.context
+        vehicle_name = str(
+            _context_value(context, "vehicle_name", "vehicle", "title", "name") or ""
+        ).strip()
+        if not vehicle_name:
+            match = VEHICLE_PATTERN.search(event.text)
+            if match:
+                vehicle_name = match.group(1).strip(" .,-")
+        lead_name = str(
+            _context_value(context, "customer_name", "lead_name")
+            or f"Prospecto Messenger {event.sender_id}"
+        ).strip()
+
+        reply = facebook_to_whatsapp_redirect(
+            name=lead_name,
+            vehicle=vehicle_name,
+        )
+
+        lead_id: int | None = None
+        chatter_id: int | None = None
+        try:
+            self.odoo.authenticate()
+            lead_result = self.odoo.create_or_update_lead(
+                lead_name,
+                f"messenger:{event.sender_id}",
+                vehicle_name or "Consulta Facebook Messenger",
+                self.branch_id,
+                stage_name="Nuevo / Web Lead",
+                channel="facebook_messenger",
+                quote_summary=reply,
+            )
+            lead_id = lead_result.lead_id
+            try:
+                chatter_id = self.odoo.post_quote_to_chatter(
+                    int(lead_id),
+                    f"FB Messenger → WA redirect\n{reply}",
+                )
+            except Exception:
+                chatter_id = None
+        except Exception as exc:
+            print(f"WARN meta messenger CRM: {type(exc).__name__}: {exc}", flush=True)
+
+        graph_response = self.messenger.send_text_message(event.sender_id, reply)
+
+        # Optional financing quote path (does not replace the WA redirect).
         financial = bool(
             FINANCE_TERMS.search(event.text)
             or _context_value(
@@ -200,42 +296,51 @@ class MetaWebhookGateway:
                 "down_payment",
             )
         )
-        if not financial:
-            return {"status": "ignored", "sender_id": event.sender_id}
+        quote_meta: dict[str, Any] = {}
+        if financial and vehicle_name:
+            try:
+                quote_meta = self._maybe_attach_quote(
+                    event=event,
+                    lead_name=lead_name,
+                    vehicle_name=vehicle_name,
+                    lead_id=lead_id,
+                )
+            except Exception as exc:
+                quote_meta = {"quote_error": str(exc)}
 
-        vehicle_name = str(
-            _context_value(context, "vehicle_name", "vehicle", "title", "name") or ""
-        ).strip()
-        if not vehicle_name:
-            match = VEHICLE_PATTERN.search(event.text)
-            if match:
-                vehicle_name = match.group(1).strip(" .,-")
+        return {
+            "status": "redirected_whatsapp",
+            "sender_id": event.sender_id,
+            "lead_id": lead_id,
+            "chatter_id": chatter_id,
+            "channel": "facebook_messenger",
+            "reply": reply,
+            "graph_response": graph_response,
+            **quote_meta,
+        }
 
+    def _maybe_attach_quote(
+        self,
+        *,
+        event: MessengerEvent,
+        lead_name: str,
+        vehicle_name: str,
+        lead_id: int | None,
+    ) -> dict[str, Any]:
+        context = event.context
         term_raw = _context_value(context, "term_months", "term")
         term_match = TERM_PATTERN.search(event.text)
         term_months = int(term_raw or (term_match.group(1) if term_match else 36))
-
         price = _number(_context_value(context, "vehicle_price", "price"))
         if price is None:
             price_match = PRICE_PATTERN.search(event.text)
             if price_match:
                 price = _number(price_match.group(1))
-
         down_payment = _number(_context_value(context, "down_payment", "down"))
         if down_payment is None:
             down_match = DOWN_PATTERN.search(event.text)
             if down_match:
                 down_payment = _number(down_match.group(1))
-
-        if not vehicle_name:
-            reply = (
-                "Para cotizar necesito el vehículo (marca, modelo y año). "
-                "Envíamelo junto con el plazo deseado: 12, 24, 36 o 48 meses."
-            )
-            self.messenger.send_text_message(event.sender_id, reply)
-            return {"status": "needs_vehicle", "sender_id": event.sender_id}
-
-        self.odoo.authenticate()
         if price is None or price <= 0:
             inventory = self.odoo.search_vehicle_inventory(vehicle_name)
             priced = [
@@ -244,12 +349,7 @@ class MetaWebhookGateway:
                 if Decimal(str(item.get("list_price") or 0)) > 0
             ]
             if not priced:
-                reply = (
-                    f"No encontré un precio activo para {vehicle_name}. "
-                    "Compárteme el enlace del vehículo o su precio publicado."
-                )
-                self.messenger.send_text_message(event.sender_id, reply)
-                return {"status": "needs_price", "sender_id": event.sender_id}
+                return {"quote_status": "needs_price"}
             selected = priced[0]
             price = Decimal(str(selected["list_price"]))
             vehicle_name = str(selected.get("name") or vehicle_name)
@@ -262,34 +362,58 @@ class MetaWebhookGateway:
             down_payment=down_payment,
             vehicle_year=extract_model_year(vehicle_name),
         )
-        lead_name = str(
-            _context_value(context, "customer_name", "lead_name")
-            or f"Prospecto Messenger {event.sender_id}"
-        ).strip()
-        reply = format_messenger_quote(lead_name, vehicle_name, quote)
-        lead_result = self.odoo.create_or_update_lead(
-            lead_name,
-            f"messenger:{event.sender_id}",
-            vehicle_name,
-            self.branch_id,
-            down_payment=quote.down_payment,
-            term_months=quote.term_months,
-            quote_summary=reply,
-            stage_name="Quote Generated",
-            channel="facebook_messenger",
-            estimated_monthly_payment=quote.estimated_monthly_payment,
-            vehicle_price=quote.vehicle_price,
-        )
-        lead_id = lead_result.lead_id
-        chatter_id = self.odoo.post_quote_to_chatter(lead_id, reply)
-        graph_response = self.messenger.send_text_message(event.sender_id, reply)
+        summary = format_messenger_quote(lead_name, vehicle_name, quote)
+        if lead_id:
+            try:
+                self.odoo.post_quote_to_chatter(int(lead_id), summary)
+            except Exception:
+                pass
         return {
-            "status": "quoted",
-            "sender_id": event.sender_id,
-            "lead_id": lead_id,
-            "activity_id": lead_result.activity_id,
-            "tag_ids": list(lead_result.tag_ids),
-            "chatter_id": chatter_id,
+            "quote_status": "quoted",
             "estimated_monthly_payment": str(quote.estimated_monthly_payment),
-            "graph_response": graph_response,
         }
+
+    def process_lead_ad(self, event: LeadAdEvent) -> dict[str, Any]:
+        """Register a Facebook Lead Ads form submission in Odoo (FB Lead Form)."""
+        name = (
+            str(event.raw.get("full_name") or event.raw.get("name") or "").strip()
+            or f"Lead Ads {event.leadgen_id}"
+        )
+        phone = str(
+            event.raw.get("phone_number")
+            or event.raw.get("phone")
+            or f"leadgen:{event.leadgen_id}"
+        ).strip()
+        vehicle = str(
+            event.raw.get("vehicle")
+            or event.raw.get("vehicle_interest")
+            or "Consulta Facebook Lead Ads"
+        ).strip()
+        reply = facebook_to_whatsapp_redirect(name=name, vehicle=vehicle)
+        try:
+            self.odoo.authenticate()
+            lead_result = self.odoo.create_or_update_lead(
+                name,
+                phone,
+                vehicle,
+                self.branch_id,
+                stage_name="Nuevo / Web Lead",
+                channel="facebook_lead_ads",
+                quote_summary=(
+                    f"FB Lead Form id={event.leadgen_id} form={event.form_id}\n"
+                    f"{reply}"
+                ),
+            )
+            return {
+                "status": "lead_ad_registered",
+                "leadgen_id": event.leadgen_id,
+                "lead_id": lead_result.lead_id,
+                "channel": "facebook_lead_ads",
+                "reply_template": reply,
+            }
+        except Exception as exc:
+            return {
+                "status": "error",
+                "leadgen_id": event.leadgen_id,
+                "error": f"{type(exc).__name__}: {exc}",
+            }

@@ -111,7 +111,7 @@ class TestMetaGateway(unittest.TestCase):
 
         result = gateway.process_event(parse_messenger_events(MESSENGER_PAYLOAD)[0])
 
-        self.assertEqual(result["status"], "quoted")
+        self.assertEqual(result["status"], "redirected_whatsapp")
         self.assertEqual(result["lead_id"], 501)
         odoo.authenticate.assert_called_once()
         odoo.create_or_update_lead.assert_called_once()
@@ -119,11 +119,57 @@ class TestMetaGateway(unittest.TestCase):
         self.assertEqual(lead_kwargs.args[0], "Ana")
         self.assertEqual(lead_kwargs.args[1], "messenger:PSID-123")
         self.assertEqual(lead_kwargs.kwargs.get("channel"), "facebook_messenger")
-        self.assertEqual(lead_kwargs.kwargs.get("term_months"), 36)
-        self.assertEqual(lead_kwargs.kwargs.get("stage_name"), "Quote Generated")
-        odoo.post_quote_to_chatter.assert_called_once()
         messenger.send_text_message.assert_called_once()
-        self.assertIn("Pago mensual estimado", messenger.send_text_message.call_args.args[1])
+        reply = messenger.send_text_message.call_args.args[1]
+        self.assertIn("WhatsApp oficial", reply)
+        self.assertIn("wa.me/526142274381", reply)
+        self.assertIn("Ana", reply)
+        self.assertIn("Mazda CX-5", reply)
+
+    def test_lead_ad_registers_with_fb_lead_form_channel(self):
+        from src.meta_gateway.gateway import LeadAdEvent, parse_leadgen_events
+
+        payload = {
+            "object": "page",
+            "entry": [
+                {
+                    "id": "PAGE1",
+                    "changes": [
+                        {
+                            "field": "leadgen",
+                            "value": {
+                                "leadgen_id": "LG-9",
+                                "form_id": "F1",
+                                "full_name": "Luis",
+                                "phone_number": "6145550000",
+                                "vehicle": "Corolla 2022",
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+        events = parse_leadgen_events(payload)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].leadgen_id, "LG-9")
+
+        odoo = MagicMock()
+        odoo.create_or_update_lead.return_value = QuoteLeadResult(
+            lead_id=777, activity_id=None, tag_ids=()
+        )
+        gateway = MetaWebhookGateway(
+            verify_token="verify",
+            odoo=odoo,
+            messenger=MagicMock(),
+            branch_id=1,
+        )
+        result = gateway.process_lead_ad(events[0])
+        self.assertEqual(result["status"], "lead_ad_registered")
+        self.assertEqual(result["lead_id"], 777)
+        self.assertEqual(
+            odoo.create_or_update_lead.call_args.kwargs.get("channel"),
+            "facebook_lead_ads",
+        )
 
     def test_verification_uses_exact_token(self):
         gateway = MetaWebhookGateway(

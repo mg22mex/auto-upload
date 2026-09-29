@@ -127,6 +127,8 @@ def ingest_web_lead(
         "email": lead.email or False,
         "vehicle_info": lead.vehicle or "Consulta web",
         "channel": "Website",
+        "medium_name": "Website",
+        "source_name": "Formulario Web",
         "stage_name": stage,
         # CRM owner = Marco (Appointment Setter). Closers get WA via RR notify.
         "assign_round_robin": False,

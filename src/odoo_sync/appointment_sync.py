@@ -284,6 +284,8 @@ def sync_booked_appointment(
             "description": description,
             "notes": description,
             "channel": "WhatsApp",
+            "medium_name": "WhatsApp",
+            "source_name": "WA Directo",
             "appointment_date": when_text or start_dt.strftime("%Y-%m-%d %H:%M"),
             "opportunity_name": title,
             "stage_name": "Beatriz Cita",

@@ -820,16 +820,39 @@ class OdooCRMClient(WhatsAppMixin, FleetMixin, DocumentsMixin, OdooClient):
 
     # Channel → (utm.medium name, utm.source name) for CRM reporting.
     LEAD_ATTRIBUTION: dict[str, tuple[str, str]] = {
-        "whatsapp": ("WhatsApp", "Facebook Marketplace"),
+        # WhatsApp Direct (Evolution / Beatriz WA)
+        "whatsapp": ("WhatsApp", "WA Directo"),
+        "wa": ("WhatsApp", "WA Directo"),
+        "wa directo": ("WhatsApp", "WA Directo"),
+        "whatsapp direct": ("WhatsApp", "WA Directo"),
+        # Facebook Messenger / Page
+        "facebook": ("Facebook", "FB Messenger"),
+        "facebook_messenger": ("Facebook", "FB Messenger"),
+        "facebook messenger": ("Facebook", "FB Messenger"),
+        "fb messenger": ("Facebook", "FB Messenger"),
+        "messenger": ("Facebook", "FB Messenger"),
+        # Facebook Lead Ads
+        "facebook_ads": ("Facebook Ads", "FB Lead Form"),
+        "facebook ads": ("Facebook Ads", "FB Lead Form"),
+        "facebook_lead_ads": ("Facebook Ads", "FB Lead Form"),
+        "facebook lead ads": ("Facebook Ads", "FB Lead Form"),
+        "fb lead form": ("Facebook Ads", "FB Lead Form"),
+        "lead_ads": ("Facebook Ads", "FB Lead Form"),
+        "leadgen": ("Facebook Ads", "FB Lead Form"),
+        # Web forms (autosell.mx / IMAP / webhook)
+        "website": ("Website", "Formulario Web"),
+        "web": ("Website", "Formulario Web"),
+        "autosell web": ("Website", "Formulario Web"),
+        "web form": ("Website", "Formulario Web"),
+        "formulario web": ("Website", "Formulario Web"),
+        # Voice / phone (unchanged)
         "voice / phone": ("Phone", "Inbound Call"),
         "voice_ai": ("Phone", "Inbound Call"),
         "voice": ("Phone", "Inbound Call"),
         "phone": ("Phone", "Inbound Call"),
         "inbound call": ("Phone", "Inbound Call"),
-        "website": ("Website", "Autosell Web"),
-        "web": ("Website", "Autosell Web"),
-        "autosell web": ("Website", "Autosell Web"),
-        "web form": ("Website", "Autosell Web"),
+        # Legacy Marketplace WA (still WhatsApp medium)
+        "facebook marketplace": ("WhatsApp", "WA Directo"),
     }
     QUOTE_LEAD_TAG = "MG Quote Lead"
 
@@ -842,11 +865,15 @@ class OdooCRMClient(WhatsAppMixin, FleetMixin, DocumentsMixin, OdooClient):
             return None, None
         if key in self.LEAD_ATTRIBUTION:
             return self.LEAD_ATTRIBUTION[key]
-        if "whatsapp" in key:
+        if "lead" in key and ("ad" in key or "form" in key or "gen" in key):
+            return self.LEAD_ATTRIBUTION["facebook_lead_ads"]
+        if "messenger" in key or (key.startswith("facebook") and "ad" not in key):
+            return self.LEAD_ATTRIBUTION["facebook_messenger"]
+        if "whatsapp" in key or key.startswith("wa"):
             return self.LEAD_ATTRIBUTION["whatsapp"]
         if "voice" in key or "phone" in key or "llamada" in key:
             return self.LEAD_ATTRIBUTION["voice / phone"]
-        if "web" in key or "autosell" in key:
+        if "web" in key or "autosell" in key or "formulario" in key:
             return self.LEAD_ATTRIBUTION["website"]
         return None, None
 
