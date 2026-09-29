@@ -280,7 +280,15 @@ def process_web_lead_batch(
             "reason": "imap_not_configured",
             "results": [],
         }
-    fetched = fetch_unseen_web_leads(mark_seen=True, limit=limit)
+    try:
+        fetched = fetch_unseen_web_leads(mark_seen=True, limit=limit)
+    except Exception as exc:
+        print(f"WARN web_leads IMAP fetch: {type(exc).__name__}: {exc}", flush=True)
+        return {
+            "status": "error",
+            "reason": f"{type(exc).__name__}: {exc}",
+            "results": [],
+        }
     results: list[dict[str, Any]] = []
     for item in fetched:
         results.append(

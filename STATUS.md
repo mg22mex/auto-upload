@@ -72,8 +72,8 @@ Companion to [README.md](./README.md) and [docs/PROJECT_GUIDE.md](./docs/PROJECT
 Operational blockers and next product modules. Same section in [docs/PROJECT_GUIDE.md](./docs/PROJECT_GUIDE.md#pending-integration-backlog).
 
 ### Environment Secrets
-- [x] **`WEB_LEADS_IMAP_*`** on Oracle for `marketing@autosell.mx` (timer `web-leads-imap.timer`).
-- [x] Enable timer: `systemctl enable --now web-leads-imap.timer` (via `scripts/deploy_oracle_webhook.sh --imap-check`).
+- [~] **`WEB_LEADS_IMAP_*`** written on Oracle for `marketing@autosell.mx`; timer `web-leads-imap.timer` enabled. **Gmail AUTH failed** with account password — needs Google **App Password** (2FA) or correct mailbox host; then re-run `scripts/parse_web_leads.py --check`.
+- [x] Deploy path: `scripts/deploy_oracle_webhook.sh --imap-check`.
 
 ### DNS Migration
 - [ ] Neubox **CNAME** `vapi.autosell.mx` → Cloudflare tunnel hostname (named connector already on VPS; retire `*.trycloudflare.com` once live). **Skipped for now** — keep current production tunnel.
