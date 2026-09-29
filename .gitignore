@@ -16,6 +16,9 @@ __pycache__/
 *.pem.private
 keys/
 
+# Streamlit Cloud / local secrets (never commit real API keys)
+.streamlit/secrets.toml
+
 data/**
 !data/
 !data/autometrica_valuations.json

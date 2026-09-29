@@ -1,0 +1,11 @@
+# Minimal deps for Streamlit Community Cloud (dashboard only).
+# Main app still uses root requirements.txt; set this as the Cloud
+# "requirements file" path if playwright/fastapi install is too heavy.
+streamlit>=1.36.0
+plotly>=5.22.0
+pandas>=2.2.0
+openpyxl>=3.1.0
+reportlab>=4.0.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+PyYAML>=6.0.0
