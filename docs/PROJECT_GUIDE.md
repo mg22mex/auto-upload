@@ -273,7 +273,7 @@ flowchart TD
 | Enable **account_3** in scheduled sync | High | After operator clears old FB listings; add to `active_accounts` |
 | **Repost with holds** | Done | `run_repost.py`, `fb_repost_hold.py`, `repost_holds` table |
 | Scheduled listing repost/relist | Done | `.github/workflows/repost.yml` — Wed+Sun 09:00 Chihuahua; default repost ≥3d |
-| Sales rep Round Robin + Evolution notify | Done | `data/rr_cursor.db`, `REPS_*`, identity + `wa.me` on rep cards (2026-09) |
+| Sales rep Round Robin + Evolution notify | Done | `data/rr_cursor.db`, `REPS_*` (PE: Ivan/Alfonso/Veronica/Karen; SF: Francisco/Aaron/Charly/Loreto); Irving + Gonzalo Bernal archived (2026-09-29) |
 | Richer **update** (photos, title, mileage) | Medium | Today: price + description only |
 | Inventory FB dashboard (discover untracked listings) | Low | Avoids manual wipe; complex / fragile |
 | One-off `fb_clear_listings.py` (mark sold) | Low | Only if inventory is huge; prefer manual |
