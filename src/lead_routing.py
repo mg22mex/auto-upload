@@ -125,23 +125,116 @@ _APPOINTMENT_CONFIRM_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Clock token: 5:30 / 5.30 / 530 / 1730 / 5 — then optional am|pm|hrs.
+# Compact 3–4 digit forms MUST beat bare \d{1,2} so "530" ≠ "53".
+_MERIDIEM = r"(?:a\.?\s*m\.?|p\.?\s*m\.?|am|pm|hrs?|horas?)"
+_TIME_TOKEN = (
+    r"(?:"
+    r"\d{1,2}[:.]\d{2}"
+    r"|\d{3,4}"
+    r"|\d{1,2}"
+    r")"
+    rf"(?:\s*{_MERIDIEM})?"
+)
+
 _WHEN_RE = re.compile(
-    r"(?P<when>"
-    r"ma[nñ]ana(?:\s+a\s+las\s+\d{1,2}(?::\d{2})?\s*(?:am|pm|hrs?|horas?)?)?|"
-    r"hoy(?:\s+a\s+las\s+\d{1,2}(?::\d{2})?\s*(?:am|pm|hrs?|horas?)?)?|"
-    r"pasado\s+ma[nñ]ana|"
-    r"en\s+media\s+hora|"
-    r"media\s+hora|"
-    r"a\s+esa\s+hora|"
-    r"a\s+las?\s+\d{1,2}(?::\d{2})?\s*(?:am|pm|hrs?|horas?)?|"
-    r"\d{1,2}[:.]\d{2}\s*(?:am|pm|hrs?|horas?)?|"
-    r"\d{1,2}\s*(?:am|pm|hrs?|horas?)|"
-    r"el\s+\w+|"
-    r"este\s+\w+|"
-    r"la\s+pr[oó]xima\s+semana"
-    r")",
+    rf"(?P<when>"
+    rf"ma[nñ]ana(?:\s+a\s+las?\s+{_TIME_TOKEN})?|"
+    rf"hoy(?:\s+a\s+las?\s+{_TIME_TOKEN})?|"
+    rf"pasado\s+ma[nñ]ana|"
+    rf"en\s+media\s+hora|"
+    rf"media\s+hora|"
+    rf"a\s+esa\s+hora|"
+    rf"a\s+las?\s+{_TIME_TOKEN}|"
+    rf"{_TIME_TOKEN}|"
+    rf"el\s+\w+|"
+    rf"este\s+\w+|"
+    rf"la\s+pr[oó]xima\s+semana"
+    rf")",
     re.IGNORECASE,
 )
+
+_CLOCK_WHEN_RE = re.compile(
+    rf"(?:"
+    rf"a\s+las?\s+{_TIME_TOKEN}|"
+    rf"{_TIME_TOKEN}"
+    rf")",
+    re.IGNORECASE,
+)
+
+_CLOCK_FORMAT_RE = re.compile(
+    rf"(?P<clock>\d{{1,2}}[:.]\d{{2}}|\d{{3,4}}|\d{{1,2}})"
+    rf"(?:\s*(?P<mer>{_MERIDIEM}))?",
+    re.IGNORECASE,
+)
+
+
+def _parse_clock_hm(clock: str) -> tuple[int, int] | None:
+    """Parse ``5:30`` / ``5.30`` / ``530`` / ``1730`` / ``5`` → (h, m)."""
+    raw = (clock or "").strip()
+    if not raw:
+        return None
+    if ":" in raw or "." in raw:
+        parts = re.split(r"[:.]", raw, maxsplit=1)
+        if len(parts) != 2:
+            return None
+        try:
+            hour, minute = int(parts[0]), int(parts[1])
+        except ValueError:
+            return None
+    elif len(raw) == 4 and raw.isdigit():
+        hour, minute = int(raw[:2]), int(raw[2:])
+    elif len(raw) == 3 and raw.isdigit():
+        hour, minute = int(raw[0]), int(raw[1:])
+    elif raw.isdigit() and 1 <= len(raw) <= 2:
+        hour, minute = int(raw), 0
+    else:
+        return None
+    if hour > 23 or minute > 59:
+        return None
+    return hour, minute
+
+
+def _format_clock_hm(hour: int, minute: int, meridiem: str = "") -> str:
+    """Render clock as ``5:30 pm`` or ``17:30 hrs`` (never ``53``)."""
+    mer = re.sub(r"[.\s]", "", (meridiem or "").casefold())
+    if mer in {"pm", "p"} or (mer.startswith("p") and not mer.startswith("pr")):
+        display_h = hour
+        if hour == 0:
+            display_h = 12
+        elif hour > 12:
+            display_h = hour - 12
+        return f"{display_h}:{minute:02d} pm"
+    if mer in {"am", "a"} or (
+        mer.startswith("a") and "hr" not in mer and "hora" not in mer
+    ):
+        display_h = hour
+        if hour == 0:
+            display_h = 12
+        elif hour > 12:
+            display_h = hour - 12
+        return f"{display_h}:{minute:02d} am"
+    if mer.startswith("hr") or mer.startswith("hora") or hour >= 13:
+        return f"{hour:02d}:{minute:02d} hrs"
+    # Bare hour (e.g. "a las 11") — keep short; always expand minutes when present.
+    if minute == 0:
+        return str(hour)
+    return f"{hour}:{minute:02d}"
+
+
+def normalize_appointment_when(text: str) -> str:
+    """Normalize appointment when-phrases for WA / CRM (``530 pm`` → ``5:30 pm``)."""
+    raw = (text or "").strip()
+    if not raw or not re.search(r"\d", raw):
+        return raw
+
+    def _repl(match: re.Match[str]) -> str:
+        parsed = _parse_clock_hm(match.group("clock"))
+        if parsed is None:
+            return match.group(0)
+        return _format_clock_hm(parsed[0], parsed[1], match.group("mer") or "")
+
+    return _CLOCK_FORMAT_RE.sub(_repl, raw).strip()
 
 
 def ai_mg_quote_enabled() -> bool:
@@ -285,18 +378,8 @@ def detect_appointment_intent(text: str) -> AppointmentIntent:
     when = ""
     match = _WHEN_RE.search(raw)
     if match:
-        when = match.group("when").strip()
+        when = normalize_appointment_when(match.group("when").strip())
     return AppointmentIntent(requested=True, kind=kind, when_text=when, raw=raw)
-
-
-_CLOCK_WHEN_RE = re.compile(
-    r"(?:"
-    r"a\s+las?\s+\d{1,2}(?::\d{2})?\s*(?:am|pm|hrs?|horas?)?|"
-    r"\d{1,2}[:.]\d{2}\s*(?:am|pm|hrs?|horas?)?|"
-    r"\d{1,2}\s*(?:am|pm|hrs?|horas?)"
-    r")",
-    re.IGNORECASE,
-)
 
 
 def detect_appointment_confirmation(text: str) -> AppointmentIntent:
@@ -312,11 +395,13 @@ def detect_appointment_confirmation(text: str) -> AppointmentIntent:
     when = ""
     clock = _CLOCK_WHEN_RE.search(raw)
     if clock:
-        when = clock.group(0).strip()
+        when = normalize_appointment_when(clock.group(0).strip())
+        if when.casefold() in {"a esa hora", "esa hora"}:
+            when = ""
     else:
         match = _WHEN_RE.search(raw)
         if match:
-            when = match.group("when").strip()
+            when = normalize_appointment_when(match.group("when").strip())
             if when.casefold() in {"a esa hora", "esa hora"}:
                 when = ""
     # Bare clock time after a pending ask (e.g. "5:30 pm") counts as confirm.
@@ -1575,6 +1660,7 @@ __all__ = [
     "build_trade_in_quote_message",
     "build_voice_agent_script",
     "complete_voice_appointment_handoff",
+    "normalize_appointment_when",
     "detect_appointment_confirmation",
     "detect_appointment_intent",
     "detect_forma_pago_financing",

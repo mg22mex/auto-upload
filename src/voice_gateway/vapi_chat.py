@@ -869,6 +869,7 @@ def force_book_appointment(
     from src.lead_routing import (
         detect_appointment_confirmation,
         detect_appointment_intent,
+        normalize_appointment_when,
     )
     from src.voice_gateway.vapi_bridge import LeadArgs, create_vapi_lead, format_lead_speech
 
@@ -876,14 +877,31 @@ def force_book_appointment(
     appt = detect_appointment_intent(text)
     if not appt.requested and confirm:
         appt = detect_appointment_confirmation(text)
-    when = (appt.when_text or "").strip()
+    when = normalize_appointment_when((appt.when_text or "").strip())
     meta = meta or {}
-    if not when:
-        when = str(
+    pending_when = normalize_appointment_when(
+        str(
             meta.get("pending_appointment_when")
             or meta.get("last_appointment")
             or ""
         ).strip()
+    )
+    if not when:
+        when = pending_when
+    elif (
+        pending_when
+        and re.fullmatch(
+            r"\d{1,2}(?::\d{2})?\s*(?:am|pm|hrs?|horas?)?",
+            when,
+            re.IGNORECASE,
+        )
+        and re.match(r"(?i)^(hoy|ma[nñ]ana)\b", pending_when)
+        and not re.match(r"(?i)^(hoy|ma[nñ]ana)\b", when)
+    ):
+        # Confirm "5:30 pm" + pending "hoy a las …" → "hoy a las 5:30 pm"
+        when = f"hoy a las {when}" if pending_when.casefold().startswith("hoy") else (
+            f"mañana a las {when}"
+        )
     if not when:
         when = "el horario que prefieras"
     explicit_tradein = detect_tradein_intent(text) or bool(

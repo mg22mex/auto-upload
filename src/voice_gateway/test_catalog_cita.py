@@ -82,7 +82,7 @@ class TestForceBookNoStickyTradein(unittest.TestCase):
                 confirm=True,
                 meta={
                     "pending_appointment_confirmation": "1",
-                    "pending_appointment_when": "en media hora",
+                    "pending_appointment_when": "hoy a las 530 pm",
                     "pending_appointment_vehicle": "2022 Toyota Corolla XLE *",
                     "pending_appointment_branch": "periferico",
                     "interested_vehicle": "2022 Toyota Corolla XLE *",
@@ -94,11 +94,39 @@ class TestForceBookNoStickyTradein(unittest.TestCase):
         args = crm.call_args[0][0]
         self.assertEqual(args.branch, "periferico")
         self.assertIsNone(args.tradein_summary)
-        self.assertIn("5:30", booked["when"])
+        self.assertEqual(booked["when"], "hoy a las 5:30 pm")
+        self.assertIn("hoy a las 5:30 pm", booked["speech"])
+        self.assertNotIn("53", booked["speech"].replace("5:30", ""))
         self.assertIn("Cita confirmada", booked["speech"])
         self.assertIn("Periférico", booked["speech"])
         self.assertIn("Corolla", booked["speech"])
         self.assertFalse(booked.get("pending_confirmation"))
+
+    def test_soft_ask_formats_compact_530(self):
+        with patch(
+            "src.voice_gateway.vapi_bridge.create_vapi_lead",
+            return_value={"status": "created", "lead_id": 1, "dry_run": True},
+        ) as crm:
+            booked = force_book_appointment(
+                text=(
+                    "Hola. Quiero agendar una cita para ver un Corolla "
+                    "hoy a las 530 pm, por favor."
+                ),
+                phone="5216141754852",
+                customer_name="Marco",
+                branch="san_felipe",
+                channel_branch="san_felipe",
+                meta={
+                    "interested_vehicle": "2022 Toyota Corolla XLE *",
+                    "vehicle_branch": "periferico",
+                    "vehicle_price": 365000,
+                },
+            )
+        crm.assert_not_called()
+        self.assertTrue(booked.get("pending_confirmation"))
+        self.assertEqual(booked["when"], "hoy a las 5:30 pm")
+        self.assertIn("hoy a las 5:30 pm", booked["speech"])
+        self.assertNotIn("53", booked["speech"].replace("5:30", ""))
 
 
 class TestChatWithBeatrizCatalogCita(unittest.TestCase):

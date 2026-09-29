@@ -23,7 +23,7 @@ load_dotenv(ROOT / ".env")
 
 MSG = (
     "Hola. Quiero agendar una cita para ver un Corolla que tienen, "
-    "por favor. Se puede en media hora?"
+    "hoy a las 530 pm, por favor."
 )
 CONFIRM = "Confirma a esa hora, 5:30 pm"
 
@@ -108,9 +108,12 @@ def main() -> int:
             and meta_pending.get("pending_appointment_confirmation") == "1"
             and meta_pending.get("pending_appointment_branch") == "periferico"
             and "confirmo esa visita" in (pending.reply_text or "").casefold()
+            and "5:30 pm" in (pending.reply_text or "")
+            and "53" not in (pending.reply_text or "").replace("5:30", "")
             and "195,500" not in (pending.reply_text or "")
             and "Cita confirmada" in (confirmed.reply_text or "")
-            and "5:30" in (confirmed.reply_text or "")
+            and "5:30 pm" in (confirmed.reply_text or "")
+            and "53" not in (confirmed.reply_text or "").replace("5:30", "")
             and "Periférico" in (confirmed.reply_text or "")
             and not meta_done.get("pending_appointment_confirmation")
             and (args.live_crm or crm_branch == "periferico")

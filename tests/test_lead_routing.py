@@ -75,6 +75,22 @@ class TestAppointmentIntent(unittest.TestCase):
         self.assertEqual(intent.kind, "cita")
         self.assertIn("mañana", intent.when_text.lower())
 
+    def test_compact_530_pm_not_53(self):
+        from src.lead_routing import normalize_appointment_when
+
+        self.assertEqual(normalize_appointment_when("530 pm"), "5:30 pm")
+        self.assertEqual(normalize_appointment_when("hoy a las 530 pm"), "hoy a las 5:30 pm")
+        self.assertEqual(normalize_appointment_when("5:30 pm"), "5:30 pm")
+        self.assertEqual(normalize_appointment_when("17:30 hrs"), "17:30 hrs")
+        self.assertEqual(normalize_appointment_when("en media hora"), "en media hora")
+
+        intent = detect_appointment_intent(
+            "Quiero agendar una cita para ver un corolla hoy a las 530 pm"
+        )
+        self.assertTrue(intent.requested)
+        self.assertEqual(intent.when_text, "hoy a las 5:30 pm")
+        self.assertNotIn("53", intent.when_text.replace("5:30", ""))
+
     def test_detects_test_drive(self):
         intent = detect_appointment_intent("Me gustaría una prueba de manejo")
         self.assertTrue(intent.requested)
