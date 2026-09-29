@@ -72,14 +72,15 @@ Companion to [README.md](./README.md) and [docs/PROJECT_GUIDE.md](./docs/PROJECT
 Operational blockers and next product modules. Same section in [docs/PROJECT_GUIDE.md](./docs/PROJECT_GUIDE.md#pending-integration-backlog).
 
 ### Environment Secrets
-- [ ] **`WEB_LEADS_IMAP_PASSWORD`** (plus `WEB_LEADS_IMAP_HOST` / `USER` / `PORT`) for `marketing@autosell.mx` web-lead IMAP ingestion on Oracle.
-- [ ] Enable timer after secrets: `systemctl enable --now web-leads-imap.timer`.
+- [x] **`WEB_LEADS_IMAP_*`** on Oracle for `marketing@autosell.mx` (timer `web-leads-imap.timer`).
+- [x] Enable timer: `systemctl enable --now web-leads-imap.timer` (via `scripts/deploy_oracle_webhook.sh --imap-check`).
 
 ### DNS Migration
-- [ ] Neubox **CNAME** `vapi.autosell.mx` → Cloudflare tunnel hostname (named connector already on VPS; retire `*.trycloudflare.com` once live).
+- [ ] Neubox **CNAME** `vapi.autosell.mx` → Cloudflare tunnel hostname (named connector already on VPS; retire `*.trycloudflare.com` once live). **Skipped for now** — keep current production tunnel.
 
 ### Meta Manager
 - [ ] Facebook **Page Access Token** + webhook verify (`FB_VERIFY_TOKEN`, `FB_PAGE_ACCESS_TOKEN`) for `meta_gateway`.
+- [x] Messenger interim auto-reply → WhatsApp (`src/meta_gateway/messenger_autoreply.py`, `FB_MESSENGER_WA_LINK`).
 - [ ] Meta **WhatsApp Cloud API** / Manager credentials → set `ODOO_WA_ACCOUNT_PERIFERICO` / `ODOO_WA_ACCOUNT_SAN_FELIPE` (native Odoo templates currently `queued_pending_meta` only).
 
 ### Lead Conversion & Commission Attribution Module

@@ -105,6 +105,61 @@ def imap_configured() -> bool:
     )
 
 
+def check_imap_status() -> dict[str, Any]:
+    """Login + SELECT INBOX; return ``{"status": "ok", ...}`` or error payload."""
+    host = (os.getenv(ENV_HOST) or "").strip()
+    port = int((os.getenv(ENV_PORT) or "993").strip() or "993")
+    user = (os.getenv(ENV_USER) or "").strip()
+    folder = (os.getenv(ENV_FOLDER) or "INBOX").strip() or "INBOX"
+    if not imap_configured():
+        return {
+            "status": "error",
+            "configured": False,
+            "reason": "imap_not_configured",
+            "hint": f"Set {ENV_HOST}/{ENV_USER}/{ENV_PASSWORD}",
+        }
+    try:
+        client = imaplib.IMAP4_SSL(host, port)
+        try:
+            client.login(user, (os.getenv(ENV_PASSWORD) or "").strip())
+            typ, _ = client.select(folder, readonly=True)
+            if typ != "OK":
+                return {
+                    "status": "error",
+                    "configured": True,
+                    "host": host,
+                    "user": user,
+                    "folder": folder,
+                    "reason": f"select_failed:{typ}",
+                }
+            typ, data = client.search(None, "UNSEEN")
+            unseen = 0
+            if typ == "OK" and data and data[0]:
+                unseen = len(data[0].split())
+            return {
+                "status": "ok",
+                "configured": True,
+                "host": host,
+                "port": port,
+                "user": user,
+                "folder": folder,
+                "unseen": unseen,
+            }
+        finally:
+            try:
+                client.logout()
+            except Exception:
+                pass
+    except Exception as exc:
+        return {
+            "status": "error",
+            "configured": True,
+            "host": host,
+            "user": user,
+            "reason": f"{type(exc).__name__}: {exc}",
+        }
+
+
 def fetch_unseen_web_leads(
     *,
     mark_seen: bool = True,
@@ -170,6 +225,7 @@ __all__ = [
     "ENV_USER",
     "FetchedEmail",
     "already_processed",
+    "check_imap_status",
     "fetch_unseen_web_leads",
     "imap_configured",
     "mark_processed",

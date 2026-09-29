@@ -52,12 +52,24 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Read a Mailgun/SendGrid-style JSON payload from stdin",
     )
+    p.add_argument(
+        "--check",
+        action="store_true",
+        help="IMAP login/select health check only (prints status: ok|error)",
+    )
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     dry = bool(args.dry_run)
+
+    if args.check:
+        from src.web_leads.imap_poll import check_imap_status
+
+        report = check_imap_status()
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0 if report.get("status") == "ok" else 1
 
     if args.stdin_json:
         payload = json.load(sys.stdin)

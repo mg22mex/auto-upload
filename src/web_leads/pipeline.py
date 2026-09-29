@@ -8,7 +8,6 @@ from typing import Any
 from src.config import PRIMARY_BRANCH, branch_label
 from src.odoo_sync.crm import (
     CRMLeadManager,
-    RepAssignment,
     assign_lead_owner,
     normalize_crm_branch,
 )
@@ -23,6 +22,7 @@ from src.web_leads.models import WebLead
 from src.web_leads.parser import parse_webhook_payload
 
 ENV_STAGE = "WEB_LEAD_STAGE_NAME"
+ENV_STAGE_ALIAS = "WEB_LEADS_STAGE_NAME"
 ENV_DRY_RUN = "WEB_LEADS_DRY_RUN"
 ENV_CUSTOMER_WA = "WEB_LEADS_CUSTOMER_WHATSAPP"
 DEFAULT_STAGE = "Nuevo / Web Lead"
@@ -33,6 +33,7 @@ class WebLeadIngestResult:
     status: str
     lead: WebLead | None = None
     lead_id: int | None = None
+    partner_id: int | None = None
     assignment: dict[str, Any] | None = None
     customer_wa: dict[str, Any] | None = None
     rep_wa: dict[str, Any] | None = None
@@ -45,6 +46,7 @@ class WebLeadIngestResult:
             "status": self.status,
             "lead": self.lead.as_dict() if self.lead else None,
             "lead_id": self.lead_id,
+            "partner_id": self.partner_id,
             "assignment": self.assignment,
             "customer_wa": self.customer_wa,
             "rep_wa": self.rep_wa,
@@ -55,7 +57,12 @@ class WebLeadIngestResult:
 
 
 def web_lead_stage_name() -> str:
-    return (os.getenv(ENV_STAGE) or DEFAULT_STAGE).strip() or DEFAULT_STAGE
+    raw = (
+        (os.getenv(ENV_STAGE) or "").strip()
+        or (os.getenv(ENV_STAGE_ALIAS) or "").strip()
+        or DEFAULT_STAGE
+    )
+    return raw or DEFAULT_STAGE
 
 
 def _dry_run() -> bool:
@@ -121,7 +128,9 @@ def ingest_web_lead(
         "vehicle_info": lead.vehicle or "Consulta web",
         "channel": "Website",
         "stage_name": stage,
-        "assign_round_robin": True,
+        # CRM owner = Marco (Appointment Setter). Closers get WA via RR notify.
+        "assign_round_robin": False,
+        "preserve_salesperson": False,
         "description": notes,
         "physical_location": branch_label(branch),
         "opportunity_name": (
@@ -131,12 +140,21 @@ def ingest_web_lead(
         )[:128],
     }
 
+    from src.odoo_sync.structure import setter_user_id_from_mapping
+
+    setter_id = setter_user_id_from_mapping()
+
     if use_dry:
         assignment = assign_lead_owner(branch)
         return WebLeadIngestResult(
             status="dry_run",
             lead=lead,
-            assignment=assignment.as_dict(),
+            partner_id=-1,
+            assignment={
+                **assignment.as_dict(),
+                "setter_user_id": setter_id,
+                "crm_owner": "setter" if setter_id else "rr_fallback",
+            },
             customer_wa={
                 "would_send": True,
                 "message": format_beatriz_web_lead_message(lead),
@@ -146,51 +164,56 @@ def ingest_web_lead(
         )
 
     manager = crm or CRMLeadManager()
+    partner_id: int | None = None
+    try:
+        from src.odoo_sync.appointment_sync import ensure_customer_partner
+
+        partner_id = ensure_customer_partner(
+            manager._client,
+            name=lead.name,
+            phone=lead.phone,
+            dry_run=False,
+        )
+        if partner_id:
+            payload["partner_id"] = int(partner_id)
+    except Exception as exc:
+        print(f"WARN web_leads partner: {exc}", flush=True)
+
     try:
         crm_result = manager.create_or_update_lead(payload, branch=branch)
     except Exception as exc:
         return WebLeadIngestResult(
             status="error",
             lead=lead,
+            partner_id=partner_id,
             error=f"crm: {type(exc).__name__}: {exc}",
         )
 
     lead_id = int(crm_result.get("lead_id") or 0) or None
-    assignment_meta = crm_result.get("assignment")
-    assignment: RepAssignment | None = None
-    if isinstance(assignment_meta, dict):
-        # Prefer the RR pick already performed inside create_or_update_lead
-        # (even when unassigned — do not advance the cursor twice).
-        assignment = RepAssignment(
-            branch=str(assignment_meta.get("branch") or branch),
-            phone=str(assignment_meta.get("phone") or ""),
-            odoo_id=(
-                int(assignment_meta["odoo_id"])
-                if assignment_meta.get("odoo_id") is not None
-                else None
-            ),
-            rep_name=str(assignment_meta.get("rep_name") or ""),
-            fell_back=bool(assignment_meta.get("fell_back")),
-            rotation_index=int(assignment_meta.get("rotation_index") or 0),
-        )
-    else:
-        existing_uid = crm_result.get("user_id")
-        if existing_uid:
-            assignment = RepAssignment(
-                branch=branch,
-                phone="",
-                odoo_id=int(existing_uid),
-                rep_name="",
-            )
-        else:
-            assignment = assign_lead_owner(branch)
-            if lead_id and assignment.odoo_id:
+
+    # Bind CRM owner to Marco (setter) when mapped.
+    if lead_id and setter_id:
+        try:
+            manager._client.assign_lead_advisor(int(lead_id), int(setter_id))
+            if partner_id:
                 try:
-                    manager._client.assign_lead_advisor(
-                        int(lead_id), int(assignment.odoo_id)
+                    manager._client.execute_kw(
+                        "crm.lead",
+                        "write",
+                        [[int(lead_id)], {"partner_id": int(partner_id)}],
                     )
-                except Exception as exc:
-                    print(f"WARN web_leads assign advisor: {exc}", flush=True)
+                except Exception:
+                    pass
+        except Exception as exc:
+            print(f"WARN web_leads assign setter: {exc}", flush=True)
+
+    # RR closer for WhatsApp alert only (does not overwrite setter ownership).
+    assignment = assign_lead_owner(branch)
+    assignment_dict = {
+        **assignment.as_dict(),
+        "setter_user_id": setter_id,
+        "crm_owner_user_id": setter_id,
+    }
 
     customer_wa: dict[str, Any] | None = None
     if _customer_wa_enabled():
@@ -237,7 +260,8 @@ def ingest_web_lead(
         status="ok",
         lead=lead,
         lead_id=lead_id,
-        assignment=assignment.as_dict() if assignment else None,
+        partner_id=partner_id,
+        assignment=assignment_dict,
         customer_wa=customer_wa,
         rep_wa=rep_wa,
         crm=crm_result,

@@ -118,22 +118,25 @@ class TestIngestDryRun(unittest.TestCase):
         crm.create_or_update_lead.return_value = {
             "status": "created",
             "lead_id": 99,
-            "assignment": {
-                "branch": "san_felipe",
-                "phone": "+526142417711",
-                "odoo_id": 21,
-                "rep_name": "Francisco",
-                "fell_back": False,
-                "rotation_index": 1,
-            },
         }
+        crm._client = MagicMock()
+        crm._client.assign_lead_advisor.return_value = True
         wa = MagicMock()
         with patch(
             "src.notifications.whatsapp.send_whatsapp_message",
             return_value={"ok": True},
         ) as send_cust, patch(
             "src.notifications.whatsapp_rep.notify_rep",
-        ) as notify:
+        ) as notify, patch(
+            "src.web_leads.pipeline.ensure_customer_partner",
+            create=True,
+        ), patch(
+            "src.odoo_sync.appointment_sync.ensure_customer_partner",
+            return_value=55,
+        ), patch(
+            "src.odoo_sync.structure.setter_user_id_from_mapping",
+            return_value=18,
+        ):
             notify.return_value = MagicMock(
                 as_dict=lambda: {"sent": True, "phone": "+526142417711"}
             )
@@ -142,14 +145,16 @@ class TestIngestDryRun(unittest.TestCase):
             )
         self.assertEqual(result.status, "ok")
         self.assertEqual(result.lead_id, 99)
+        self.assertEqual(result.partner_id, 55)
         send_cust.assert_called_once()
         notify.assert_called_once()
         args = crm.create_or_update_lead.call_args
         payload = args.args[0]
         self.assertEqual(args.kwargs.get("branch") or args.args[1], "san_felipe")
         self.assertEqual(payload["channel"], "Website")
-        self.assertTrue(payload["assign_round_robin"])
+        self.assertFalse(payload["assign_round_robin"])
         self.assertIn("Nuevo", payload["stage_name"])
+        crm._client.assign_lead_advisor.assert_called()
 
 
 if __name__ == "__main__":
