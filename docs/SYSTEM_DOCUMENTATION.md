@@ -1,6 +1,8 @@
 # Autosell Ecosystem - Technical & Operational Documentation
 
-**Related:** [PROJECT_GUIDE.md](PROJECT_GUIDE.md) (FB Marketplace sync) · [SETUP.md](../SETUP.md) · [STATUS.md](../STATUS.md)
+**Related:** [PROJECT_GUIDE.md](PROJECT_GUIDE.md) (FB Marketplace sync) · [SETUP.md](../SETUP.md) · [STATUS.md](../STATUS.md) · [README.md](../README.md)
+
+Last updated: **2026-09-28**
 
 ---
 
@@ -18,6 +20,9 @@ flowchart LR
     VB[vapi-bridge :8000]
     IMAP[web-leads-imap timer]
   end
+  subgraph Cloud
+    ST[Streamlit Gerencia BI]
+  end
   subgraph Odoo
     CRM[crm.lead]
     INV[product.template]
@@ -28,6 +33,7 @@ flowchart LR
   WEB --> IMAP -.->|paused App Password| CRM
   WH --> INV
   CRM --> SO
+  ST -->|XML-RPC contabilidad@| CRM
 ```
 
 | Role | Who / What |
@@ -35,6 +41,7 @@ flowchart LR
 | **Inbound AI Bot** | WhatsApp (Vapi Beatriz) → Oracle webhook / vapi-bridge → Odoo CRM |
 | **Appointment Setter** | **Marco** (`res.users` setter; virtual AI / setter ownership on web & WA leads) |
 | **Branch Closers (RR)** | See below — round-robin after setter qualifies / books |
+| **Gerencia BI** | Streamlit Cloud [gerencia-comercial-autosell.streamlit.app](https://gerencia-comercial-autosell.streamlit.app) |
 
 ### Branch closers (round robin)
 
@@ -52,10 +59,11 @@ Mapping source of truth: `data/odoo_mapping.json` (from `scripts/setup_odoo_stru
 | Meta + WA webhooks | Oracle `autosell-webhook` | FastAPI `src/voice_gateway/webhook.py` |
 | Vapi tool bridge | Oracle `vapi-bridge` | Inventory / financing / appointments |
 | FB Marketplace scrape/post | Oracle / CI `fb-worker` | `run_sync.py` — isolated Playwright sessions |
-| Odoo SaaS | `autosellmx.odoo.com` | XML-RPC via `src/odoo_sync/` |
-| Catalog → Odoo inventory | `sync.yml` on fb-worker | **2×/day** 08:00 & 18:00 Chihuahua (`0 14` / `0 0` UTC); diff-only writes |
+| Odoo SaaS | `autosellmx.odoo.com` | XML-RPC as **`contabilidad@autosell.mx`** |
+| Catalog → Odoo inventory | `sync.yml` on fb-worker | **2×/day** 08:00 & 18:00 Chihuahua; **diff-only** writes |
+| Gerencia dashboard | Streamlit Community Cloud / local `:8501` | Active production leads only |
 
-Inventory sync (`scripts/sync_odoo_inventory.py`) bulk-loads Odoo SKUs, compares name/price in memory, and **skips unchanged** products so no-op runs finish in seconds.
+Inventory sync (`scripts/sync_odoo_inventory.py`) bulk-loads Odoo SKUs, compares name/price in memory, and **skips unchanged** products so no-op runs finish in ~1s.
 
 ---
 
@@ -73,14 +81,14 @@ Receives automated leads from:
 
 **Ownership:** Setter (Marco) owns inbound web/WA qualification; closers get RR notify + appointment assignment (`src/odoo_sync/appointment_sync.py`).
 
-**Tag:** `MG Quote Lead` marks Beatriz / quote-pipeline opportunities (production — do not mass-delete).
+**Tag:** `MG Quote Lead` marks Beatriz / quote-pipeline opportunities (production — do **not** mass-delete via `--purge-mg-quote-leads` unless intentional).
 
-Cleanup of **test** CRM + draft SOs:
+**Test data:** permanently unlink smoke leads (not archive-only):
 
 ```bash
-PYTHONPATH=. python scripts/cleanup_odoo_test_data.py --dry-run
-PYTHONPATH=. python scripts/cleanup_odoo_test_data.py
-# Destructive (all MG Quote Lead): add --purge-mg-quote-leads
+PYTHONPATH=. python scripts/cleanup_odoo_test_data.py --dry-run --hard-delete --skip-sales
+PYTHONPATH=. python scripts/cleanup_odoo_test_data.py --hard-delete --skip-sales
+# Patterns: Prueba, ATTR TEST, Llamada Paulina, Marco Test, RR Fresh Test, …
 ```
 
 ### Inventory (`stock.warehouse` / `product.template`)
@@ -96,36 +104,18 @@ Live website catalog (`data/catalog_latest.json` / autosell.mx) is the **source 
 
 Warehouses in Odoo: `Periferico` (code Peri), `San Felipe` (code Sanf).
 
-**Dashboard operations (Inventory app):**
-
-| View | Purpose |
-|------|---------|
-| **Recibidos** | Inbound stock receipts |
-| **Traslados Internos** | Inter-branch transfers (Periférico ↔ San Felipe) |
-| **Órdenes de entrega** | Customer deliveries |
-
-Align prices, tipo tags, warehouses, and orphans:
+**Dashboard operations (Inventory app):** Recibidos · Traslados Internos · Órdenes de entrega.
 
 ```bash
-PYTHONPATH=. python scripts/sync_and_clean_inventory.py --dry-run \
-  --from-snapshot data/catalog_latest.json
-PYTHONPATH=. python scripts/sync_and_clean_inventory.py \
-  --from-snapshot data/catalog_latest.json
+PYTHONPATH=. python scripts/sync_odoo_inventory.py --from-snapshot data/catalog_latest.json
+PYTHONPATH=. python scripts/sync_and_clean_inventory.py --from-snapshot data/catalog_latest.json
 ```
 
-Related: `scripts/sync_odoo_inventory.py` (upsert + archive), `scripts/sync_web_inventory_to_odoo.py` (deprecate `sale_ok=False` without archive).
+### Purchases / Sales / Finance
 
-### Purchases (`purchase.order`)
-
-Used for vehicle **acquisitions** and **reconditioning** costs. Not driven by the AI lead pipeline.
-
-### Sales (`sale.order`)
-
-Formal quotes and completed sales. Draft/test $0 quotes can be cancelled via `cleanup_odoo_test_data.py`. Live customer drafts (non-zero) are left untouched.
-
-### Finance quotes
-
-French amortization runs **locally** in `src/quote_engine/` (CrediAuto term caps by model year). Never rely on Odoo for monthly payment math before channel reply.
+- **`purchase.order`** — acquisitions & reconditioning (not AI-driven).
+- **`sale.order`** — formal quotes / sales; test $0 drafts cleaned via `cleanup_odoo_test_data.py`.
+- **Quotes** — French amortization in `src/quote_engine/` (CrediAuto year caps); compute locally before any channel reply.
 
 ---
 
@@ -139,13 +129,11 @@ French amortization runs **locally** in `src/quote_engine/` (CrediAuto term caps
 | **Web Forms** | Website | Formulario Web | IMAP / webhook ingest |
 | Voice / Phone | Phone | Inbound Call | Vapi voice path |
 
-**Facebook → WhatsApp redirect** (Messenger + Lead Ads copy):
+**Facebook → WhatsApp redirect:**
 
-> ¡Hola [Nombre]! Gracias por contactarnos por Facebook. Para darte información inmediata sobre [Vehículo] y agendar tu prueba de manejo o cotización al instante, escríbenos directamente a nuestro WhatsApp oficial: https://wa.me/526142274381
+> ¡Hola [Nombre]! … WhatsApp oficial: https://wa.me/526142274381
 
-Implementation: `src/meta_gateway/messenger_autoreply.py`, channel map `OdooCRMClient.LEAD_ATTRIBUTION` in `src/odoo_sync/client.py`.
-
-Deploy webhook stack:
+Implementation: `src/meta_gateway/messenger_autoreply.py`, map in `OdooCRMClient.LEAD_ATTRIBUTION`.
 
 ```bash
 ./scripts/deploy_oracle_webhook.sh
@@ -153,25 +141,48 @@ Deploy webhook stack:
 
 ---
 
-## 4. Paused & Pending Integrations
+## 4. Gerencia Comercial Dashboard (Streamlit)
 
-| Item | Status | Blocker |
-|------|--------|---------|
-| **IMAP Web Lead Ingestion** (`marketing@autosell.mx`) | Code complete; timer installed on Oracle | Waiting for Gmail **App Password** (2FA). Soft-fails auth until then (`WEB_LEADS_IMAP_*`) |
-| **Neubox DNS / CNAME Migration** | Deferred | Domain control-panel access levels; traffic stays on active **Oracle VPS + Cloudflare tunnels** |
-| **Native Odoo WhatsApp** | Paused | Needs Meta Manager + `ODOO_WA_ACCOUNT_*` |
+| Tab | Content |
+|-----|---------|
+| 1 · Dashboard Gerencia | KPIs, Plotly funnel by `crm.stage`, efectividad por vendedor/sucursal |
+| 2 · Control Diario | Filterable prospect table (active only) + CSV |
+| 3 · Financiamientos & Perdidos | Credit-stage leads, `lost_reason_id` pie, recent `sale.order` |
+| 4 · Junta Semanal | Compromisos → PDF/Excel + `data/junta_semanal.json` |
+
+**Query rules** (`dashboard/odoo_data.py`):
+
+- Default domain: `active = True` + date window.
+- Excludes test-name markers (`Prueba`, `ATTR TEST`, `Llamada Paulina`, …).
+
+**Credentials:** `st.secrets` or `.env` — `ODOO_URL`, `ODOO_DB`, `ODOO_USERNAME=contabilidad@autosell.mx`, `ODOO_API_KEY`. Template: `.streamlit/secrets.toml.example` (never commit real keys). Dark theme: `.streamlit/config.toml`.
+
+```bash
+PYTHONPATH=. streamlit run dashboard/app.py --server.port 8501
+```
 
 ---
 
-## 5. Operational Cheatsheet
+## 5. Paused & Pending Integrations
+
+| Item | Status | Blocker |
+|------|--------|---------|
+| **IMAP Web Lead Ingestion** (`marketing@autosell.mx`) | Code + timer live; soft-fail on auth | Gmail **App Password** (2FA) |
+| **Neubox DNS / CNAME** (`vapi.autosell.mx`) | Deferred | Panel access; traffic on Oracle + Cloudflare tunnels |
+| **Native Odoo WhatsApp** | Paused | Meta Manager + `ODOO_WA_ACCOUNT_*` |
+
+---
+
+## 6. Operational Cheatsheet
 
 | Task | Command |
 |------|---------|
 | Structure / closers mapping | `python scripts/setup_odoo_structure.py` |
-| Clean test CRM / SOs | `python scripts/cleanup_odoo_test_data.py` |
-| Sync inventory ↔ catalog | `python scripts/sync_and_clean_inventory.py --from-snapshot data/catalog_latest.json` |
+| Hard-purge test CRM leads | `python scripts/cleanup_odoo_test_data.py --hard-delete --skip-sales` |
+| Diff-only inventory sync | `python scripts/sync_odoo_inventory.py --from-snapshot data/catalog_latest.json` |
 | FB Marketplace sync | `python run_sync.py` (operator / CI on fb-worker) |
 | Deploy WA/Meta webhook | `./scripts/deploy_oracle_webhook.sh` |
 | IMAP health (after App Password) | `./scripts/deploy_oracle_webhook.sh --imap-check` |
+| Local Gerencia BI | `PYTHONPATH=. streamlit run dashboard/app.py` |
 
-Secrets: `.env` only (`ODOO_*`, `FB_*`, `WEB_LEADS_IMAP_*`). Never commit sessions or tokens.
+Secrets: `.env` / Streamlit Cloud Secrets only (`ODOO_*`, `FB_*`, `WEB_LEADS_IMAP_*`). Never commit session cookies or API keys.

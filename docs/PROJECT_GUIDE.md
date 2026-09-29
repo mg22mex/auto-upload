@@ -295,7 +295,7 @@ flowchart TD
 Cross-cutting ops blockers and the next CRM product module. Mirrored in [STATUS.md](../STATUS.md#pending-integration-backlog).
 
 ### Environment Secrets
-- [ ] **`WEB_LEADS_IMAP_PASSWORD`** (with `WEB_LEADS_IMAP_HOST` / `USER` / `PORT`) for **`marketing@autosell.mx`** web-lead ingestion (`src/web_leads/`, `scripts/parse_web_leads.py`, `deploy/web-leads-imap.timer`).
+- [~] **`WEB_LEADS_IMAP_PASSWORD`** (with `WEB_LEADS_IMAP_HOST` / `USER` / `PORT`) for **`marketing@autosell.mx`** — timer live; **paused on Gmail AUTH** until App Password (`src/web_leads/`, `scripts/parse_web_leads.py`, soft-fail in CI/unit tests).
 - [ ] On Oracle: write secrets to `.env`, then `systemctl enable --now web-leads-imap.timer`.
 
 ### DNS Migration
@@ -306,7 +306,7 @@ Cross-cutting ops blockers and the next CRM product module. Mirrored in [STATUS.
 - [ ] **Meta WhatsApp API** credentials — set `ODOO_WA_ACCOUNT_PERIFERICO` / `ODOO_WA_ACCOUNT_SAN_FELIPE`; until then native Odoo templates stay `queued_pending_meta` (`src/odoo_sync/whatsapp.py` / triggers).
 
 ### Lead Conversion & Commission Attribution Module
-- [x] **Scaffold:** [`src/attribution.py`](../src/attribution.py) → SQLite `data/commissions.db` (`lead_id`, phone, VIN/name, assigned_rep, first_contact, `WON`/`IN_PROGRESS`/`LOST`, commission %/amount). Stage hook in `OdooTriggerManager`; monthly reconcile against Odoo `MG Quote Lead` tags; Streamlit **Comisiones y Atribución** in [`dashboard/app.py`](../dashboard/app.py).
+- [x] **Scaffold:** [`src/attribution.py`](../src/attribution.py) → SQLite `data/commissions.db`. Stage hook in `OdooTriggerManager`; monthly reconcile against Odoo `MG Quote Lead` tags; CLI [`scripts/reconcile_commissions.py`](../scripts/reconcile_commissions.py). Executive BI is now the Gerencia Streamlit app ([`dashboard/app.py`](../dashboard/app.py) / Streamlit Cloud) — active production leads only; UTM map WA Directo / FB Messenger / FB Lead Form / Formulario Web. XML-RPC user `contabilidad@autosell.mx`.
 - [ ] Align won-stage names with production CRM; harden phone-only roster keys for payroll export.
 - [ ] Schedule `scripts/reconcile_commissions.py` on Oracle for monthly billable summary.
 

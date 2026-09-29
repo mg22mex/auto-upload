@@ -42,7 +42,7 @@ SNAPSHOT_DIR=data/snapshots
 # Phase 2 — Odoo CRM (xmlrpc). Never commit real secrets.
 # ODOO_URL=https://odoo.example.com
 # ODOO_DB=autosell
-# ODOO_USERNAME=api@autosell.mx
+# ODOO_USERNAME=contabilidad@autosell.mx
 # ODOO_API_KEY=
 
 # Phase 2 — WhatsApp via Evolution API (deploy/docker-compose.evolution.yml).

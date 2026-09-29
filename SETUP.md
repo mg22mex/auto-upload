@@ -412,6 +412,7 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt   # fastapi, uvicorn, python-dotenv, …
 # .env must include:
 #   ODOO_URL ODOO_DB ODOO_USERNAME|ODOO_USER ODOO_API_KEY|ODOO_PASSWORD
+#   Production XML-RPC user: contabilidad@autosell.mx
 #   FB_VERIFY_TOKEN FB_PAGE_ACCESS_TOKEN
 # Optional: ODOO_DRY_RUN=true (CRM / calendar / quotes / WA / fleet plan-only)
 # Teams: ODOO_TEAM_PERIFERICO, ODOO_TEAM_SAN_FELIPE
@@ -618,6 +619,20 @@ python scripts/test_webhook_local.py --http http://127.0.0.1:8080
 Routes: `GET /health`, `POST /webhook/voice-lead`, `GET|POST /webhook/facebook`. After TLS proxy, set Meta App callback to `https://YOUR_HOST/webhook/facebook`.
 
 ---
+
+## Gerencia Comercial dashboard (Streamlit)
+
+Executive BI over live Odoo CRM (active production leads only):
+
+```bash
+cd ~/auto-upload && source .venv/bin/activate
+pip install -r dashboard/requirements-cloud.txt   # or full requirements.txt
+PYTHONPATH=. streamlit run dashboard/app.py --server.port 8501
+```
+
+- **Cloud:** [gerencia-comercial-autosell.streamlit.app](https://gerencia-comercial-autosell.streamlit.app)
+- **Secrets:** copy `.streamlit/secrets.toml.example` → `.streamlit/secrets.toml` (gitignored) or paste into Streamlit Cloud Secrets. Use `ODOO_USERNAME=contabilidad@autosell.mx`.
+- **Docs:** [docs/SYSTEM_DOCUMENTATION.md](./docs/SYSTEM_DOCUMENTATION.md) §4.
 
 ## Local development (any machine)
 

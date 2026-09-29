@@ -7,15 +7,16 @@ Sync [autosell.mx](https://www.autosell.mx) public catalog to **Facebook Marketp
 - **AI Voice & lead webhook:** Live. FastAPI `POST /webhook/voice-lead` (also `/voice/webhook`, `/voice/stream`) → intent/STT → quote → Odoo lead (`MG Quote Lead` + UTM) + 24h follow-up → optional test-drive calendar → PDF → TTS text.
 - **Inbound VoIP:** Live in code. `POST /voice/inbound` parses caller/DID → branch team (`ODOO_TEAM_*`) → CRM upsert + **Llamada Entrante** activity → TwiML/JSON forward.
 - **WhatsApp (Evolution):** Live. Dual instances `autosell_periferico` / `autosell_san_felipe` → qualification state machine → Odoo handoff (`HANDOFF_TO_HUMAN`) + branch auto-reply.
-- **Webform leads:** IMAP poll of `marketing@autosell.mx` (`scripts/parse_web_leads.py` / `web-leads-imap.timer`) or `POST /webhook/web-lead-email` → Odoo `Website` attribution + Beatriz WA + rep notify.
+- **Webform leads:** Code live; IMAP poll of `marketing@autosell.mx` **paused** until Gmail App Password (`scripts/parse_web_leads.py` / `web-leads-imap.timer` soft-fail). Alternate: `POST /webhook/web-lead-email` → Odoo `Website` / `Formulario Web` + Beatriz WA + rep notify.
 - **Marketplace WhatsApp CTAs:** Live in description builder. Branch-mapped `wa.me` links appended to every FB listing text.
-- **Meta Messenger webhook:** `[WIP - Paused awaiting Fanpage Administrator permissions]`. Code complete; Page token / webhook subscription pending Fanpage admin.
+- **Meta Messenger / Lead Ads:** Live redirect path. Inbound Page messages + leadgen → Odoo (`Facebook` / `FB Messenger` or `Facebook Ads` / `FB Lead Form`) + WA CTA `https://wa.me/526142274381`. Full Graph quoting optional.
 - **Scrape, diff & FB posting:** Live (`DRY_RUN=false`) for **account_1** and **account_2**. **account_3** excluded until old listings cleared. Slot allocator: **40 listings/account**, overflow removals on, **FIFO waitlist rotation** (oldest sticky yields when full).
 - **Listing bump:** Daily incremental **full relist/repost** for listings ≥ **2 days** old (`scripts/run_weekly_bump.py`; 40 slots/account). Native Renovar optional via `--mode renew`.
-- **Odoo inventory sync:** Live. Catalog → upsert `product.template` (`default_code = autosell_id`); website-missing SKUs marked **sold** then soft-archived (`active=False`).
-- **CRM attribution:** Leads tagged **`MG Quote Lead`**; `medium_id` / `source_id` mapped by channel (WhatsApp Marketplace, Inbound Call, Autosell Web). Native Odoo WhatsApp templates remain **paused** (`ODOO_WA_ACCOUNT_*` unset).
+- **Odoo inventory sync:** Live. Diff-only upsert of `product.template` (`default_code = autosell_id`) **2×/day** (08:00 & 18:00 Chihuahua); unchanged SKUs skip writes (~1s no-op). Website-missing SKUs marked **sold** then soft-archived.
+- **CRM attribution:** Leads tagged **`MG Quote Lead`**; UTM by channel — WhatsApp/`WA Directo`, Facebook/`FB Messenger`, Facebook Ads/`FB Lead Form`, Website/`Formulario Web`, Phone/`Inbound Call`. Native Odoo WhatsApp templates remain **paused** (`ODOO_WA_ACCOUNT_*` unset).
+- **Executive BI dashboard:** Streamlit Gerencia Comercial (`dashboard/app.py`) — KPIs, Control Diario, financiamientos/perdidos, junta semanal. Cloud: [gerencia-comercial-autosell.streamlit.app](https://gerencia-comercial-autosell.streamlit.app) (secrets via `.streamlit/secrets.toml` / Cloud Secrets; XML-RPC user `contabilidad@autosell.mx`). Queries **active production** leads only.
 
-📖 **[Full project guide](./docs/PROJECT_GUIDE.md)** · **[Setup](./SETUP.md)** · **[Status & roadmap](./STATUS.md)**
+📖 **[Full project guide](./docs/PROJECT_GUIDE.md)** · **[System docs](./docs/SYSTEM_DOCUMENTATION.md)** · **[Setup](./SETUP.md)** · **[Status & roadmap](./STATUS.md)**
 
 ## At a glance
 
@@ -23,13 +24,14 @@ Sync [autosell.mx](https://www.autosell.mx) public catalog to **Facebook Marketp
 |--:|--|
 | **AI Voice gateway** | FastAPI `POST /webhook/voice-lead`, `/voice/inbound` |
 | **WhatsApp** | Evolution multi-instance + qualification bot (2 branches) |
-| **Meta Messenger** | WIP paused — code done; awaiting Fanpage admin / Page token |
-| **Quote engine** |  |
-| **Vehicles** | ~130–134 public catalog from `autosell.mx` |
+| **Meta Messenger** | Live WA redirect + Odoo lead; Graph quote optional |
+| **Quote engine** | Local French amortization + CrediAuto year caps |
+| **Vehicles** | ~127–134 public catalog from `autosell.mx` |
 | **FB accounts** | 3 sessions; **2 live** (`account_1`, `account_2`) |
 | **Target FB listings** | ≤ **80** live tracked (`40` × 2); waitlist rotates via FIFO |
-| **Odoo CRM** | `MG Quote Lead` tag + UTM medium/source; branch teams |
-| **Schedule** | 2× daily scrape + Odoo sync + FB sync; daily relist (≥2d age) |
+| **Odoo CRM** | `MG Quote Lead` + UTM; XML-RPC as `contabilidad@autosell.mx` |
+| **Gerencia BI** | Streamlit Cloud + local `dashboard/app.py` (active leads only) |
+| **Schedule** | 2× daily scrape + diff-only Odoo inventory + FB sync; daily relist (≥2d age) |
 
 ## System overview
 
@@ -129,7 +131,17 @@ The FB planner only manages listings in **`sync.db`**. It does not scan Facebook
 | `fleet.py` | `fleet.vehicle` by VIN/plate → lead; location fields for physical-site routing |
 | `documents.py` | `attach_document_to_lead` / `attach_file` via `ir.attachment` |
 
-**CRM UTM map:** WhatsApp → medium `WhatsApp` / source `Facebook Marketplace`; Voice → `Phone` / `Inbound Call`; Web → `Website` / `Autosell Web`.
+**CRM UTM map:**
+
+| Channel | Medium | Source |
+|---------|--------|--------|
+| WhatsApp | WhatsApp | WA Directo |
+| Facebook Messenger | Facebook | FB Messenger |
+| Facebook Lead Ads | Facebook Ads | FB Lead Form |
+| Voice / Phone | Phone | Inbound Call |
+| Website / webform | Website | Formulario Web |
+
+XML-RPC login: **`ODOO_USERNAME=contabilidad@autosell.mx`** (aliases `ODOO_USER` / `ODOO_API_KEY`).
 
 ### Lead routing (round-robin → rep WhatsApp)
 
@@ -251,8 +263,10 @@ uvicorn src.voice_gateway.webhook:app --reload --host 0.0.0.0 --port 8080
 | `AUTOSELL_BASE_URL` | Optional; default `https://www.autosell.mx` |
 | `ODOO_URL` | e.g. `https://autosellmx.odoo.com` |
 | `ODOO_DB` | e.g. `autosellmx` |
-| `ODOO_USER` | XML-RPC login. Alias: `ODOO_USERNAME` |
-| `ODOO_PASSWORD` | API key/password. Alias: `ODOO_API_KEY` |
+| `ODOO_USER` / `ODOO_USERNAME` | XML-RPC login — production: `contabilidad@autosell.mx` |
+| `ODOO_PASSWORD` / `ODOO_API_KEY` | API key/password |
+
+Streamlit Cloud (Gerencia BI): paste the same Odoo keys into app Secrets (see `.streamlit/secrets.toml.example`). Prefer `dashboard/requirements-cloud.txt` if full-root install is too heavy.
 
 Optional in `repost.yml`: `SLACK_WEBHOOK_URL` / `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` (failure alerts), `FB_SESSION_PRECHECK_LIVE`, `LOG_RETENTION_DAYS`.
 
