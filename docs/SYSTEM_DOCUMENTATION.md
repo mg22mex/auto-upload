@@ -60,7 +60,8 @@ Mapping source of truth: `data/odoo_mapping.json` (from `scripts/setup_odoo_stru
 | Vapi tool bridge | Oracle `vapi-bridge` | Inventory / financing / appointments |
 | FB Marketplace scrape/post | Oracle / CI `fb-worker` | `run_sync.py` — isolated Playwright sessions |
 | Odoo SaaS | `autosellmx.odoo.com` | XML-RPC as **`contabilidad@autosell.mx`** |
-| Catalog → Odoo inventory | `sync.yml` on fb-worker | **2×/day** 08:00 & 18:00 Chihuahua; **diff-only** writes |
+| Catalog scrape + FB sync | `sync.yml` on fb-worker | **Every 3h** UTC (+ 14:00 for inventory window) |
+| Catalog → Odoo inventory | same workflow, gated step | **2×/day only** 08:00 & 18:00 Chihuahua; **diff-only** writes |
 | Gerencia dashboard | Streamlit Community Cloud / local `:8501` | Active production leads only |
 
 Inventory sync (`scripts/sync_odoo_inventory.py`) bulk-loads Odoo SKUs, compares name/price in memory, and **skips unchanged** products so no-op runs finish in ~1s.

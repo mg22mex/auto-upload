@@ -2,9 +2,12 @@ name: Sync autosell → Facebook
 
 on:
   schedule:
-    # 08:00 and 18:00 America/Chihuahua (UTC-6) → inventory + FB sync 2×/day.
+    # Frequent scrape + FB Marketplace sync (every 3h UTC).
+    # Extra 14:00 UTC slot so inventory gate (08:00 Chihuahua) can fire —
+    # `*/3` alone never lands on hour 14.
+    # Inventory step itself runs only 2×/day (14:00 & 00:00 UTC).
+    - cron: "0 */3 * * *"
     - cron: "0 14 * * *"
-    - cron: "0 0 * * *"
   workflow_dispatch:
     inputs:
       skip_odoo:
@@ -98,6 +101,7 @@ jobs:
           echo "SKIP_ODOO: using cached catalog ($(wc -c < data/catalog_latest.json) bytes)"
 
       - name: Sync Odoo product inventory
+        # 2×/day only on schedule (08:00 & 18:00 Chihuahua); always on manual dispatch.
         if: ${{ inputs.skip_odoo != true }}
         env:
           ODOO_URL: ${{ secrets.ODOO_URL }}
@@ -107,7 +111,18 @@ jobs:
           # Canonical names also accepted by OdooCRMClient
           ODOO_USERNAME: ${{ secrets.ODOO_USERNAME }}
           ODOO_API_KEY: ${{ secrets.ODOO_API_KEY }}
-        run: python scripts/sync_odoo_inventory.py --from-snapshot data/snapshots/catalog_latest.json
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -eux
+          HOUR_UTC="$(date -u +%H)"
+          # Inventory windows: 14:00 UTC (08:00 Chihuahua) and 00:00 UTC (18:00 Chihuahua).
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ] || \
+             [ "${HOUR_UTC}" = "14" ] || [ "${HOUR_UTC}" = "00" ]; then
+            echo "Running Odoo inventory sync (event=${EVENT_NAME} hour_utc=${HOUR_UTC})"
+            python scripts/sync_odoo_inventory.py --from-snapshot data/snapshots/catalog_latest.json
+          else
+            echo "Skip Odoo inventory sync (2×/day only at 08:00 & 18:00 Chihuahua; hour_utc=${HOUR_UTC})"
+          fi
 
       - name: Diff and sync (live on account_1 + account_2; account_3 via config active_accounts)
         env:

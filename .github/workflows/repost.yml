@@ -129,6 +129,7 @@ jobs:
           echo "SKIP_ODOO: using cached catalog ($(wc -c < data/catalog_latest.json) bytes)"
 
       - name: Sync Odoo product inventory
+        # 2×/day only on schedule (08:00 & 18:00 Chihuahua); always on manual dispatch.
         if: ${{ inputs.skip_odoo != true }}
         env:
           ODOO_URL: ${{ secrets.ODOO_URL }}
@@ -137,7 +138,17 @@ jobs:
           ODOO_PASSWORD: ${{ secrets.ODOO_PASSWORD }}
           ODOO_USERNAME: ${{ secrets.ODOO_USERNAME }}
           ODOO_API_KEY: ${{ secrets.ODOO_API_KEY }}
-        run: python scripts/sync_odoo_inventory.py --from-snapshot data/snapshots/catalog_latest.json
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -eux
+          HOUR_UTC="$(date -u +%H)"
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ] || \
+             [ "${HOUR_UTC}" = "14" ] || [ "${HOUR_UTC}" = "00" ]; then
+            echo "Running Odoo inventory sync (event=${EVENT_NAME} hour_utc=${HOUR_UTC})"
+            python scripts/sync_odoo_inventory.py --from-snapshot data/snapshots/catalog_latest.json
+          else
+            echo "Skip Odoo inventory sync (2×/day only at 08:00 & 18:00 Chihuahua; hour_utc=${HOUR_UTC})"
+          fi
         continue-on-error: true
 
       - name: "Resolve bump mode (default: repost)"

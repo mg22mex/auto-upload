@@ -48,6 +48,26 @@ class TestRepostAgeInputs(unittest.TestCase):
         self.assertIn("older_than", inputs)
         self.assertIn("force", inputs)
 
+    def test_sync_schedule_is_frequent_every_3h(self):
+        payload = yaml.safe_load((WORKFLOWS / "sync.yml").read_text(encoding="utf-8"))
+        crons = [c["cron"] for c in _on(payload).get("schedule") or []]
+        self.assertIn("0 */3 * * *", crons)
+        self.assertIn("0 14 * * *", crons)
+
+    def test_sync_inventory_step_is_hour_gated(self):
+        text = (WORKFLOWS / "sync.yml").read_text(encoding="utf-8")
+        self.assertIn("Sync Odoo product inventory", text)
+        self.assertIn('HOUR_UTC="$(date -u +%H)"', text)
+        self.assertIn('[ "${HOUR_UTC}" = "14" ]', text)
+        self.assertIn('[ "${HOUR_UTC}" = "00" ]', text)
+        self.assertIn("Skip Odoo inventory sync", text)
+
+    def test_repost_inventory_step_is_hour_gated(self):
+        text = (WORKFLOWS / "repost.yml").read_text(encoding="utf-8")
+        self.assertIn("Sync Odoo product inventory", text)
+        self.assertIn('HOUR_UTC="$(date -u +%H)"', text)
+        self.assertIn('[ "${HOUR_UTC}" = "14" ]', text)
+
 
 if __name__ == "__main__":
     unittest.main()
