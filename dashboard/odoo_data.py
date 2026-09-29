@@ -76,6 +76,131 @@ def load_branch_map() -> dict[int, str]:
     return out or {1: "Periférico", 5: "San Felipe"}
 
 
+def load_user_branch_map() -> dict[int, str]:
+    """res.users id → Periférico | San Felipe from ``data/odoo_mapping.json``."""
+    labels = {"periferico": "Periférico", "san_felipe": "San Felipe"}
+    out: dict[int, str] = {}
+    if not MAPPING_PATH.is_file():
+        return out
+    try:
+        data = json.loads(MAPPING_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return out
+    closer_ids = data.get("closer_user_ids") or {}
+    for branch_key, user_ids in closer_ids.items():
+        label = labels.get(str(branch_key), "")
+        if not label:
+            continue
+        for uid in user_ids or []:
+            try:
+                out[int(uid)] = label
+            except (TypeError, ValueError):
+                continue
+    # Also walk reps list (covers desk / future entries)
+    for branch_key, entries in (data.get("reps") or {}).items():
+        label = labels.get(str(branch_key), "")
+        if not label:
+            continue
+        for entry in entries or []:
+            uid = entry.get("odoo_id") if isinstance(entry, dict) else None
+            if uid is None:
+                continue
+            try:
+                out[int(uid)] = label
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def _branch_from_text(label: str | None) -> str | None:
+    text = (label or "").strip().lower()
+    if not text:
+        return None
+    # Normalize accents lightly
+    text = (
+        text.replace("é", "e")
+        .replace("í", "i")
+        .replace("á", "a")
+        .replace("ó", "o")
+        .replace("ú", "u")
+    )
+    if "felipe" in text or text in {"sf", "san_felipe"}:
+        return "San Felipe"
+    if "perifer" in text or text in {"pe", "periferico"}:
+        return "Periférico"
+    return None
+
+
+def load_tag_name_map(
+    client: Any | None,
+    tag_ids: set[int],
+) -> dict[int, str]:
+    """crm.tag id → name for the given ids."""
+    ids = sorted({int(t) for t in tag_ids if t})
+    if not ids or client is None:
+        return {}
+    try:
+        rows = client.execute_kw(
+            "crm.tag",
+            "search_read",
+            [[("id", "in", ids)]],
+            {"fields": ["id", "name"], "limit": len(ids)},
+        )
+    except Exception:
+        return {}
+    return {int(r["id"]): str(r.get("name") or "") for r in (rows or [])}
+
+
+def resolve_sucursal(
+    row: dict[str, Any],
+    *,
+    team_map: dict[int, str],
+    user_map: dict[int, str],
+    tag_names: dict[int, str] | None = None,
+) -> str:
+    """Branch attribution with multi-field fallback.
+
+    Order:
+      1. Lead tag matching San Felipe / Periférico
+      2. Sales team explicitly San Felipe (name or mapped team_id)
+      3. Assigned salesperson roster branch
+      4. Default Periférico (incl. PE team when salesperson unmapped)
+    """
+    tag_names = tag_names or {}
+    # 1) Lead tags
+    for tid in row.get("tag_ids") or []:
+        try:
+            name = tag_names.get(int(tid), "")
+        except (TypeError, ValueError):
+            continue
+        hit = _branch_from_text(name)
+        if hit:
+            return hit
+
+    team_name = _m2o_name(row.get("team_id"))
+    team_id = _m2o_id(row.get("team_id"))
+    team_branch = _branch_from_text(team_name)
+    if team_id is not None and team_id in team_map:
+        team_branch = team_map[team_id]
+
+    # 2) Explicit San Felipe team only (do not lock PE team before salesperson)
+    if team_branch == "San Felipe":
+        return "San Felipe"
+
+    # 3) Assigned salesperson → branch roster
+    user_id = _m2o_id(row.get("user_id"))
+    if user_id is not None and user_id in user_map:
+        return user_map[user_id]
+    hit = _branch_from_text(_m2o_name(row.get("user_id")))
+    if hit:
+        return hit
+
+    # 4) Default — keep PE team label when present, else Periférico
+    if team_branch == "Periférico":
+        return "Periférico"
+    return "Periférico"
+
+
 def get_odoo_client():
     """Odoo XML-RPC client — credentials from ``st.secrets`` or env / ``.env``."""
     from dashboard.secrets_util import get_odoo_client as _client_from_secrets
@@ -213,16 +338,33 @@ def normalize_leads(
     rows: list[dict[str, Any]],
     *,
     branch_map: dict[int, str] | None = None,
+    user_map: dict[int, str] | None = None,
+    tag_names: dict[int, str] | None = None,
+    client: Any | None = None,
 ) -> list[dict[str, Any]]:
-    branches = branch_map or load_branch_map()
+    teams = branch_map or load_branch_map()
+    users = user_map if user_map is not None else load_user_branch_map()
+    names = tag_names
+    if names is None:
+        all_tags: set[int] = set()
+        for row in rows:
+            for tid in row.get("tag_ids") or []:
+                try:
+                    all_tags.add(int(tid))
+                except (TypeError, ValueError):
+                    continue
+        names = load_tag_name_map(client, all_tags) if all_tags else {}
+
     out: list[dict[str, Any]] = []
     for row in rows:
-        team_id = _m2o_id(row.get("team_id"))
         stage = _m2o_name(row.get("stage_id"))
         active = bool(row.get("active", True))
         lost_reason = _m2o_name(row.get("lost_reason_id"))
         if not active and not lost_reason:
             lost_reason = "Perdido (sin motivo)"
+        sucursal = resolve_sucursal(
+            row, team_map=teams, user_map=users, tag_names=names
+        )
         out.append(
             {
                 "id": int(row["id"]),
@@ -240,8 +382,7 @@ def normalize_leads(
                 "vendedor": _m2o_name(row.get("user_id")) or "Sin asignar",
                 "user_id": _m2o_id(row.get("user_id")),
                 "team": _m2o_name(row.get("team_id")) or "—",
-                "sucursal": branches.get(team_id or -1)
-                or (_m2o_name(row.get("team_id")) or "Sin sucursal"),
+                "sucursal": sucursal,
                 "expected_revenue": float(row.get("expected_revenue") or 0),
                 "probability": float(row.get("probability") or 0),
                 "create_date": str(row.get("create_date") or ""),
@@ -501,6 +642,9 @@ __all__ = [
     "get_odoo_client",
     "load_branch_map",
     "load_junta_notes",
+    "load_tag_name_map",
+    "load_user_branch_map",
     "normalize_leads",
+    "resolve_sucursal",
     "save_junta_note",
 ]

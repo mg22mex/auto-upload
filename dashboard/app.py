@@ -93,7 +93,7 @@ div[data-testid="stMetric"] [data-testid="stMetricValue"] {
 def _load_bundle(days: int) -> dict:
     client = get_odoo_client()
     raw = fetch_leads(client, days=days, limit=3000, include_lost=False)
-    leads = normalize_leads(raw)
+    leads = normalize_leads(raw, client=client)
     appointments = fetch_calendar_appointments(client)
     orders = fetch_sale_orders(client, days=days)
     kpis = compute_kpis(leads, appointments)
