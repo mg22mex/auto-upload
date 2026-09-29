@@ -301,6 +301,25 @@ class TestAiMgQuoteFlow(unittest.TestCase):
         self.assertFalse(t2.odoo_handoff)
         self.assertIn("INE", t2.reply_text)
 
+    def test_price_followup_does_not_repeat_welcome(self):
+        t1 = self._turn("Hola. Quiero un Corolla. Vi que tienen uno.")
+        self.store.save(t1.session)
+        self.assertIn("Corolla", t1.session.vehicle_interest)
+        t2 = self._turn(
+            "Precio y disponibilidad.",
+            self.store.get("5216141234567", "autosell_san_felipe"),
+        )
+        self.assertEqual(t2.session.state, STATE_AI_ACTIVE)
+        self.assertNotIn("Puedo ayudarte con", t2.reply_text)
+        self.assertNotIn("Recibimos tu mensaje sobre", t2.reply_text)
+        self.assertIn("Corolla", t2.reply_text)
+
+    def test_price_followup_without_session_skips_welcome(self):
+        """Even if qualification.db miss, menu picks must not re-greet."""
+        turn = self._turn("Precio y disponibilidad.")
+        self.assertNotIn("Puedo ayudarte con", turn.reply_text)
+        self.assertNotIn("Recibimos tu mensaje sobre", turn.reply_text)
+
     def test_appointment_request_hands_off(self):
         t1 = self._turn("Toyota Corolla 2020 a cuenta")
         self.store.save(t1.session)

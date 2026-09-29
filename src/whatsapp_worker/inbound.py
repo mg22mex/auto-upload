@@ -618,6 +618,121 @@ def process_qualification_turn(
     return QualificationTurnResult(session=session, reply_text="")
 
 
+def _refresh_vehicle_interest(session: QualificationSession, text: str) -> str:
+    """Keep last parsed purchase interest; never overwrite with menu replies."""
+    from src.lead_routing import (
+        extract_desired_vehicle,
+        short_vehicle_label,
+        wants_price_or_availability,
+    )
+
+    desired = extract_desired_vehicle(text)
+    if desired:
+        session.vehicle_interest = desired
+        return desired
+
+    # Menu / follow-up replies must not replace a real vehicle interest.
+    stripped = (text or "").strip().casefold().rstrip(".!?")
+    menuish = wants_price_or_availability(text) or stripped in {
+        "precio y disponibilidad",
+        "financiamiento",
+        "financiamiento / enganche",
+        "requisitos",
+        "requisitos y documentación",
+        "requisitos y documentacion",
+        "cita",
+        "prueba de manejo",
+    }
+    if menuish and not session.vehicle_interest and session.initial_message:
+        desired = extract_desired_vehicle(session.initial_message)
+        if desired:
+            session.vehicle_interest = desired
+            return desired
+
+    if session.vehicle_interest:
+        prior = extract_desired_vehicle(session.vehicle_interest)
+        if prior:
+            session.vehicle_interest = prior
+        else:
+            cleaned = short_vehicle_label(session.vehicle_interest)
+            if cleaned:
+                session.vehicle_interest = cleaned
+        return session.vehicle_interest
+
+    if session.initial_message and not menuish:
+        desired = extract_desired_vehicle(session.initial_message)
+        if desired:
+            session.vehicle_interest = desired
+            return desired
+        session.vehicle_interest = session.initial_message.strip()
+        return session.vehicle_interest
+
+    if not menuish and (text or "").strip():
+        session.vehicle_interest = text.strip()
+        return session.vehicle_interest
+    return session.vehicle_interest or ""
+
+
+def _inventory_rows_for_turn(
+    session: QualificationSession,
+    text: str,
+    *,
+    already_greeted: bool,
+) -> list[dict[str, Any]] | None:
+    """Fetch Odoo stock when the turn asks price/availability (or first vehicle ask)."""
+    from src.lead_routing import lookup_inventory_for_interest, wants_price_or_availability
+
+    interest = (session.vehicle_interest or session.initial_message or "").strip()
+    desired = (
+        extract_desired_vehicle_safe(text)
+        or extract_desired_vehicle_safe(interest)
+    )
+    if not desired:
+        return None
+    price_ask = wants_price_or_availability(text)
+    should_lookup = price_ask or not already_greeted
+    if not should_lookup:
+        return None
+    rows = lookup_inventory_for_interest(desired, text=text)
+    # First-turn soft probe: only inject rows when we found stock; otherwise
+    # let the welcome menu run. Explicit price asks always get a stock reply.
+    if not rows and not price_ask:
+        return None
+    return rows
+
+
+def extract_desired_vehicle_safe(text: str) -> str:
+    try:
+        from src.lead_routing import parse_stock_vehicle_query
+
+        return parse_stock_vehicle_query(text) or ""
+    except Exception:
+        return ""
+
+
+def _looks_like_followup_reply(text: str) -> bool:
+    """Menu picks / short asks even if qualification session was lost."""
+    from src.lead_routing import wants_price_or_availability
+
+    stripped = (text or "").strip().casefold().rstrip(".!?")
+    if wants_price_or_availability(text):
+        return True
+    return stripped in {
+        "precio y disponibilidad",
+        "financiamiento",
+        "financiamiento / enganche",
+        "requisitos",
+        "requisitos y documentación",
+        "requisitos y documentacion",
+        "cita",
+        "prueba de manejo",
+        "1",
+        "2",
+        "3",
+        "4",
+    }
+
+
 def _process_ai_turn(
     event: WhatsAppInboundEvent,
     session: QualificationSession,
@@ -824,10 +939,13 @@ def _process_ai_turn(
         )
 
     if session.state == STATE_NEW_LEAD:
+        # Session row missing but message is clearly a follow-up → skip welcome.
+        already_greeted = _looks_like_followup_reply(event.text)
         session.state = STATE_AI_ACTIVE
         session.handling_agent = agent_ai
-        if not session.vehicle_interest:
+        if not session.vehicle_interest and not _looks_like_followup_reply(event.text):
             session.vehicle_interest = session.initial_message or event.text.strip()
+        _refresh_vehicle_interest(session, event.text)
         session.updated_at = now
 
         from src.lead_routing import (
@@ -863,11 +981,16 @@ def _process_ai_turn(
                 routing=routing,
             )
 
+        inv_rows = _inventory_rows_for_turn(
+            session, event.text, already_greeted=already_greeted
+        )
         reply = format_ai_reply(
             name=session.contact_name or event.name,
             text=event.text,
             vehicle_interest=session.vehicle_interest,
             branch_name=session.physical_location,
+            already_greeted=already_greeted,
+            inventory_rows=inv_rows,
         )
         return QualificationTurnResult(
             session=session,
@@ -984,12 +1107,18 @@ def _process_ai_turn(
 
     session.state = STATE_AI_ACTIVE
     session.handling_agent = agent_ai
+    _refresh_vehicle_interest(session, event.text)
     session.updated_at = now
+    inv_rows = _inventory_rows_for_turn(
+        session, event.text, already_greeted=True
+    )
     reply = format_ai_reply(
         name=session.contact_name or event.name,
         text=event.text,
         vehicle_interest=session.vehicle_interest or session.initial_message,
         branch_name=session.physical_location,
+        already_greeted=True,
+        inventory_rows=inv_rows,
     )
     return QualificationTurnResult(
         session=session,

@@ -413,6 +413,153 @@ def detect_appointment_confirmation(text: str) -> AppointmentIntent:
     return AppointmentIntent(requested=True, kind="cita", when_text=when, raw=raw)
 
 
+_PRICE_AVAIL_TOKENS = (
+    "precio",
+    "disponib",
+    "cuesta",
+    "cuestan",
+    "cuanto",
+    "cuánto",
+    "vale ",
+    "vale?",
+    "stock",
+    "existencia",
+    "donde lo",
+    "dónde lo",
+    "donde la",
+    "dónde la",
+    "donde están",
+    "dónde están",
+    "donde estan",
+    "dónde estan",
+    "hay disponible",
+)
+
+
+def wants_price_or_availability(text: str) -> bool:
+    """True when the user asks for price / stock / location of a unit."""
+    lowered = (text or "").casefold()
+    return any(token in lowered for token in _PRICE_AVAIL_TOKENS)
+
+
+def short_vehicle_label(vehicle_interest: str, text: str = "") -> str:
+    """Prefer parsed make/model over raw chat paste for replies."""
+    for candidate in (vehicle_interest, text):
+        desired = parse_stock_vehicle_query(candidate or "")
+        if desired:
+            return desired
+    raw = (vehicle_interest or text or "").strip()
+    if not raw:
+        return ""
+    # Drop greetings / filler for a readable label.
+    cleaned = re.sub(
+        r"^\s*(?:hola|buenas?|buen\s+d[ií]a|qué\s+tal)[\s,.!]*",
+        "",
+        raw,
+        flags=re.I,
+    ).strip()
+    if len(cleaned) > 80:
+        cleaned = cleaned[:77].rstrip() + "…"
+    return cleaned or raw[:80]
+
+
+def format_inventory_whatsapp_reply(
+    *,
+    name: str = "",
+    vehicle_label: str = "",
+    rows: list[dict[str, Any]],
+    branch_name: str = "",
+) -> str:
+    """WhatsApp-friendly stock lines (price + lot) from Odoo product rows."""
+    who = (name or "Cliente").strip() or "Cliente"
+    branch = (branch_name or "Periférico").strip()
+    label = (vehicle_label or "tu búsqueda").strip() or "tu búsqueda"
+    if not rows:
+        return (
+            f"{who}, ahora mismo no tengo *{label}* disponible en inventario "
+            f"publicado. ¿Buscamos otra versión/año, o te agendo una cita en "
+            f"Autosell {branch}?"
+        )
+
+    try:
+        from src.voice_gateway.vapi_bridge import (
+            _clean_name,
+            format_price_compact_mxn,
+            location_compact_for_title,
+        )
+    except Exception:  # pragma: no cover - defensive import
+        def _clean_name(n: str) -> str:
+            text = re.sub(r"\s+", " ", str(n or "Vehículo").strip())
+            text = re.sub(r"\s*[\*\+\-]\s*", " ", text)
+            return re.sub(r"\s+", " ", text).strip(" *+-")
+
+        def format_price_compact_mxn(a: Any) -> str:
+            try:
+                pesos = int(round(float(a or 0)))
+            except (TypeError, ValueError):
+                return "precio por confirmar"
+            return f"${pesos:,} MXN" if pesos > 0 else "precio por confirmar"
+
+        def location_compact_for_title(title: str) -> str:
+            raw = str(title or "")
+            if "*" in raw:
+                return "Sucursal Periférico"
+            if "+" in raw:
+                return "Sucursal San Felipe"
+            return f"Autosell {branch}"
+
+    lines = [
+        f"¡Claro, {who}! Esto es lo que tengo disponible para *{label}*:",
+        "",
+    ]
+    for index, row in enumerate(rows[:3], start=1):
+        raw_name = str(row.get("name") or "Vehículo")
+        clean = _clean_name(raw_name)
+        price = format_price_compact_mxn(row.get("list_price"))
+        loc = location_compact_for_title(raw_name)
+        lines.append(f"{index}. *{clean}* — {price} — {loc}")
+    lines.extend(
+        [
+            "",
+            "¿Te interesa alguna de estas, o prefieres *financiamiento* / "
+            f"agendar *cita o prueba de manejo* en Autosell {branch}?",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def lookup_inventory_for_interest(
+    vehicle_interest: str,
+    *,
+    text: str = "",
+    limit: int = 3,
+) -> list[dict[str, Any]]:
+    """Live Odoo stock for a free-text vehicle interest (empty on failure)."""
+    label = short_vehicle_label(vehicle_interest, text)
+    if not label:
+        return []
+    desired = parse_stock_vehicle_query(vehicle_interest) or parse_stock_vehicle_query(text)
+    brand = model = None
+    year = None
+    query = label
+    source = desired or label
+    parts = source.split()
+    if len(parts) >= 2:
+        brand, model = parts[0], parts[1]
+        if len(parts) >= 3 and parts[2].isdigit() and len(parts[2]) == 4:
+            year = int(parts[2])
+    try:
+        from src.voice_gateway.vapi_bridge import InventoryArgs, search_inventory
+
+        args = InventoryArgs(brand=brand, model=model, year=year, query=query)
+        return list(search_inventory(args, limit=limit) or [])
+    except ImportError:
+        return []
+    except Exception as exc:
+        print(f"WARN inventory lookup failed for {label!r}: {exc}", flush=True)
+        return []
+
+
 def format_ai_reply(
     *,
     name: str = "",
@@ -420,11 +567,19 @@ def format_ai_reply(
     vehicle_interest: str = "",
     branch_name: str = "",
     appointment: AppointmentIntent | None = None,
+    already_greeted: bool = False,
+    inventory_rows: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Rule-based WhatsApp AI reply (financing / requirements / vehicle / CTA)."""
+    """Rule-based WhatsApp AI reply (financing / requirements / vehicle / CTA).
+
+    The welcome menu runs only when ``already_greeted`` is False. Follow-ups
+    answer the turn (price/stock, financing, requisitos) instead of re-quoting
+    the latest message into the same template.
+    """
     who = (name or "Cliente").strip() or "Cliente"
     branch = (branch_name or "Periférico").strip()
-    interest = (vehicle_interest or text or "").strip()
+    label = short_vehicle_label(vehicle_interest, text)
+    interest = label or (vehicle_interest or "").strip()
     lowered = (text or "").casefold()
 
     if appointment and appointment.requested:
@@ -434,6 +589,18 @@ def format_ai_reply(
             f"{'prueba de manejo' if appointment.kind == 'prueba_manejo' else 'cita'} "
             f"en Autosell {branch} ({when}).\n\n"
             "Un asesor de la sucursal te confirmará en breve por WhatsApp. 🙌"
+        )
+
+    if inventory_rows is not None and (
+        wants_price_or_availability(text)
+        or (not already_greeted and interest)
+        or wants_price_or_availability(vehicle_interest)
+    ):
+        return format_inventory_whatsapp_reply(
+            name=who,
+            vehicle_label=interest or "tu búsqueda",
+            rows=inventory_rows,
+            branch_name=branch,
         )
 
     if any(token in lowered for token in ("requisito", "documento", "papeles", "ine", "comprobante")):
@@ -459,28 +626,51 @@ def format_ai_reply(
             f"Con gusto te ayudo con el financiamiento, {who}. "
             "En Autosell cotizamos a plazos (12–60 meses) con enganche flexible "
             "y opción de auto a cambio.\n\n"
-            f"{'Sobre tu interés: ' + interest + chr(10) + chr(10) if interest else ''}"
+            f"{'Sobre tu interés: *' + interest + '*' + chr(10) + chr(10) if interest else ''}"
             "¿Quieres que te prepare una cotización estimada, o prefieres "
             "agendar una *cita / prueba de manejo* en sucursal?"
         )
 
-    if interest:
+    if wants_price_or_availability(text) or wants_price_or_availability(vehicle_interest):
+        focus = interest or "ese vehículo"
         return (
-            f"¡Hola {who}! Gracias por escribir a Autosell {branch}. "
-            f'Recibimos tu mensaje sobre: "{interest}".\n\n'
-            "Puedo ayudarte con:\n"
-            "• Precio y disponibilidad\n"
-            "• Financiamiento / enganche\n"
-            "• Requisitos y documentación\n"
-            "• Agendar *cita o prueba de manejo* en sucursal\n\n"
-            "¿Qué te gustaría saber primero?"
+            f"{who}, sobre *{focus}*: confirmo precio y disponibilidad en "
+            f"nuestro inventario. ¿En qué sucursal te queda mejor — "
+            f"Autosell Periférico o San Felipe?\n\n"
+            "También puedo cotizar *financiamiento* o agendar *cita / "
+            "prueba de manejo*."
         )
 
+    # Welcome menu — first turn only.
+    if not already_greeted:
+        if interest:
+            return (
+                f"¡Hola {who}! Gracias por escribir a Autosell {branch}. "
+                f"Vi tu interés en *{interest}*.\n\n"
+                "Puedo ayudarte con:\n"
+                "• Precio y disponibilidad\n"
+                "• Financiamiento / enganche\n"
+                "• Requisitos y documentación\n"
+                "• Agendar *cita o prueba de manejo* en sucursal\n\n"
+                "¿Qué te gustaría saber primero?"
+            )
+        return (
+            f"¡Hola {who}! Soy el asistente de Autosell {branch}. "
+            "Puedo orientarte sobre vehículos, financiamiento y requisitos. "
+            "Cuando quieras visitar la sucursal, pide una *cita o prueba de manejo* "
+            "y te conecto con un asesor."
+        )
+
+    # Follow-up without a matched intent — never re-emit the welcome template.
+    if interest:
+        return (
+            f"Claro, {who}. Sobre *{interest}*, dime si quieres "
+            f"*precio y disponibilidad*, *financiamiento*, *requisitos*, "
+            f"o agendar *cita / prueba de manejo* en Autosell {branch}."
+        )
     return (
-        f"¡Hola {who}! Soy el asistente de Autosell {branch}. "
-        "Puedo orientarte sobre vehículos, financiamiento y requisitos. "
-        "Cuando quieras visitar la sucursal, pide una *cita o prueba de manejo* "
-        "y te conecto con un asesor."
+        f"Claro, {who}. ¿Buscas un modelo en particular, o te ayudo con "
+        f"*financiamiento*, *requisitos* o una *cita* en Autosell {branch}?"
     )
 
 
@@ -872,6 +1062,42 @@ def _extract_version(text: str) -> str:
 def extract_trade_in_version(text: str) -> str:
     """Public wrapper for trim/version extraction from free text."""
     return _extract_version(text)
+
+
+def parse_stock_vehicle_query(text: str) -> str | None:
+    """Resolve a stock search label from free text or a normalized session label.
+
+    ``extract_desired_vehicle`` needs desire verbs (quiero/busco). Session state
+    often already holds ``Toyota Corolla`` — accept that form too.
+    """
+    desired = extract_desired_vehicle(text or "")
+    if desired:
+        return desired
+    raw = re.sub(r"\s+", " ", (text or "").strip())
+    if not raw:
+        return None
+    lowered = raw.casefold().replace(" ", "")
+    for alias_key, (make, model) in _MODEL_MAKE_ALIASES.items():
+        if alias_key and alias_key in lowered:
+            year_m = _YEAR_RE.search(raw)
+            parts = [make, model]
+            if year_m:
+                parts.append(year_m.group(0))
+            return " ".join(parts)
+    tokens = raw.split()
+    if len(tokens) >= 2 and tokens[0].isalpha() and tokens[1].replace("-", "").isalnum():
+        make = tokens[0].title()
+        model = tokens[1].title()
+        year = None
+        for tok in tokens[2:4]:
+            if tok.isdigit() and len(tok) == 4:
+                year = tok
+                break
+        parts = [make, model]
+        if year:
+            parts.append(year)
+        return " ".join(parts)
+    return None
 
 
 def extract_desired_vehicle(text: str) -> str | None:
@@ -1668,7 +1894,12 @@ __all__ = [
     "extract_tags",
     "extract_trade_in_version",
     "extract_desired_vehicle",
+    "parse_stock_vehicle_query",
     "format_ai_reply",
+    "format_inventory_whatsapp_reply",
+    "lookup_inventory_for_interest",
+    "short_vehicle_label",
+    "wants_price_or_availability",
     "handle_outbound_voice_request",
     "handle_voice_appointment_result",
     "handoff_appointment_to_rep",

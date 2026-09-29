@@ -132,6 +132,49 @@ class TestAiReply(unittest.TestCase):
         self.assertIn("kilometraje", text.casefold())
         self.assertIn("auto a cambio", text.casefold())
 
+    def test_welcome_only_on_first_turn(self):
+        first = format_ai_reply(
+            name="Marco Gastelum",
+            text="Hola. Quiero un Corolla. Vi que tienen uno.",
+            vehicle_interest="Toyota Corolla",
+            branch_name="Periférico",
+            already_greeted=False,
+        )
+        self.assertIn("Corolla", first)
+        self.assertIn("Puedo ayudarte con", first)
+        self.assertNotIn("Recibimos tu mensaje sobre", first)
+
+        follow = format_ai_reply(
+            name="Marco Gastelum",
+            text="Precio y disponibilidad.",
+            vehicle_interest="Toyota Corolla",
+            branch_name="Periférico",
+            already_greeted=True,
+        )
+        self.assertNotIn("Puedo ayudarte con", follow)
+        self.assertNotIn("Recibimos tu mensaje sobre", follow)
+        self.assertIn("Corolla", follow)
+
+    def test_price_ask_uses_inventory_rows(self):
+        rows = [
+            {
+                "name": "* Toyota Corolla 2020 LE",
+                "list_price": 285000,
+                "default_code": "AS-1",
+            }
+        ]
+        text = format_ai_reply(
+            name="Marco Gastelum",
+            text="Cuanto cuesta, donde lo tienen?",
+            vehicle_interest="Toyota Corolla",
+            branch_name="Periférico",
+            already_greeted=True,
+            inventory_rows=rows,
+        )
+        self.assertIn("285,000", text)
+        self.assertIn("Corolla", text)
+        self.assertNotIn("Puedo ayudarte con", text)
+
 
 class TestTradeInQualification(unittest.TestCase):
     def test_detect_permuta(self):
