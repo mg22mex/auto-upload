@@ -2,9 +2,9 @@ name: Sync autosell → Facebook
 
 on:
   schedule:
-    # 08:00 and 12:00 America/Chihuahua (UTC-6). Adjust if DST differs.
+    # 08:00 and 18:00 America/Chihuahua (UTC-6) → inventory + FB sync 2×/day.
     - cron: "0 14 * * *"
-    - cron: "0 18 * * *"
+    - cron: "0 0 * * *"
   workflow_dispatch:
     inputs:
       skip_odoo:

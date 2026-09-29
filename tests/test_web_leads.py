@@ -8,12 +8,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from src.web_leads.imap_poll import already_processed, mark_processed
+from src.web_leads.imap_poll import already_processed, check_imap_status, mark_processed
 from src.web_leads.models import WebLead
 from src.web_leads.parser import parse_email_message, parse_web_lead_email
 from src.web_leads.pipeline import (
     format_beatriz_web_lead_message,
     ingest_web_lead,
+    process_web_lead_batch,
 )
 
 
@@ -155,6 +156,60 @@ class TestIngestDryRun(unittest.TestCase):
         self.assertFalse(payload["assign_round_robin"])
         self.assertIn("Nuevo", payload["stage_name"])
         crm._client.assign_lead_advisor.assert_called()
+
+
+class TestImapSoftFail(unittest.TestCase):
+    """IMAP auth failures must soft-fail so CI/timer stay green without App Password."""
+
+    def test_batch_not_configured_skips(self):
+        with patch.dict(os.environ, {}, clear=True):
+            # Clear IMAP env
+            for key in (
+                "WEB_LEADS_IMAP_HOST",
+                "WEB_LEADS_IMAP_USER",
+                "WEB_LEADS_IMAP_PASSWORD",
+            ):
+                os.environ.pop(key, None)
+            result = process_web_lead_batch(dry_run=True)
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["reason"], "imap_not_configured")
+
+    def test_batch_auth_failed_soft_fails(self):
+        env = {
+            "WEB_LEADS_IMAP_HOST": "imap.gmail.com",
+            "WEB_LEADS_IMAP_USER": "marketing@autosell.mx",
+            "WEB_LEADS_IMAP_PASSWORD": "not-an-app-password",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            with patch(
+                "src.web_leads.pipeline.fetch_unseen_web_leads",
+                side_effect=Exception("AUTHENTICATIONFAILED Invalid credentials"),
+            ):
+                result = process_web_lead_batch(dry_run=True)
+        self.assertEqual(result["status"], "error")
+        self.assertIn("AUTHENTICATIONFAILED", result["reason"])
+        self.assertEqual(result["results"], [])
+
+    def test_check_imap_status_auth_failed(self):
+        env = {
+            "WEB_LEADS_IMAP_HOST": "imap.gmail.com",
+            "WEB_LEADS_IMAP_USER": "marketing@autosell.mx",
+            "WEB_LEADS_IMAP_PASSWORD": "bad",
+        }
+
+        class FakeIMAP:
+            def login(self, *_a, **_k):
+                raise Exception("AUTHENTICATIONFAILED")
+
+            def logout(self):
+                return None
+
+        with patch.dict(os.environ, env, clear=False):
+            with patch("src.web_leads.imap_poll.imaplib.IMAP4_SSL", return_value=FakeIMAP()):
+                status = check_imap_status()
+        self.assertEqual(status["status"], "error")
+        self.assertTrue(status.get("configured"))
+        self.assertIn("AUTHENTICATIONFAILED", status.get("reason", ""))
 
 
 if __name__ == "__main__":

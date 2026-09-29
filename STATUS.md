@@ -58,9 +58,11 @@ Companion to [README.md](./README.md) and [docs/PROJECT_GUIDE.md](./docs/PROJECT
 
   | Channel | Medium | Source |
   |---------| | ------ | ------ |
-  | WhatsApp | WhatsApp | Facebook Marketplace |
+  | WhatsApp | WhatsApp | WA Directo |
+  | Facebook Messenger | Facebook | FB Messenger |
+  | Facebook Lead Ads | Facebook Ads | FB Lead Form |
   | Voice / Inbound Call | Phone | Inbound Call |
-  | Web form | Website | Autosell Web |
+  | Web form | Website | Formulario Web |
 
 - [x] Branch sales teams via `ODOO_TEAM_PERIFERICO` / `ODOO_TEAM_SAN_FELIPE` (+ fleet location override)
 - [x] Sales rep Round Robin (`RoundRobinAssigner` + `data/rr_cursor.db`) and Evolution rep cards (`notify_appointment_rep`: real identity + `https://wa.me/`)

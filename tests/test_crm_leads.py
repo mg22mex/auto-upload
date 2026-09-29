@@ -254,7 +254,7 @@ class TestCRMLeadManagerLiveMocked(unittest.TestCase):
         self.assertEqual(vals["team_id"], 5)
         self.assertEqual(vals["medium_id"], utm_ids["utm.medium"]["WhatsApp"])
         self.assertEqual(
-            vals["source_id"], utm_ids["utm.source"]["Facebook Marketplace"]
+            vals["source_id"], utm_ids["utm.source"]["WA Directo"]
         )
 
     def test_web_attribution(self):
@@ -278,7 +278,7 @@ class TestCRMLeadManagerLiveMocked(unittest.TestCase):
             )
         vals = created["vals"]
         self.assertEqual(vals["medium_id"], utm_ids["utm.medium"]["Website"])
-        self.assertEqual(vals["source_id"], utm_ids["utm.source"]["Autosell Web"])
+        self.assertEqual(vals["source_id"], utm_ids["utm.source"]["Formulario Web"])
 
     def test_dedupe_posts_chatter_no_create(self):
         execute_kw, _created, writes, _utm = self._crm_rpc(existing=[4242])
