@@ -1043,6 +1043,45 @@ def force_book_appointment(
         print(f"WARN force_book_appointment CRM failed phone={phone}: {exc}", flush=True)
         crm = {"error": str(exc)}
 
+    # Full Odoo sync: partner + lead ownership + calendar (closer RR, Marco setter).
+    sync_meta: dict[str, Any] = {}
+    if not crm.get("error"):
+        try:
+            from src.odoo_sync.appointment_sync import sync_booked_appointment
+
+            sync_result = sync_booked_appointment(
+                customer_name=name,
+                phone=phone,
+                vehicle=vehicle_for_crm,
+                branch=branch_key,
+                when_text=when,
+                vehicle_price=(
+                    float(meta["vehicle_price"])
+                    if meta.get("vehicle_price") not in (None, "")
+                    else None
+                ),
+                lead_id=(
+                    int(crm["lead_id"])
+                    if crm.get("lead_id") not in (None, "", False)
+                    else None
+                ),
+                dry_run=bool(crm.get("dry_run")),
+            )
+            sync_meta = sync_result.as_dict()
+            if sync_result.lead_id and not crm.get("lead_id"):
+                crm["lead_id"] = sync_result.lead_id
+            if sync_result.warnings:
+                print(
+                    f"WARN appointment_sync phone={phone}: {sync_result.warnings}",
+                    flush=True,
+                )
+        except Exception as exc:
+            print(
+                f"WARN appointment_sync failed phone={phone}: {exc}",
+                flush=True,
+            )
+            sync_meta = {"error": str(exc)}
+
     if confirm or cross_branch:
         speech = (
             f"¡Cita confirmada, {name}! Te esperamos {when} en nuestra "
@@ -1066,6 +1105,7 @@ def force_book_appointment(
         "vehicle": vehicle_for_crm,
         "tradein_note": tradein_note,
         "crm": crm,
+        "sync": sync_meta,
         "branch": branch_key,
         "channel_branch": channel_key,
         "cross_branch": cross_branch,

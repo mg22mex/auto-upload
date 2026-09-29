@@ -12,6 +12,10 @@ Modular layout — shared session in ``base.OdooClient``:
 
 Credentials from environment variables — never hardcode secrets.
 """
+from src.odoo_sync.appointment_sync import (
+    AppointmentSyncResult,
+    sync_booked_appointment,
+)
 from src.odoo_sync.base import OdooClient, OdooCRMError
 from src.odoo_sync.client import (
     OdooCRMClient,
@@ -29,6 +33,7 @@ from src.odoo_sync.quotes import (
     QuotePDFManager,
     resolve_quote_branch,
 )
+from src.odoo_sync.structure import setup_odoo_structure
 from src.odoo_sync.triggers import (
     OdooTriggerManager,
     process_incoming_webhook,
@@ -43,6 +48,7 @@ from src.odoo_sync.whatsapp import (
 )
 
 __all__ = [
+    "AppointmentSyncResult",
     "CRMLeadManager",
     "DocumentsMixin",
     "FleetLinkResult",
@@ -65,4 +71,6 @@ __all__ = [
     "resolve_quote_branch",
     "resolve_team_id",
     "resolve_whatsapp_account",
+    "setup_odoo_structure",
+    "sync_booked_appointment",
 ]

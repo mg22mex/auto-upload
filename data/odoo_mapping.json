@@ -1,0 +1,134 @@
+{
+  "generated_at": "2026-09-29T00:27:09.015644+00:00",
+  "teams": {
+    "periferico": {
+      "team_id": 1,
+      "name": "Ventas Periférico"
+    },
+    "san_felipe": {
+      "team_id": 5,
+      "name": "Ventas San Felipe"
+    }
+  },
+  "setter_user_id": 18,
+  "setter": {
+    "name": "Marco",
+    "phone": "",
+    "odoo_id": 18,
+    "branch": "",
+    "role": "setter",
+    "login": "marco.setter@autosell.mx",
+    "created": true,
+    "error": ""
+  },
+  "reps": {
+    "periferico": [
+      {
+        "name": "Periferico Desk",
+        "phone": "+526142274381",
+        "odoo_id": null,
+        "branch": "periferico",
+        "role": "desk",
+        "login": "",
+        "created": false,
+        "error": ""
+      },
+      {
+        "name": "Ivan Terreros Lugo",
+        "phone": "+526142032347",
+        "odoo_id": 7,
+        "branch": "periferico",
+        "role": "closer",
+        "login": "ivan@autosell.mx",
+        "created": false,
+        "error": ""
+      },
+      {
+        "name": "Alfonso Gastélum García ",
+        "phone": "+526141639458",
+        "odoo_id": 2,
+        "branch": "periferico",
+        "role": "closer",
+        "login": "contabilidad@autosell.mx",
+        "created": false,
+        "error": ""
+      },
+      {
+        "name": "Veronica Miranda",
+        "phone": "+526141625132",
+        "odoo_id": 10,
+        "branch": "periferico",
+        "role": "closer",
+        "login": "veronica@autosell.mx",
+        "created": false,
+        "error": ""
+      }
+    ],
+    "san_felipe": [
+      {
+        "name": "San Felipe Desk",
+        "phone": "+526142274381",
+        "odoo_id": null,
+        "branch": "san_felipe",
+        "role": "desk",
+        "login": "",
+        "created": false,
+        "error": ""
+      },
+      {
+        "name": "Francisco",
+        "phone": "+526142417711",
+        "odoo_id": 19,
+        "branch": "san_felipe",
+        "role": "closer",
+        "login": "francisco.sf@autosell.mx",
+        "created": true,
+        "error": ""
+      },
+      {
+        "name": "Aaron Rios",
+        "phone": "+526142349504",
+        "odoo_id": 8,
+        "branch": "san_felipe",
+        "role": "closer",
+        "login": "aaron@autosell.mx",
+        "created": false,
+        "error": ""
+      },
+      {
+        "name": "Charly",
+        "phone": "+526145957371",
+        "odoo_id": 20,
+        "branch": "san_felipe",
+        "role": "closer",
+        "login": "charly.sf@autosell.mx",
+        "created": true,
+        "error": ""
+      },
+      {
+        "name": "Loreto Ramos",
+        "phone": "+526141764629",
+        "odoo_id": 11,
+        "branch": "san_felipe",
+        "role": "closer",
+        "login": "loreto@autosell.mx",
+        "created": false,
+        "error": ""
+      }
+    ]
+  },
+  "closer_user_ids": {
+    "periferico": [
+      7,
+      2,
+      10
+    ],
+    "san_felipe": [
+      19,
+      8,
+      20,
+      11
+    ]
+  },
+  "warnings": []
+}

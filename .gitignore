@@ -19,6 +19,7 @@ keys/
 data/**
 !data/
 !data/autometrica_valuations.json
+!data/odoo_mapping.json
 sessions/
 tmp/
 *.log
