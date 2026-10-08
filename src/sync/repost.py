@@ -152,8 +152,8 @@ def plan_repost_actions(
                     if now - posted < min_age:
                         age = _posted_age_days(posted_at, now)
                         skipped.append(
-                            f"{autosell_id} on {account_id}: posted {age:.1f}d ago "
-                            f"(min {older_than_days}d)"
+                            f"{autosell_id} on {account_id}: SKIP already-bumped "
+                            f"{age:.1f}d ago (min {older_than_days}d)"
                         )
                         return
                 except ValueError:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import time
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from src.facebook.browser_health import is_browser_dead
@@ -24,6 +26,7 @@ from src.facebook.util import (
     env_float,
     env_int,
     env_str,
+    log_step,
     random_delay,
 )
 from src.models import SyncAction
@@ -37,6 +40,7 @@ class RepostResult:
     browser_reopens: int = 0
     session_expired_accounts: list[str] = None  # type: ignore[assignment]
     accounts_ok: list[str] = None  # type: ignore[assignment]
+    skipped_already_bumped: int = 0
 
     def __post_init__(self) -> None:
         if self.errors is None:
@@ -47,6 +51,47 @@ class RepostResult:
             self.accounts_ok = []
 
 
+def _posted_age_hours(posted_at: str | None) -> float | None:
+    if not posted_at:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(posted_at).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - parsed).total_seconds() / 3600.0
+
+
+def _should_skip_already_bumped(
+    store: SyncStore,
+    action: SyncAction,
+    *,
+    force: bool = False,
+) -> tuple[bool, str]:
+    """Skip listings bumped recently (posted_at reset on last successful relist)."""
+    if force:
+        return False, ""
+    skip_hours = env_float("REPOST_SKIP_IF_BUMPED_HOURS", 36.0)
+    if skip_hours <= 0:
+        return False, ""
+    account_id = action.account_id or ""
+    row = store.get_fb_listing(action.autosell_id, account_id)
+    if row is None:
+        return False, ""
+    posted_at = row["posted_at"] if "posted_at" in row.keys() else None
+    age_h = _posted_age_hours(posted_at)
+    if age_h is None:
+        return False, ""
+    if age_h < skip_hours:
+        return (
+            True,
+            f"already bumped {age_h:.1f}h ago "
+            f"(skip if < {skip_hours:g}h; set REPOST_SKIP_IF_BUMPED_HOURS=0 to disable)",
+        )
+    return False, ""
+
+
 def execute_reposts(
     actions: list[SyncAction],
     store: SyncStore,
@@ -54,6 +99,7 @@ def execute_reposts(
     *,
     root: Path,
     account_order: list[str] | None = None,
+    force: bool = False,
 ) -> RepostResult:
     if not actions:
         return RepostResult()
@@ -65,8 +111,9 @@ def execute_reposts(
         "MAX_PHOTOS_PER_LISTING",
         int(fb_config.get("max_photos_per_listing", 20)),
     )
-    delay_min = env_float("FB_ACTION_DELAY_MIN_SEC", 60.0)
-    delay_max = env_float("FB_ACTION_DELAY_MAX_SEC", 120.0)
+    # Repost inter-listing delay (independent of create-sync FB_ACTION_DELAY_*).
+    delay_min = env_float("REPOST_ACTION_DELAY_MIN_SEC", 20.0)
+    delay_max = env_float("REPOST_ACTION_DELAY_MAX_SEC", 40.0)
     # Relist: hard delete by default (avoids "publicación duplicada").
     # REPOST_REMOVAL_ACTION > sync.repost.removal_action > delete
     removal_action = env_str(
@@ -91,13 +138,18 @@ def execute_reposts(
 
     result = RepostResult()
     ordered_accounts = account_order or list(by_account.keys())
+    log_step(
+        f"Repost batch start accounts={len(ordered_accounts)} "
+        f"actions={sum(len(v) for v in by_account.values())} "
+        f"inter_delay={delay_min:.0f}–{delay_max:.0f}s"
+    )
 
     for account_id in ordered_accounts:
         remaining = list(by_account.get(account_id) or [])
         if not remaining:
             result.accounts_ok.append(account_id)
             continue
-        print(f"Repost: processing {len(remaining)} listing(s) for {account_id}", flush=True)
+        log_step(f"Repost: processing {len(remaining)} listing(s) for {account_id}")
         try:
             session_dir = resolve_session_dir(config, account_id, root)
         except FacebookSessionError:
@@ -139,6 +191,17 @@ def execute_reposts(
                                 format_session_login_error(account_id, session_dir)
                                 + " (session expired mid-run)"
                             )
+                        skip, skip_reason = _should_skip_already_bumped(
+                            store, action, force=force
+                        )
+                        if skip:
+                            log_step(
+                                f"SKIP already-bumped {action.autosell_id} "
+                                f"on {account_id}: {skip_reason}"
+                            )
+                            result.skipped_already_bumped += 1
+                            remaining.pop(0)
+                            continue
                         try:
                             _repost_one(
                                 page,
@@ -178,6 +241,10 @@ def execute_reposts(
                             remaining.pop(0)
 
                         if remaining:
+                            log_step(
+                                f"Inter-listing delay {delay_min:.0f}–{delay_max:.0f}s "
+                                f"({len(remaining)} left on {account_id})"
+                            )
                             random_delay(delay_min, delay_max)
 
                         if (
@@ -238,6 +305,11 @@ def execute_reposts(
         if account_id not in result.session_expired_accounts:
             result.accounts_ok.append(account_id)
 
+    log_step(
+        f"Repost batch done ok={result.reposts} "
+        f"skipped_bumped={result.skipped_already_bumped} "
+        f"errors={len(result.errors)} reopens={result.browser_reopens}"
+    )
     return result
 
 
@@ -273,9 +345,10 @@ def _repost_one(
         )
         action_norm = "delete"
 
-    print(
-        f"Repost {action.autosell_id}: remove-then-create "
-        f"(action={action_norm}, old={old_url or 'none'})"
+    t0 = time.monotonic()
+    log_step(
+        f"DELETE_START {action.autosell_id} action={action_norm} "
+        f"old={old_url or 'none'}"
     )
 
     removed = False
@@ -291,8 +364,10 @@ def _repost_one(
             clear_url=True,
         )
         removed = True
+        log_step(f"DELETE_OK {action.autosell_id} (no url / already gone) 0.0s")
     else:
         # --- Phase 1: remove (must succeed); do NOT create on failure ---
+        t_del = time.monotonic()
         try:
             ok = remove_vehicle_listing(
                 page,
@@ -307,6 +382,10 @@ def _repost_one(
             )
             if not ok:
                 # Hard halt: unconfirmed remove — never create, never purge mapping.
+                log_step(
+                    f"DELETE_FAIL {action.autosell_id} "
+                    f"{time.monotonic() - t_del:.1f}s — SKIP_CREATE"
+                )
                 print(
                     f"WARNING: {action.autosell_id}: remove FAILED / UNCONFIRMED — "
                     f"SKIP_CREATE (will not post a duplicate; sync.db URL kept)"
@@ -320,14 +399,18 @@ def _repost_one(
                 account_id,
                 clear_url=True,
             )
-            print(
-                f"  {action.autosell_id}: old listing cleared in sync.db "
-                f"(status=removed, url=null)"
+            log_step(
+                f"DELETE_OK {action.autosell_id} "
+                f"{time.monotonic() - t_del:.1f}s sync.db cleared"
             )
             dismiss_overlays(page)
         except Exception as exc:
             if is_browser_dead(exc):
                 raise
+            log_step(
+                f"DELETE_FAIL {action.autosell_id} "
+                f"{time.monotonic() - t_del:.1f}s err={exc}"
+            )
             # Explicit: never fall through to create
             raise FacebookPostingError(
                 f"SKIP_CREATE: could not remove old listing for "
@@ -335,32 +418,46 @@ def _repost_one(
             ) from exc
 
     # Title/model match across all selling tabs — not only the old item id.
+    shelf_passes = env_int("REPOST_SHELF_MAX_PASSES", 1)
+    t_shelf = time.monotonic()
+    log_step(
+        f"SHELF_CHECK_START {action.autosell_id} max_passes={shelf_passes}"
+    )
     if not ensure_no_matching_shelf_listings(
         page,
         action.vehicle,
         item_id=extract_item_id(old_url) if old_url else None,
         autosell_id=action.autosell_id,
-        max_passes=2,
+        max_passes=max(1, shelf_passes),
     ):
+        log_step(
+            f"SHELF_CHECK_FAIL {action.autosell_id} "
+            f"{time.monotonic() - t_shelf:.1f}s — SKIP_CREATE"
+        )
         print(
             f"WARNING: {action.autosell_id}: matching listing still on "
             f"selling shelf — SKIP_CREATE (will not post a duplicate)"
         )
         # Do not leave a purged mapping if a live card is still present.
         return
+    log_step(
+        f"SHELF_CHECK_OK {action.autosell_id} {time.monotonic() - t_shelf:.1f}s"
+    )
 
     # Safety cooldown: let FB settle index after verified delete before create.
-    cooldown = env_float("REPOST_DELETE_COOLDOWN_SEC", 3.0)
+    cooldown = env_float("REPOST_DELETE_COOLDOWN_SEC", 2.0)
     if cooldown > 0:
-        low = max(1.5, cooldown * 0.85)
-        high = max(low, cooldown * 1.25)
-        print(
-            f"  {action.autosell_id}: delete→create cooldown "
-            f"{low:.1f}–{high:.1f}s (REPOST_DELETE_COOLDOWN_SEC={cooldown})"
+        low = max(0.8, cooldown * 0.85)
+        high = max(low, cooldown * 1.15)
+        log_step(
+            f"COOLDOWN {action.autosell_id} {low:.1f}–{high:.1f}s "
+            f"(REPOST_DELETE_COOLDOWN_SEC={cooldown:g})"
         )
         random_delay(low, high)
 
     # --- Phase 2: create only after verified remove ---
+    t_create = time.monotonic()
+    log_step(f"CREATE_START {action.autosell_id}")
     try:
         new_url = create_vehicle_listing(
             page,
@@ -372,6 +469,10 @@ def _repost_one(
     except FacebookDeferredError:
         raise
     except Exception as exc:
+        log_step(
+            f"CREATE_FAIL {action.autosell_id} "
+            f"{time.monotonic() - t_create:.1f}s err={exc}"
+        )
         if removed and not is_browser_dead(exc):
             raise FacebookPostingError(
                 f"NEEDS_RECREATE: removed/sold old listing but create failed "
@@ -386,4 +487,8 @@ def _repost_one(
         content_hash=action.vehicle.content_hash(),
     )
     result.reposts += 1
+    log_step(
+        f"CREATE_OK {action.autosell_id} {time.monotonic() - t_create:.1f}s "
+        f"total={time.monotonic() - t0:.1f}s url={new_url}"
+    )
     print(f"Reposted {action.autosell_id} on {action.account_id}: {new_url}")

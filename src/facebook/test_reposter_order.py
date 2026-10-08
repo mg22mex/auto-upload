@@ -400,6 +400,60 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
         self.assertIn("SKIP_CREATE", res.errors[0])
         self.assertEqual(create_calls["n"], 0)
 
+    def test_execute_reposts_skips_already_bumped(self):
+        from datetime import datetime, timedelta, timezone
+
+        actions = [_action("obj1")]
+        store = MagicMock()
+        recent = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        store.get_fb_listing.return_value = {
+            "autosell_id": "obj1",
+            "account_id": "account_1",
+            "fb_listing_url": actions[0].fb_listing_url,
+            "status": "live",
+            "posted_at": recent,
+        }
+        # sqlite Row-like access
+        row = MagicMock()
+        row.__getitem__ = lambda _self, key: {
+            "posted_at": recent,
+            "fb_listing_url": actions[0].fb_listing_url,
+            "status": "live",
+        }[key]
+        row.keys = lambda: ["posted_at", "fb_listing_url", "status"]
+        store.get_fb_listing.return_value = row
+
+        with (
+            patch("src.facebook.reposter.open_account_context") as ctx,
+            patch("src.facebook.reposter.get_page", return_value=MagicMock()),
+            patch("src.facebook.reposter.is_logged_in", return_value=True),
+            patch("src.facebook.reposter.page_shows_login_form", return_value=False),
+            patch("src.facebook.reposter._repost_one") as repost_one,
+            patch("src.facebook.reposter.random_delay"),
+            patch("src.facebook.reposter.ensure_log_dir", return_value=Path("/tmp")),
+            patch.dict("os.environ", {"REPOST_SKIP_IF_BUMPED_HOURS": "36"}, clear=False),
+        ):
+            from contextlib import contextmanager
+
+            @contextmanager
+            def fake_ctx(*_a, **_k):
+                yield MagicMock()
+
+            ctx.side_effect = fake_ctx
+            res = execute_reposts(
+                actions,
+                store,
+                {
+                    "facebook": {"headless": True},
+                    "sync": {"repost": {"restart_browser_every": 99}},
+                },
+                root=Path("/tmp"),
+                force=False,
+            )
+        repost_one.assert_not_called()
+        self.assertEqual(res.skipped_already_bumped, 1)
+        self.assertEqual(res.reposts, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

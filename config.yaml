@@ -43,7 +43,7 @@ sync:
     # Hard delete before create — mark_sold alone often triggers FB "publicación duplicada"
     removal_action: delete
     max_per_account_per_run: 3  # ~20–30m/run; cron every 3h
-    restart_browser_every: 3
+    restart_browser_every: 5  # fewer Chromium restarts → less session churn
     max_browser_reopens: 5
     schedule: "0 */3 * * *"
 

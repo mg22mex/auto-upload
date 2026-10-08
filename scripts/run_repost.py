@@ -298,10 +298,22 @@ def main() -> int:
                 hard_errors.extend(f"create: {err}" for err in hard)
 
     if actions:
-        result = execute_reposts(actions, store, config, root=ROOT, account_order=account_ids)
+        result = execute_reposts(
+            actions,
+            store,
+            config,
+            root=ROOT,
+            account_order=account_ids,
+            force=bool(args.force),
+        )
         processed_n = len(result.accounts_ok)
         session_expired_n = len(result.session_expired_accounts)
-        print(f"Repost done: {result.reposts} reposted, {len(result.errors)} error(s).", flush=True)
+        print(
+            f"Repost done: {result.reposts} reposted, "
+            f"{result.skipped_already_bumped} skipped (already-bumped), "
+            f"{len(result.errors)} error(s).",
+            flush=True,
+        )
         print(
             f"Total accounts processed: {processed_n}  |  "
             f"Total accounts skipped / expired: {session_expired_n}",

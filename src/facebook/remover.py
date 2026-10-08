@@ -10,12 +10,30 @@ from playwright.sync_api import Locator, Page
 
 from src.facebook.errors import FacebookPostingError
 from src.facebook.poster import _save_debug
+from src.facebook.util import env_int
 from src.models import Vehicle
 
 RemovalAction = Literal["delete", "mark_sold"]
 
 SELLING_URL = "https://www.facebook.com/marketplace/you/selling"
 DASHBOARD_URL = "https://www.facebook.com/marketplace/you/dashboard"
+
+
+def _dom_settle_ms(default: int = 900) -> int:
+    """Post-navigation settle; override with ``FB_DOM_SETTLE_MS`` (default ~0.9s)."""
+    return max(200, env_int("FB_DOM_SETTLE_MS", default))
+
+
+def _settle(page: Page, ms: int | None = None) -> None:
+    try:
+        page.wait_for_timeout(int(ms if ms is not None else _dom_settle_ms()))
+    except Exception:
+        pass
+
+
+def _shelf_confirm_passes() -> int:
+    """Thorough shelf confirm passes (default 1; was 2)."""
+    return max(1, env_int("FB_SHELF_CONFIRM_PASSES", 1))
 
 _ALREADY_GONE_PHRASES = (
     "isn't available",
@@ -313,7 +331,7 @@ def remove_vehicle_listing(
         """Manual delete/sold: detail gone + title absent from selling shelf."""
         try:
             page.goto(listing_url, wait_until="domcontentloaded", timeout=60_000)
-            page.wait_for_timeout(2_000)
+            _settle(page)
         except Exception as exc:
             print(
                 f"  {autosell_id}: ALREADY_REMOVED check nav failed ({exc})",
@@ -361,7 +379,7 @@ def remove_vehicle_listing(
         if must_purge and not allow_already_removed:
             try:
                 page.goto(SELLING_URL, wait_until="domcontentloaded", timeout=90_000)
-                page.wait_for_timeout(2_000)
+                _settle(page)
             except Exception:
                 pass
             if _shelf_title_ui_without_item_links(page):
@@ -399,7 +417,7 @@ def remove_vehicle_listing(
     # --- Primary: listing detail URL ---
     try:
         page.goto(listing_url, wait_until="domcontentloaded", timeout=90_000)
-        page.wait_for_timeout(2_500)
+        _settle(page, _dom_settle_ms(1_100))
     except Exception as exc:
         print(f"  {autosell_id}: listing URL navigation failed ({exc}) — checking if gone")
 
@@ -642,7 +660,7 @@ def _item_on_any_selling_shelf(page: Page, item_id: str) -> bool:
     for shelf in _SELLING_SHELVES:
         try:
             page.goto(shelf, wait_until="domcontentloaded", timeout=90_000)
-            page.wait_for_timeout(2_000)
+            _settle(page)
         except Exception:
             continue
         if _find_item_link_scrolled(page, item_id, max_scrolls=12) is not None:
@@ -662,7 +680,7 @@ def _item_on_active_selling_shelf(
     for shelf in _ACTIVE_SELLING_SHELVES:
         try:
             page.goto(shelf, wait_until="domcontentloaded", timeout=45_000)
-            page.wait_for_timeout(2_000)
+            _settle(page)
         except Exception:
             continue
         if _find_item_link_scrolled(page, item_id, max_scrolls=max_scrolls) is not None:
@@ -723,7 +741,7 @@ def ensure_no_matching_shelf_listings(
     *,
     item_id: str | None = None,
     autosell_id: str = "",
-    max_passes: int = 2,
+    max_passes: int = 1,
 ) -> bool:
     """Delete every selling-shelf card that matches this vehicle.
 
@@ -745,7 +763,7 @@ def ensure_no_matching_shelf_listings(
             print(f"  {label}: deleting shelf match {href}")
             if _delete_shelf_link(page, link):
                 deleted += 1
-                page.wait_for_timeout(1_500)
+                _settle(page, 700)
         if deleted == 0:
             print(
                 f"WARNING: {label}: could not click Delete on matching shelf "
@@ -771,7 +789,7 @@ def _collect_matching_shelf_links(
     for shelf in _SELLING_SHELVES:
         try:
             page.goto(shelf, wait_until="domcontentloaded", timeout=90_000)
-            page.wait_for_timeout(2_000)
+            _settle(page)
         except Exception:
             continue
         for _ in range(8):
@@ -1120,7 +1138,7 @@ def selling_title_present(
     if navigate:
         try:
             page.goto(SELLING_URL, wait_until="domcontentloaded", timeout=90_000)
-            page.wait_for_timeout(2_000)
+            _settle(page)
         except Exception:
             return False
         _sort_selling_oldest_first(page)
@@ -1263,7 +1281,7 @@ def _remove_from_selling_shelf(
     for shelf in shelves:
         try:
             page.goto(shelf, wait_until="domcontentloaded", timeout=90_000)
-            page.wait_for_timeout(2_000)
+            _settle(page)
         except Exception:
             continue
 
@@ -1410,22 +1428,21 @@ def _wait_until_item_gone_from_shelf(
     for must-purge decisions (lazy-load false negatives).
     """
     if thorough or not quick:
-        # Two thorough active-shelf passes with a short settle between.
-        for attempt in range(2):
-            if not _item_on_active_selling_shelf(page, item_id, max_scrolls=12):
+        # Default one thorough pass (FB_SHELF_CONFIRM_PASSES); second only if needed.
+        passes = _shelf_confirm_passes()
+        for attempt in range(passes):
+            if not _item_on_active_selling_shelf(page, item_id, max_scrolls=10):
                 print(
                     f"  shelf confirm (thorough): item {item_id} gone "
-                    f"(pass {attempt + 1})"
+                    f"(pass {attempt + 1}/{passes})"
                 )
                 return True
             print(
                 f"  shelf confirm (thorough): item {item_id} still listed "
-                f"(pass {attempt + 1})"
+                f"(pass {attempt + 1}/{passes})"
             )
-            try:
-                page.wait_for_timeout(2_000)
-            except Exception:
-                break
+            if attempt + 1 < passes:
+                _settle(page, 1_200)
         print(f"  shelf confirm: item {item_id} still on selling dashboard")
         return False
 

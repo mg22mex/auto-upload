@@ -172,6 +172,17 @@ def random_delay(min_sec: float, max_sec: float) -> None:
     time.sleep(random.uniform(low, high))
 
 
+def utc_stamp() -> str:
+    """UTC clock stamp for step logs (``HH:MM:SS.mmm``)."""
+    now = datetime.now(timezone.utc)
+    return now.strftime("%H:%M:%S.") + f"{int(now.microsecond / 1000):03d}"
+
+
+def log_step(message: str) -> None:
+    """Timestamped step log for delete/create timing (stdout, unbuffered)."""
+    print(f"[{utc_stamp()}Z] {message}", flush=True)
+
+
 def ensure_log_dir(log_dir: str | Path) -> Path:
     path = Path(log_dir)
     path.mkdir(parents=True, exist_ok=True)
