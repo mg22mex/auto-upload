@@ -66,7 +66,16 @@ def create_vehicle_listing(
     fb_config: dict,
     max_photos: int,
     log_dir: Path,
+    photo_paths: list[Path] | None = None,
+    skip_shelf_gate: bool = False,
 ) -> str:
+    """Create a Marketplace vehicle listing.
+
+    ``photo_paths``: optional pre-downloaded files (repost prefetch). Caller
+    owns cleanup when provided. ``skip_shelf_gate``: skip the pre-create shelf
+    scan when the caller already verified delete (avoids composer→selling→
+    composer round-trip / visibility gap).
+    """
     create_url = _resolve_vehicle_create_url(fb_config)
     page.goto(create_url, wait_until="domcontentloaded", timeout=90_000)
     _wait_for_photo_file_input(page, timeout_ms=15_000)
@@ -87,21 +96,28 @@ def create_vehicle_listing(
             f"Not on vehicle composer after opening create URL (at {page.url})"
         )
 
-    # Hard gate: any matching shelf card (any tab) must be deleted first.
-    from src.facebook.remover import ensure_no_matching_shelf_listings
+    if not skip_shelf_gate:
+        # Hard gate: any matching shelf card (any tab) must be deleted first.
+        from src.facebook.remover import ensure_no_matching_shelf_listings
 
-    if not ensure_no_matching_shelf_listings(
-        page, vehicle, autosell_id=vehicle.autosell_id, max_passes=1
-    ):
+        if not ensure_no_matching_shelf_listings(
+            page, vehicle, autosell_id=vehicle.autosell_id, max_passes=1
+        ):
+            raise FacebookPostingError(
+                f"SKIP_CREATE: matching listing still on selling shelf for "
+                f"{vehicle.autosell_id} — refusing duplicate publish"
+            )
+        # Shelf scan navigates to /you/selling* — reopen composer and wait for DOM.
+        _reopen_vehicle_composer(page, create_url=create_url)
+
+    own_photos = photo_paths is None
+    if own_photos:
+        photo_paths = download_vehicle_photos(vehicle, max_photos=max_photos)
+    assert photo_paths is not None
+    if not photo_paths:
         raise FacebookPostingError(
-            f"SKIP_CREATE: matching listing still on selling shelf for "
-            f"{vehicle.autosell_id} — refusing duplicate publish"
+            f"No photos ready for {vehicle.autosell_id} — cannot publish"
         )
-
-    # Shelf scan navigates to /you/selling* — reopen composer and wait for DOM.
-    _reopen_vehicle_composer(page, create_url=create_url)
-
-    photo_paths = download_vehicle_photos(vehicle, max_photos=max_photos)
     capture = MarketplaceItemCapture()
     capture.attach(page)
     try:
@@ -142,16 +158,17 @@ def create_vehicle_listing(
         _save_debug(page, log_dir, vehicle.autosell_id, "create_failed")
         raise FacebookPostingError(f"Create failed for {vehicle.autosell_id}: {exc}") from exc
     finally:
-        for path in photo_paths:
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                pass
-        if photo_paths:
-            try:
-                photo_paths[0].parent.rmdir()
-            except OSError:
-                pass
+        if own_photos:
+            for path in photo_paths:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if photo_paths:
+                try:
+                    photo_paths[0].parent.rmdir()
+                except OSError:
+                    pass
 
 
 def _ensure_vehicle_create_flow(page: Page, *, create_url: str) -> None:

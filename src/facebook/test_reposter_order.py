@@ -68,6 +68,7 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
             patch("src.facebook.reposter.remove_vehicle_listing", side_effect=fail_remove),
             patch("src.facebook.reposter.create_vehicle_listing", side_effect=boom_create),
             patch("src.facebook.reposter.ensure_no_matching_shelf_listings", return_value=True),
+            patch("src.facebook.reposter.prefetch_photos", side_effect=lambda c, **_k: c),
         ):
             _repost_one(
                 page,
@@ -104,6 +105,7 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
             patch("src.facebook.reposter.create_vehicle_listing", side_effect=ok_create),
             patch("src.facebook.reposter.ensure_no_matching_shelf_listings", return_value=True),
             patch("src.facebook.reposter.random_delay"),
+            patch("src.facebook.reposter.prefetch_photos", side_effect=lambda c, **_k: c),
         ):
             _repost_one(
                 page,
@@ -133,8 +135,10 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
             self.assertEqual(kwargs.get("removal_action"), "delete")
             return True
 
-        def ok_create(*_a, **_k):
+        def ok_create(*_a, **kwargs):
             order.append("create")
+            self.assertTrue(kwargs.get("skip_shelf_gate"))
+            self.assertIn("photo_paths", kwargs)
             return "https://www.facebook.com/marketplace/item/999888777/"
 
         def mark_removed(*_a, **kwargs):
@@ -155,6 +159,7 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
             patch("src.facebook.reposter.create_vehicle_listing", side_effect=ok_create),
             patch("src.facebook.reposter.ensure_no_matching_shelf_listings", return_value=True),
             patch("src.facebook.reposter.random_delay", side_effect=fake_delay),
+            patch("src.facebook.reposter.prefetch_photos", side_effect=lambda c, **_k: c),
         ):
             _repost_one(
                 page,
@@ -192,6 +197,7 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
             patch("src.facebook.reposter.create_vehicle_listing", side_effect=ok_create),
             patch("src.facebook.reposter.ensure_no_matching_shelf_listings", return_value=True),
             patch("src.facebook.reposter.random_delay", side_effect=fake_delay),
+            patch("src.facebook.reposter.prefetch_photos", side_effect=lambda c, **_k: c),
             patch.dict("os.environ", {"REPOST_DELETE_COOLDOWN_SEC": "7"}, clear=False),
         ):
             _repost_one(
@@ -227,6 +233,7 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
             patch("src.facebook.reposter.create_vehicle_listing", side_effect=ok_create),
             patch("src.facebook.reposter.ensure_no_matching_shelf_listings", return_value=True),
             patch("src.facebook.reposter.random_delay"),
+            patch("src.facebook.reposter.prefetch_photos", side_effect=lambda c, **_k: c),
         ):
             _repost_one(
                 page,
@@ -262,6 +269,7 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
             ),
             patch("src.facebook.reposter.ensure_no_matching_shelf_listings", return_value=True),
             patch("src.facebook.reposter.random_delay"),
+            patch("src.facebook.reposter.prefetch_photos", side_effect=lambda c, **_k: c),
         ):
             _repost_one(
                 page,
@@ -286,6 +294,7 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
                 return_value=False,
             ),
             patch("src.facebook.reposter.create_vehicle_listing") as create,
+            patch("src.facebook.reposter.prefetch_photos", side_effect=lambda c, **_k: c),
         ):
             _repost_one(
                 page,
@@ -314,6 +323,7 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
                 return_value=False,
             ),
             patch("src.facebook.reposter.create_vehicle_listing") as create,
+            patch("src.facebook.reposter.prefetch_photos", side_effect=lambda c, **_k: c),
         ):
             _repost_one(
                 page,

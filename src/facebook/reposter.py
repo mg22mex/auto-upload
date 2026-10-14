@@ -10,6 +10,7 @@ from src.facebook.browser_health import is_browser_dead
 from src.facebook.errors import FacebookAutomationError, FacebookDeferredError, FacebookPostingError, FacebookSessionError
 from src.facebook.poster import create_vehicle_listing
 from src.facebook.remover import extract_item_id, ensure_no_matching_shelf_listings, remove_vehicle_listing
+from src.facebook.repost_cache import build_listing_cache, prefetch_photos
 from src.facebook.ui import dismiss_overlays
 from src.facebook.session import (
     format_session_login_error,
@@ -346,149 +347,172 @@ def _repost_one(
         action_norm = "delete"
 
     t0 = time.monotonic()
+    # Freeze listing payload + download photos *before* delete so create has
+    # zero download dead time after the old post is gone.
+    cache = build_listing_cache(action.vehicle)
+    log_step(
+        f"CACHE_BUILD {action.autosell_id} title={cache.title!r} "
+        f"price={cache.price} images={len(cache.image_urls)}"
+    )
+    try:
+        prefetch_photos(cache, max_photos=max_photos)
+    except Exception as exc:
+        log_step(f"CACHE_PREFETCH_FAIL {action.autosell_id} err={exc}")
+        raise FacebookPostingError(
+            f"SKIP_CREATE: could not prefetch photos for {action.autosell_id}: {exc}"
+        ) from exc
+
     log_step(
         f"DELETE_START {action.autosell_id} action={action_norm} "
-        f"old={old_url or 'none'}"
+        f"old={old_url or 'none'} photos_ready={cache.photo_count}"
     )
 
     removed = False
-    if not old_url:
-        # Orphan / missing mapping — free the slot and proceed to create.
-        print(
-            f"WARNING: {action.autosell_id}: no fb_listing_url — treating as "
-            f"already gone; clearing sync.db slot before create"
-        )
-        store.mark_fb_listing_removed(
-            action.autosell_id,
-            account_id,
-            clear_url=True,
-        )
-        removed = True
-        log_step(f"DELETE_OK {action.autosell_id} (no url / already gone) 0.0s")
-    else:
-        # --- Phase 1: remove (must succeed); do NOT create on failure ---
-        t_del = time.monotonic()
-        try:
-            ok = remove_vehicle_listing(
-                page,
-                old_url,
-                autosell_id=action.autosell_id,
-                removal_action=action_norm,
-                log_dir=log_dir,
-                require_verified=True,
-                store=store,
-                account_id=account_id,
-                vehicle=action.vehicle,
+    try:
+        if not old_url:
+            # Orphan / missing mapping — free the slot and proceed to create.
+            print(
+                f"WARNING: {action.autosell_id}: no fb_listing_url — treating as "
+                f"already gone; clearing sync.db slot before create"
             )
-            if not ok:
-                # Hard halt: unconfirmed remove — never create, never purge mapping.
-                log_step(
-                    f"DELETE_FAIL {action.autosell_id} "
-                    f"{time.monotonic() - t_del:.1f}s — SKIP_CREATE"
-                )
-                print(
-                    f"WARNING: {action.autosell_id}: remove FAILED / UNCONFIRMED — "
-                    f"SKIP_CREATE (will not post a duplicate; sync.db URL kept)"
-                )
-                return
-            removed = True
-            # Clear old URL only after remove_vehicle_listing returned True
-            # (DOM-confirmed delete or unavailable+thorough shelf absence).
             store.mark_fb_listing_removed(
                 action.autosell_id,
                 account_id,
                 clear_url=True,
             )
-            log_step(
-                f"DELETE_OK {action.autosell_id} "
-                f"{time.monotonic() - t_del:.1f}s sync.db cleared"
-            )
-            dismiss_overlays(page)
-        except Exception as exc:
-            if is_browser_dead(exc):
-                raise
-            log_step(
-                f"DELETE_FAIL {action.autosell_id} "
-                f"{time.monotonic() - t_del:.1f}s err={exc}"
-            )
-            # Explicit: never fall through to create
-            raise FacebookPostingError(
-                f"SKIP_CREATE: could not remove old listing for "
-                f"{action.autosell_id} before repost: {exc}"
-            ) from exc
+            removed = True
+            log_step(f"DELETE_OK {action.autosell_id} (no url / already gone) 0.0s")
+        else:
+            # --- Phase 1: remove (must succeed); do NOT create on failure ---
+            t_del = time.monotonic()
+            try:
+                ok = remove_vehicle_listing(
+                    page,
+                    old_url,
+                    autosell_id=action.autosell_id,
+                    removal_action=action_norm,
+                    log_dir=log_dir,
+                    require_verified=True,
+                    store=store,
+                    account_id=account_id,
+                    vehicle=action.vehicle,
+                )
+                if not ok:
+                    # Hard halt: unconfirmed remove — never create, never purge mapping.
+                    log_step(
+                        f"DELETE_FAIL {action.autosell_id} "
+                        f"{time.monotonic() - t_del:.1f}s — SKIP_CREATE"
+                    )
+                    print(
+                        f"WARNING: {action.autosell_id}: remove FAILED / UNCONFIRMED — "
+                        f"SKIP_CREATE (will not post a duplicate; sync.db URL kept)"
+                    )
+                    return
+                removed = True
+                # Clear old URL only after remove_vehicle_listing returned True
+                # (DOM-confirmed delete or unavailable+thorough shelf absence).
+                store.mark_fb_listing_removed(
+                    action.autosell_id,
+                    account_id,
+                    clear_url=True,
+                )
+                log_step(
+                    f"DELETE_OK {action.autosell_id} "
+                    f"{time.monotonic() - t_del:.1f}s sync.db cleared"
+                )
+                dismiss_overlays(page)
+            except Exception as exc:
+                if is_browser_dead(exc):
+                    raise
+                log_step(
+                    f"DELETE_FAIL {action.autosell_id} "
+                    f"{time.monotonic() - t_del:.1f}s err={exc}"
+                )
+                # Explicit: never fall through to create
+                raise FacebookPostingError(
+                    f"SKIP_CREATE: could not remove old listing for "
+                    f"{action.autosell_id} before repost: {exc}"
+                ) from exc
 
-    # Title/model match across all selling tabs — not only the old item id.
-    shelf_passes = env_int("REPOST_SHELF_MAX_PASSES", 1)
-    t_shelf = time.monotonic()
-    log_step(
-        f"SHELF_CHECK_START {action.autosell_id} max_passes={shelf_passes}"
-    )
-    if not ensure_no_matching_shelf_listings(
-        page,
-        action.vehicle,
-        item_id=extract_item_id(old_url) if old_url else None,
-        autosell_id=action.autosell_id,
-        max_passes=max(1, shelf_passes),
-    ):
+        # Title/model match across all selling tabs — not only the old item id.
+        shelf_passes = env_int("REPOST_SHELF_MAX_PASSES", 1)
+        t_shelf = time.monotonic()
         log_step(
-            f"SHELF_CHECK_FAIL {action.autosell_id} "
-            f"{time.monotonic() - t_shelf:.1f}s — SKIP_CREATE"
+            f"SHELF_CHECK_START {action.autosell_id} max_passes={shelf_passes}"
         )
-        print(
-            f"WARNING: {action.autosell_id}: matching listing still on "
-            f"selling shelf — SKIP_CREATE (will not post a duplicate)"
-        )
-        # Do not leave a purged mapping if a live card is still present.
-        return
-    log_step(
-        f"SHELF_CHECK_OK {action.autosell_id} {time.monotonic() - t_shelf:.1f}s"
-    )
-
-    # Safety cooldown: let FB settle index after verified delete before create.
-    cooldown = env_float("REPOST_DELETE_COOLDOWN_SEC", 2.0)
-    if cooldown > 0:
-        low = max(0.8, cooldown * 0.85)
-        high = max(low, cooldown * 1.15)
-        log_step(
-            f"COOLDOWN {action.autosell_id} {low:.1f}–{high:.1f}s "
-            f"(REPOST_DELETE_COOLDOWN_SEC={cooldown:g})"
-        )
-        random_delay(low, high)
-
-    # --- Phase 2: create only after verified remove ---
-    t_create = time.monotonic()
-    log_step(f"CREATE_START {action.autosell_id}")
-    try:
-        new_url = create_vehicle_listing(
+        if not ensure_no_matching_shelf_listings(
             page,
             action.vehicle,
-            fb_config=fb_config,
-            max_photos=max_photos,
-            log_dir=log_dir,
-        )
-    except FacebookDeferredError:
-        raise
-    except Exception as exc:
+            item_id=extract_item_id(old_url) if old_url else None,
+            autosell_id=action.autosell_id,
+            max_passes=max(1, shelf_passes),
+        ):
+            log_step(
+                f"SHELF_CHECK_FAIL {action.autosell_id} "
+                f"{time.monotonic() - t_shelf:.1f}s — SKIP_CREATE"
+            )
+            print(
+                f"WARNING: {action.autosell_id}: matching listing still on "
+                f"selling shelf — SKIP_CREATE (will not post a duplicate)"
+            )
+            # Do not leave a purged mapping if a live card is still present.
+            return
         log_step(
-            f"CREATE_FAIL {action.autosell_id} "
-            f"{time.monotonic() - t_create:.1f}s err={exc}"
+            f"SHELF_CHECK_OK {action.autosell_id} {time.monotonic() - t_shelf:.1f}s"
         )
-        if removed and not is_browser_dead(exc):
-            raise FacebookPostingError(
-                f"NEEDS_RECREATE: removed/sold old listing but create failed "
-                f"for {action.autosell_id}: {exc}"
-            ) from exc
-        raise
 
-    store.record_repost(
-        action.autosell_id,
-        account_id,
-        fb_listing_url=new_url,
-        content_hash=action.vehicle.content_hash(),
-    )
-    result.reposts += 1
-    log_step(
-        f"CREATE_OK {action.autosell_id} {time.monotonic() - t_create:.1f}s "
-        f"total={time.monotonic() - t0:.1f}s url={new_url}"
-    )
-    print(f"Reposted {action.autosell_id} on {action.account_id}: {new_url}")
+        # Organic settle after verified delete (jittered; keeps platform pacing).
+        cooldown = env_float("REPOST_DELETE_COOLDOWN_SEC", 2.0)
+        if cooldown > 0:
+            low = max(0.8, cooldown * 0.85)
+            high = max(low, cooldown * 1.15)
+            log_step(
+                f"COOLDOWN {action.autosell_id} {low:.1f}–{high:.1f}s "
+                f"(REPOST_DELETE_COOLDOWN_SEC={cooldown:g})"
+            )
+            random_delay(low, high)
+
+        # --- Phase 2: create with prefetched photos; skip redundant shelf gate ---
+        t_create = time.monotonic()
+        log_step(
+            f"CREATE_START {action.autosell_id} "
+            f"cached_photos={cache.photo_count} skip_shelf_gate=1"
+        )
+        try:
+            new_url = create_vehicle_listing(
+                page,
+                action.vehicle,
+                fb_config=fb_config,
+                max_photos=max_photos,
+                log_dir=log_dir,
+                photo_paths=list(cache.photo_paths),
+                skip_shelf_gate=True,
+            )
+        except FacebookDeferredError:
+            raise
+        except Exception as exc:
+            log_step(
+                f"CREATE_FAIL {action.autosell_id} "
+                f"{time.monotonic() - t_create:.1f}s err={exc}"
+            )
+            if removed and not is_browser_dead(exc):
+                raise FacebookPostingError(
+                    f"NEEDS_RECREATE: removed/sold old listing but create failed "
+                    f"for {action.autosell_id}: {exc}"
+                ) from exc
+            raise
+
+        store.record_repost(
+            action.autosell_id,
+            account_id,
+            fb_listing_url=new_url,
+            content_hash=action.vehicle.content_hash(),
+        )
+        result.reposts += 1
+        log_step(
+            f"CREATE_OK {action.autosell_id} {time.monotonic() - t_create:.1f}s "
+            f"total={time.monotonic() - t0:.1f}s url={new_url}"
+        )
+        print(f"Reposted {action.autosell_id} on {action.account_id}: {new_url}")
+    finally:
+        cache.cleanup()
