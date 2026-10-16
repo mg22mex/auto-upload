@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
-from src.facebook.errors import FacebookPostingError
+from src.facebook.errors import FacebookPostingError, FacebookSessionError
 from src.facebook.remover import extract_item_id
 from src.facebook.reposter import _repost_one, execute_reposts
 from src.models import SyncAction, Vehicle
@@ -68,6 +68,7 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
             patch("src.facebook.reposter.remove_vehicle_listing", side_effect=fail_remove),
             patch("src.facebook.reposter.create_vehicle_listing", side_effect=boom_create),
             patch("src.facebook.reposter.ensure_no_matching_shelf_listings", return_value=True),
+            patch("src.facebook.reposter.assert_hard_delete_verified", return_value=True),
             patch("src.facebook.reposter.prefetch_photos", side_effect=lambda c, **_k: c),
         ):
             _repost_one(
@@ -104,6 +105,7 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
             patch("src.facebook.reposter.remove_vehicle_listing", side_effect=gone_remove),
             patch("src.facebook.reposter.create_vehicle_listing", side_effect=ok_create),
             patch("src.facebook.reposter.ensure_no_matching_shelf_listings", return_value=True),
+            patch("src.facebook.reposter.assert_hard_delete_verified", return_value=True),
             patch("src.facebook.reposter.random_delay"),
             patch("src.facebook.reposter.prefetch_photos", side_effect=lambda c, **_k: c),
         ):
@@ -138,6 +140,7 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
         def ok_create(*_a, **kwargs):
             order.append("create")
             self.assertTrue(kwargs.get("skip_shelf_gate"))
+            self.assertTrue(kwargs.get("delete_verified"))
             self.assertIn("photo_paths", kwargs)
             return "https://www.facebook.com/marketplace/item/999888777/"
 
@@ -151,6 +154,10 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
         def fake_delay(*_a, **_k):
             order.append("cooldown")
 
+        def hard_ok(*_a, **_k):
+            order.append("hard_verify")
+            return True
+
         store.mark_fb_listing_removed.side_effect = mark_removed
         store.record_repost.side_effect = rec_repost
 
@@ -158,6 +165,7 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
             patch("src.facebook.reposter.remove_vehicle_listing", side_effect=ok_remove),
             patch("src.facebook.reposter.create_vehicle_listing", side_effect=ok_create),
             patch("src.facebook.reposter.ensure_no_matching_shelf_listings", return_value=True),
+            patch("src.facebook.reposter.assert_hard_delete_verified", side_effect=hard_ok),
             patch("src.facebook.reposter.random_delay", side_effect=fake_delay),
             patch("src.facebook.reposter.prefetch_photos", side_effect=lambda c, **_k: c),
         ):
@@ -172,7 +180,10 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
                 result=result,
             )
 
-        self.assertEqual(order, ["remove", "db_clear", "cooldown", "create", "db_record"])
+        self.assertEqual(
+            order,
+            ["remove", "db_clear", "hard_verify", "cooldown", "create", "db_record"],
+        )
         self.assertEqual(result.reposts, 1)
 
     def test_delete_cooldown_runs_between_remove_and_create(self):
@@ -196,6 +207,7 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
             patch("src.facebook.reposter.remove_vehicle_listing", side_effect=ok_remove),
             patch("src.facebook.reposter.create_vehicle_listing", side_effect=ok_create),
             patch("src.facebook.reposter.ensure_no_matching_shelf_listings", return_value=True),
+            patch("src.facebook.reposter.assert_hard_delete_verified", return_value=True),
             patch("src.facebook.reposter.random_delay", side_effect=fake_delay),
             patch("src.facebook.reposter.prefetch_photos", side_effect=lambda c, **_k: c),
             patch.dict("os.environ", {"REPOST_DELETE_COOLDOWN_SEC": "7"}, clear=False),
@@ -232,6 +244,7 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
             patch("src.facebook.reposter.remove_vehicle_listing") as remove,
             patch("src.facebook.reposter.create_vehicle_listing", side_effect=ok_create),
             patch("src.facebook.reposter.ensure_no_matching_shelf_listings", return_value=True),
+            patch("src.facebook.reposter.assert_hard_delete_verified", return_value=True),
             patch("src.facebook.reposter.random_delay"),
             patch("src.facebook.reposter.prefetch_photos", side_effect=lambda c, **_k: c),
         ):
@@ -268,6 +281,7 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
                 return_value="https://www.facebook.com/marketplace/item/1/",
             ),
             patch("src.facebook.reposter.ensure_no_matching_shelf_listings", return_value=True),
+            patch("src.facebook.reposter.assert_hard_delete_verified", return_value=True),
             patch("src.facebook.reposter.random_delay"),
             patch("src.facebook.reposter.prefetch_photos", side_effect=lambda c, **_k: c),
         ):
@@ -339,6 +353,32 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
         store.record_repost.assert_not_called()
         self.assertEqual(result.reposts, 0)
 
+    def test_hard_delete_unverified_blocks_create(self):
+        page = MagicMock()
+        store = MagicMock()
+        result = MagicMock(reposts=0)
+
+        with (
+            patch("src.facebook.reposter.remove_vehicle_listing", return_value=True),
+            patch("src.facebook.reposter.ensure_no_matching_shelf_listings", return_value=True),
+            patch("src.facebook.reposter.assert_hard_delete_verified", return_value=False),
+            patch("src.facebook.reposter.create_vehicle_listing") as create,
+            patch("src.facebook.reposter.prefetch_photos", side_effect=lambda c, **_k: c),
+        ):
+            _repost_one(
+                page,
+                _action(),
+                store,
+                fb_config={},
+                max_photos=5,
+                removal_action="delete",
+                log_dir=Path("/tmp"),
+                result=result,
+            )
+        create.assert_not_called()
+        store.record_repost.assert_not_called()
+        self.assertEqual(result.reposts, 0)
+
     def test_mark_fb_listing_removed_clears_url(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = SyncStore(Path(tmp) / "sync.db")
@@ -380,6 +420,7 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
             patch("src.facebook.reposter.open_account_context") as ctx,
             patch("src.facebook.reposter.get_page", return_value=MagicMock()),
             patch("src.facebook.reposter.is_logged_in", return_value=True),
+            patch("src.facebook.reposter.assert_session_identity", return_value="123"),
             patch("src.facebook.reposter.page_shows_login_form", return_value=False),
             patch("src.facebook.reposter._repost_one", side_effect=fail_one),
             patch("src.facebook.reposter.random_delay"),
@@ -437,6 +478,7 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
             patch("src.facebook.reposter.open_account_context") as ctx,
             patch("src.facebook.reposter.get_page", return_value=MagicMock()),
             patch("src.facebook.reposter.is_logged_in", return_value=True),
+            patch("src.facebook.reposter.assert_session_identity", return_value="123"),
             patch("src.facebook.reposter.page_shows_login_form", return_value=False),
             patch("src.facebook.reposter._repost_one") as repost_one,
             patch("src.facebook.reposter.random_delay"),
@@ -463,6 +505,49 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
         repost_one.assert_not_called()
         self.assertEqual(res.skipped_already_bumped, 1)
         self.assertEqual(res.reposts, 0)
+
+    def test_execute_reposts_aborts_on_wrong_profile(self):
+        """Wrong c_user must stop before CACHE_BUILD / DELETE / CREATE."""
+        actions = [_action("obj1")]
+        store = MagicMock()
+
+        with (
+            patch("src.facebook.reposter.open_account_context") as ctx,
+            patch("src.facebook.reposter.get_page", return_value=MagicMock()),
+            patch("src.facebook.reposter.is_logged_in", return_value=True),
+            patch(
+                "src.facebook.reposter.assert_session_identity",
+                side_effect=FacebookSessionError(
+                    "account_1: wrong Facebook profile — session c_user=111 "
+                    "!= config facebook_c_user=61568552875980"
+                ),
+            ),
+            patch("src.facebook.reposter._repost_one") as repost_one,
+            patch("src.facebook.reposter.ensure_log_dir", return_value=Path("/tmp")),
+        ):
+            from contextlib import contextmanager
+
+            @contextmanager
+            def fake_ctx(*_a, **_k):
+                yield MagicMock()
+
+            ctx.side_effect = fake_ctx
+            res = execute_reposts(
+                actions,
+                store,
+                {
+                    "facebook": {"headless": True},
+                    "accounts": [
+                        {"id": "account_1", "facebook_c_user": "61568552875980"},
+                    ],
+                    "sync": {"repost": {"restart_browser_every": 99}},
+                },
+                root=Path("/tmp"),
+            )
+        repost_one.assert_not_called()
+        self.assertEqual(res.reposts, 0)
+        self.assertIn("account_1", res.session_expired_accounts)
+        self.assertTrue(any("FAILED_SESSION_EXPIRED" in e for e in res.errors))
 
 
 if __name__ == "__main__":

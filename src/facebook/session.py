@@ -20,6 +20,70 @@ def resolve_session_dir(config: dict, account_id: str, root: Path) -> Path:
     raise FacebookSessionError(f"Unknown account id: {account_id}")
 
 
+def get_account(config: dict, account_id: str) -> dict:
+    for account in config.get("accounts", []):
+        if isinstance(account, dict) and account.get("id") == account_id:
+            return account
+    raise FacebookSessionError(f"Unknown account id: {account_id}")
+
+
+def read_session_c_user(context: BrowserContext) -> str | None:
+    """Return Facebook ``c_user`` cookie for this Playwright context (or None)."""
+    try:
+        for cookie in context.cookies("https://www.facebook.com"):
+            if cookie.get("name") == "c_user":
+                value = str(cookie.get("value") or "").strip()
+                return value or None
+    except Exception:
+        return None
+    return None
+
+
+def assert_session_identity(
+    context: BrowserContext,
+    config: dict,
+    account_id: str,
+) -> str:
+    """Ensure the open browser session is the configured Facebook profile.
+
+    Compares cookie ``c_user`` to ``accounts[].facebook_c_user``. Raises
+    ``FacebookSessionError`` on missing cookie or mismatch so CACHE/DELETE
+    never runs under the wrong (focused) profile.
+    """
+    account = get_account(config, account_id)
+    expected = str(account.get("facebook_c_user") or "").strip()
+    actual = read_session_c_user(context)
+    if not actual:
+        raise FacebookSessionError(
+            f"{account_id}: no c_user cookie — session not logged in as a "
+            f"Facebook user. Run: python scripts/fb_login.py --account {account_id}"
+        )
+    if expected and actual != expected:
+        label = (
+            account.get("facebook_profile")
+            or account.get("label")
+            or account_id
+        )
+        raise FacebookSessionError(
+            f"{account_id}: wrong Facebook profile — session c_user={actual} "
+            f"!= config facebook_c_user={expected} ({label}). "
+            f"Abort before CACHE_BUILD/DELETE. "
+            f"Refresh: python scripts/fb_login.py --account {account_id}"
+        )
+    if not expected:
+        print(
+            f"WARNING: {account_id}: facebook_c_user unset in config — "
+            f"session c_user={actual} (cannot verify profile match)",
+            flush=True,
+        )
+    else:
+        print(
+            f"PROFILE_OK {account_id}: c_user={actual} matches config",
+            flush=True,
+        )
+    return actual
+
+
 def session_health_report(session_dir: Path) -> dict[str, object]:
     """Describe local Chromium profile state (no secrets)."""
     path = Path(session_dir)

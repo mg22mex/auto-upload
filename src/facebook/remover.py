@@ -735,6 +735,122 @@ def card_text_matches_vehicle(card_text: str, vehicle: Vehicle, *, item_id: str 
     return all(tok in words or tok in blob for tok in model_tokens)
 
 
+def assert_hard_delete_verified(
+    page: Page,
+    *,
+    listing_url: str | None,
+    item_id: str | None = None,
+    vehicle: Vehicle | None = None,
+    autosell_id: str = "",
+) -> bool:
+    """Blocking post-DELETE gate: old listing must be fully gone before CREATE.
+
+    Fail-closed. Sold/deactivated-only is NOT enough — Facebook still flags
+    duplicates when the prior post remains under Needs attention / review.
+    Checks:
+      1. Detail URL is unavailable/gone (not live owner chrome)
+      2. ``item_id`` absent from *all* selling shelves (incl. NEED_ATTENTION)
+      3. No title/model-matching cards remain on those shelves
+    """
+    label = autosell_id or (vehicle.autosell_id if vehicle else "?")
+    resolved_id = item_id or (extract_item_id(listing_url) if listing_url else None)
+
+    # Settle CDN / dashboard lag after delete click.
+    try:
+        page.wait_for_timeout(2_500)
+    except Exception:
+        pass
+
+    if listing_url:
+        try:
+            page.goto(listing_url, wait_until="domcontentloaded", timeout=60_000)
+            _settle(page, 2_000)
+        except Exception as exc:
+            print(
+                f"  {label}: HARD_DELETE detail nav failed ({exc}) — "
+                f"treating as gone for URL check",
+                flush=True,
+            )
+        else:
+            if _is_owner_listing_view(page) or _looks_like_live_listing(page):
+                print(
+                    f"WARNING: {label}: HARD_DELETE fail — detail still live "
+                    f"owner listing at {listing_url}",
+                    flush=True,
+                )
+                return False
+            if _still_has_mark_sold_control(page) or _dialog_open(page):
+                print(
+                    f"WARNING: {label}: HARD_DELETE fail — delete/sold dialog "
+                    f"or Mark-as-sold still present",
+                    flush=True,
+                )
+                return False
+            # Soft sold UI without unavailable banner → still in FB inventory.
+            if _is_sold_or_deactivated(page) and not _is_content_unavailable(page):
+                print(
+                    f"WARNING: {label}: HARD_DELETE fail — detail shows "
+                    f"sold/deactivated but not removed (duplicate risk)",
+                    flush=True,
+                )
+                return False
+            if not (
+                _is_content_unavailable(page)
+                or _listing_already_gone(
+                    page, listing_url=listing_url, item_id=resolved_id
+                )
+            ):
+                # Redirected off item without live controls counts as gone.
+                try:
+                    url = (page.url or "").lower()
+                except Exception:
+                    url = ""
+                on_item = bool(re.search(r"/marketplace/item/\d+", url))
+                if on_item:
+                    print(
+                        f"WARNING: {label}: HARD_DELETE fail — still on item "
+                        f"detail and not clearly unavailable ({page.url})",
+                        flush=True,
+                    )
+                    return False
+
+    if resolved_id:
+        if _item_on_any_selling_shelf(page, resolved_id):
+            print(
+                f"WARNING: {label}: HARD_DELETE fail — item_id={resolved_id} "
+                f"still on a selling/dashboard shelf (incl. Needs attention)",
+                flush=True,
+            )
+            return False
+        # Second thorough pass on active shelves (lazy-load miss guard).
+        if _item_on_active_selling_shelf(page, resolved_id, max_scrolls=14):
+            print(
+                f"WARNING: {label}: HARD_DELETE fail — item_id={resolved_id} "
+                f"found on active selling after deep scroll",
+                flush=True,
+            )
+            return False
+
+    if vehicle is not None:
+        leftover = _collect_matching_shelf_links(
+            page, vehicle, item_id=resolved_id
+        )
+        if leftover:
+            print(
+                f"WARNING: {label}: HARD_DELETE fail — {len(leftover)} "
+                f"title/model match(es) still on selling shelves",
+                flush=True,
+            )
+            return False
+
+    print(
+        f"  {label}: HARD_DELETE verified — detail gone, shelves clear; "
+        f"CREATE allowed",
+        flush=True,
+    )
+    return True
+
+
 def ensure_no_matching_shelf_listings(
     page: Page,
     vehicle: Vehicle,

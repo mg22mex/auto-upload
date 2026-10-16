@@ -9,10 +9,16 @@ from pathlib import Path
 from src.facebook.browser_health import is_browser_dead
 from src.facebook.errors import FacebookAutomationError, FacebookDeferredError, FacebookPostingError, FacebookSessionError
 from src.facebook.poster import create_vehicle_listing
-from src.facebook.remover import extract_item_id, ensure_no_matching_shelf_listings, remove_vehicle_listing
+from src.facebook.remover import (
+    assert_hard_delete_verified,
+    extract_item_id,
+    ensure_no_matching_shelf_listings,
+    remove_vehicle_listing,
+)
 from src.facebook.repost_cache import build_listing_cache, prefetch_photos
 from src.facebook.ui import dismiss_overlays
 from src.facebook.session import (
+    assert_session_identity,
     format_session_login_error,
     get_page,
     is_logged_in,
@@ -183,6 +189,9 @@ def execute_reposts(
                         raise FacebookSessionError(
                             format_session_login_error(account_id, session_dir)
                         )
+                    # Pin operations to the configured Facebook profile before
+                    # CACHE_BUILD / DELETE (never the OS-focused wrong window).
+                    assert_session_identity(context, config, account_id)
 
                     done_in_session = 0
                     while remaining:
@@ -435,7 +444,8 @@ def _repost_one(
                 ) from exc
 
         # Title/model match across all selling tabs — not only the old item id.
-        shelf_passes = env_int("REPOST_SHELF_MAX_PASSES", 1)
+        old_item_id = extract_item_id(old_url) if old_url else None
+        shelf_passes = env_int("REPOST_SHELF_MAX_PASSES", 2)
         t_shelf = time.monotonic()
         log_step(
             f"SHELF_CHECK_START {action.autosell_id} max_passes={shelf_passes}"
@@ -443,7 +453,7 @@ def _repost_one(
         if not ensure_no_matching_shelf_listings(
             page,
             action.vehicle,
-            item_id=extract_item_id(old_url) if old_url else None,
+            item_id=old_item_id,
             autosell_id=action.autosell_id,
             max_passes=max(1, shelf_passes),
         ):
@@ -461,6 +471,30 @@ def _repost_one(
             f"SHELF_CHECK_OK {action.autosell_id} {time.monotonic() - t_shelf:.1f}s"
         )
 
+        # Strict blocking gate: detail + all shelves must prove hard delete.
+        t_hard = time.monotonic()
+        log_step(f"HARD_DELETE_VERIFY_START {action.autosell_id}")
+        if not assert_hard_delete_verified(
+            page,
+            listing_url=old_url,
+            item_id=old_item_id,
+            vehicle=action.vehicle,
+            autosell_id=action.autosell_id,
+        ):
+            log_step(
+                f"HARD_DELETE_VERIFY_FAIL {action.autosell_id} "
+                f"{time.monotonic() - t_hard:.1f}s — SKIP_CREATE"
+            )
+            print(
+                f"WARNING: {action.autosell_id}: hard-delete NOT verified on "
+                f"Facebook DOM — SKIP_CREATE (blocks duplicate / Needs attention)"
+            )
+            return
+        log_step(
+            f"HARD_DELETE_VERIFY_OK {action.autosell_id} "
+            f"{time.monotonic() - t_hard:.1f}s"
+        )
+
         # Organic settle after verified delete (jittered; keeps platform pacing).
         cooldown = env_float("REPOST_DELETE_COOLDOWN_SEC", 2.0)
         if cooldown > 0:
@@ -476,7 +510,7 @@ def _repost_one(
         t_create = time.monotonic()
         log_step(
             f"CREATE_START {action.autosell_id} "
-            f"cached_photos={cache.photo_count} skip_shelf_gate=1"
+            f"cached_photos={cache.photo_count} skip_shelf_gate=1 delete_verified=1"
         )
         try:
             new_url = create_vehicle_listing(
@@ -487,6 +521,7 @@ def _repost_one(
                 log_dir=log_dir,
                 photo_paths=list(cache.photo_paths),
                 skip_shelf_gate=True,
+                delete_verified=True,
             )
         except FacebookDeferredError:
             raise

@@ -68,14 +68,21 @@ def create_vehicle_listing(
     log_dir: Path,
     photo_paths: list[Path] | None = None,
     skip_shelf_gate: bool = False,
+    delete_verified: bool = False,
 ) -> str:
     """Create a Marketplace vehicle listing.
 
     ``photo_paths``: optional pre-downloaded files (repost prefetch). Caller
     owns cleanup when provided. ``skip_shelf_gate``: skip the pre-create shelf
-    scan when the caller already verified delete (avoids composer→selling→
-    composer round-trip / visibility gap).
+    scan when the caller already verified hard delete (avoids composer→selling→
+    composer round-trip / visibility gap). Requires ``delete_verified=True``.
     """
+    if skip_shelf_gate and not delete_verified:
+        raise FacebookPostingError(
+            f"SKIP_CREATE: skip_shelf_gate requires delete_verified=True for "
+            f"{vehicle.autosell_id} — refusing create without hard-delete proof"
+        )
+
     create_url = _resolve_vehicle_create_url(fb_config)
     page.goto(create_url, wait_until="domcontentloaded", timeout=90_000)
     _wait_for_photo_file_input(page, timeout_ms=15_000)
