@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.alerts import send_alert
 from src.facebook.executor import execute_actions
-from src.facebook.health import format_health_report, precheck_accounts, unhealthy
+from src.facebook.health import run_session_preflight, unhealthy
 from src.facebook.reposter import execute_reposts
 from src.facebook.util import ensure_unbuffered_stdio, env_int
 from src.inventory.snapshot import load_catalog_snapshot
@@ -201,29 +201,18 @@ def main() -> int:
         print(f"Processing reposts for {account_id} (Facebook Profile: {label})")
     print("")
 
-    # Surface logged-out sessions / security checkpoints before the Playwright loop.
-    health_results = precheck_accounts(
+    # Profiles live on fb-worker disk only — fail before Playwright.
+    health_results, sessions_ok = run_session_preflight(
         config,
         account_ids,
         ROOT,
         live=False if args.dry_run else None,
+        command_hint=(
+            "python scripts/run_repost.py --ids <sku> --account <id> --force "
+            "(on fb-worker after scripts/fb_login.py)"
+        ),
     )
-    print(format_health_report(health_results))
     session_warns = [result.detail for result in unhealthy(health_results)]
-    if session_warns:
-        print("")
-        print("WARNING: one or more accounts need a headed login before repost:", file=sys.stderr)
-        for msg in session_warns:
-            print(f"  {msg}", file=sys.stderr)
-        print("", file=sys.stderr)
-        if not args.dry_run:
-            broken = ", ".join(
-                f"{result.account_id}={result.state}" for result in unhealthy(health_results)
-            )
-            send_alert(
-                "\n".join([f"Accounts: {broken}", "", *session_warns]),
-                subject="repost blocked — session health check failed",
-            )
     print("")
 
     if create_actions:
@@ -254,9 +243,23 @@ def main() -> int:
         print("")
 
     if args.dry_run or (not actions and not create_actions):
-        if session_warns and not args.dry_run and not actions and not create_actions:
-            return 0
         return 0
+
+    if not sessions_ok:
+        broken = ", ".join(
+            f"{result.account_id}={result.state}" for result in unhealthy(health_results)
+        )
+        send_alert(
+            "\n".join([f"Accounts: {broken}", "", *session_warns]),
+            subject="repost blocked — session health check failed",
+        )
+        print(
+            "Aborting repost: session preflight failed "
+            "(no browser contexts will be opened).",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
 
     rc = 0
     session_expired_n = 0

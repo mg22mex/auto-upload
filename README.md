@@ -197,9 +197,19 @@ Facebook logic: `src/facebook/` (`poster.py`, `categorize.py`, `listing_cta.py`,
 
 `run_weekly_bump.py --all-eligible` scrapes autosell.mx, pushes inventory to Odoo when `ODOO_URL` + `ODOO_DB` are set, then syncs Facebook. Each run prints the branch-tag breakdown (`* periferico=41  + san_felipe=33  - consignment=18  untagged=…`) so tag retention is visible. `--skip-scrape` / `SKIP_SCRAPE` reuses `data/catalog_latest.json`; `--skip-odoo` / `SKIP_ODOO` bypasses XML-RPC entirely.
 
-### Session health pre-check
+### Session health pre-check (fb-worker only)
 
-`src/facebook/health.py` runs before any Playwright loop: an offline check of the Chromium profile, then one live Marketplace load per healthy account that classifies `ok` / `logged_out` / `checkpoint`. Skipped on `--dry-run`; set `FB_SESSION_PRECHECK_LIVE=false` to keep only the offline check. A failure fixes with `python scripts/fb_login.py --account <id>` (headed, on fb-worker).
+Playwright profiles live **only** on the fb-worker host under `sessions/account_1/`, `sessions/account_2/`, … (Chromium `user_data_dir` from `scripts/fb_login.py`). They are never present in a GitHub-hosted checkout.
+
+`run_sync.py` and `scripts/run_repost.py` call `src/facebook/health.run_session_preflight` **before** opening a browser: offline profile check, then (unless `--dry-run`) one live Marketplace probe per healthy account (`ok` / `logged_out` / `checkpoint`). Missing or expired sessions print a clear abort banner and exit without Marketplace writes. Set `FB_SESSION_PRECHECK_LIVE=false` for offline-only. Refresh headed on fb-worker:
+
+```bash
+python scripts/fb_login.py --account account_1
+python scripts/fb_test_session.py --account account_1
+python run_sync.py --from-snapshot data/catalog_latest.json
+# or
+python scripts/run_repost.py --ids objXXXX --account account_1 --force
+```
 
 ### Failure alerts
 

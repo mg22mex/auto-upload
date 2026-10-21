@@ -238,7 +238,9 @@ ln -snf ~/auto-upload-data/sessions ~/auto-upload/sessions
 
 ### E1. Log in once per account
 
-Run on a machine with a display (local Arch/Mac) or X11-forwarded SSH. Headed login saves cookies to `sessions/account_N/`.
+Run on a machine with a display (local Arch/Mac) or X11-forwarded SSH. Headed login saves cookies to `sessions/account_N/` on **that host’s disk** (Playwright persistent profile). GitHub-hosted runners never see these profiles; self-hosted `fb-worker` must have them under `~/auto-upload/sessions/` (or the symlink to `~/auto-upload-data/sessions`).
+
+`run_sync.py` / `scripts/run_repost.py` abort with a clear banner if `sessions/account_*` is missing or logged out — refresh before re-running.
 
 ```bash
 source .venv/bin/activate

@@ -157,28 +157,63 @@ def run_sync_from_catalog(
         if dry_run:
             print("Dry run complete. No Facebook actions executed.")
             notes = f"DRY RUN. Deferred creates: {len(deferred)}."
+        elif not executable:
+            print("No executable Facebook actions.")
+            notes = f"LIVE. No actions. Deferred creates: {len(deferred)}."
         else:
             from src.facebook.executor import execute_actions
+            from src.facebook.health import run_session_preflight
 
-            print("Executing Facebook actions...")
-            fb_result = execute_actions(
-                executable, store, config, root=ROOT, account_order=account_ids
+            # Profiles live on fb-worker disk only — fail before Playwright.
+            accounts_needed = sorted(
+                {
+                    a.account_id
+                    for a in executable
+                    if a.account_id
+                }
+            ) or list(account_ids)
+            _, sessions_ok = run_session_preflight(
+                config,
+                accounts_needed,
+                ROOT,
+                command_hint=(
+                    "python run_sync.py --from-snapshot data/catalog_latest.json "
+                    "(on fb-worker; refresh sessions first with scripts/fb_login.py)"
+                ),
             )
-            executed_creates = fb_result.creates
-            executed_updates = fb_result.updates
-            executed_removals = fb_result.removals
-            fb_errors = len(fb_result.errors)
-            if fb_result.errors:
-                for err in fb_result.errors:
-                    print(f"  FB error: {err}", file=sys.stderr)
-            print(
-                f"Facebook done: {executed_creates} created, "
-                f"{executed_updates} updated, {executed_removals} removed."
-            )
-            notes = (
-                f"LIVE. Executed creates={executed_creates}, updates={executed_updates}, "
-                f"removals={executed_removals}, errors={fb_errors}, deferred={len(deferred)}."
-            )
+            if not sessions_ok:
+                fb_errors = len(accounts_needed)
+                notes = (
+                    "BLOCKED: Facebook sessions missing/expired on this host. "
+                    f"Refresh headed on fb-worker: python scripts/fb_login.py "
+                    f"--account <id>. Deferred creates: {len(deferred)}."
+                )
+                print(
+                    "Facebook done: 0 created, 0 updated, 0 removed "
+                    "(session preflight failed).",
+                    flush=True,
+                )
+            else:
+                print("Executing Facebook actions...")
+                fb_result = execute_actions(
+                    executable, store, config, root=ROOT, account_order=account_ids
+                )
+                executed_creates = fb_result.creates
+                executed_updates = fb_result.updates
+                executed_removals = fb_result.removals
+                fb_errors = len(fb_result.errors)
+                if fb_result.errors:
+                    for err in fb_result.errors:
+                        print(f"  FB error: {err}", file=sys.stderr)
+                print(
+                    f"Facebook done: {executed_creates} created, "
+                    f"{executed_updates} updated, {executed_removals} removed."
+                )
+                notes = (
+                    f"LIVE. Executed creates={executed_creates}, "
+                    f"updates={executed_updates}, removals={executed_removals}, "
+                    f"errors={fb_errors}, deferred={len(deferred)}."
+                )
 
         store.finish_sync_run(
             run_id,

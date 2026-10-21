@@ -6,6 +6,8 @@ checkpoints before a long automation loop burns time (or trips Facebook).
 """
 from __future__ import annotations
 
+import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -148,6 +150,99 @@ def unhealthy(results: list[AccountHealth]) -> list[AccountHealth]:
     return [result for result in results if not result.healthy]
 
 
+def is_ci_environment() -> bool:
+    """True under GitHub Actions / generic CI (self-hosted runners included)."""
+    if os.getenv("GITHUB_ACTIONS") or os.getenv("GITHUB_RUN_ID"):
+        return True
+    return env_bool("CI", False)
+
+
+def format_fb_worker_session_guard(
+    results: list[AccountHealth],
+    *,
+    command_hint: str = "python run_sync.py",
+) -> str:
+    """Banner when profiles are missing / expired — do not open Playwright yet.
+
+    Playwright cookies live only under ``sessions/account_*`` on the fb-worker
+    host. GitHub-hosted runners never have them; a self-hosted runner still
+    fails if the profile was never logged in or the symlink is wrong.
+    """
+    bad = unhealthy(results)
+    if not bad:
+        return ""
+    ci_note = (
+        "Detected CI (GITHUB_ACTIONS/CI). Profiles are NOT in the cloud checkout — "
+        "they must exist on the fb-worker disk under sessions/account_*/."
+        if is_ci_environment()
+        else "Run Facebook automation only on the host that owns sessions/account_* "
+        "(typically fb-worker), not a bare laptop checkout without profiles."
+    )
+    lines = [
+        "",
+        "=" * 72,
+        "FACEBOOK SESSIONS NOT READY — aborting browser automation",
+        "=" * 72,
+        ci_note,
+        "",
+        "Playwright persistent profiles (not cookies.json):",
+        "  <repo>/sessions/account_1/   ← scripts/fb_login.py --account account_1",
+        "  <repo>/sessions/account_2/   ← scripts/fb_login.py --account account_2",
+        "",
+        "Broken accounts:",
+    ]
+    for result in bad:
+        lines.append(
+            f"  - {result.account_id}: state={result.state} path={result.session_path}"
+        )
+        lines.append(f"      {result.detail}")
+    lines.extend(
+        [
+            "",
+            "Fix on fb-worker (headed display / X11):",
+            "  python scripts/fb_login.py --account account_1",
+            "  python scripts/fb_login.py --account account_2",
+            "  python scripts/fb_test_session.py --account account_1",
+            "",
+            "Then re-run on that same host:",
+            f"  {command_hint}",
+            "=" * 72,
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def run_session_preflight(
+    config: dict,
+    account_ids: list[str],
+    root: Path,
+    *,
+    live: bool | None = None,
+    headless: bool | None = None,
+    command_hint: str = "python run_sync.py",
+    stream=None,
+) -> tuple[list[AccountHealth], bool]:
+    """Offline (+ optional live) session gate before any Marketplace browser work.
+
+    Returns ``(results, ready)``. When ``ready`` is False, print the guard banner
+    and do not call ``open_account_context`` / ``execute_*``.
+    """
+    out = sys.stderr if stream is None else stream
+    results = precheck_accounts(
+        config, account_ids, root, live=live, headless=headless
+    )
+    print(format_health_report(results), flush=True)
+    if unhealthy(results):
+        print(
+            format_fb_worker_session_guard(results, command_hint=command_hint),
+            file=out,
+            flush=True,
+        )
+        return results, False
+    return results, True
+
+
 __all__ = [
     "AccountHealth",
     "STATE_CHECKPOINT",
@@ -157,8 +252,11 @@ __all__ = [
     "STATE_OK",
     "check_live",
     "check_profile",
+    "format_fb_worker_session_guard",
     "format_health_report",
+    "is_ci_environment",
     "live_precheck_enabled",
     "precheck_accounts",
+    "run_session_preflight",
     "unhealthy",
 ]

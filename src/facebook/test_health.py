@@ -79,6 +79,33 @@ class TestProfilePrecheck(unittest.TestCase):
         self.assertEqual(len(health.unhealthy(results)), 1)
         self.assertIn("account_1", health.format_health_report(results))
 
+    def test_session_guard_mentions_fb_login_and_worker(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            results = health.precheck_accounts(
+                _config("sessions/account_1"), ["account_1"], root, live=False
+            )
+        banner = health.format_fb_worker_session_guard(
+            results, command_hint="python run_sync.py"
+        )
+        self.assertIn("SESSIONS NOT READY", banner)
+        self.assertIn("fb_login.py", banner)
+        self.assertIn("sessions/account_", banner)
+        self.assertIn("python run_sync.py", banner)
+
+    def test_run_session_preflight_not_ready_without_profile(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            results, ready = health.run_session_preflight(
+                _config("sessions/account_1"),
+                ["account_1"],
+                root,
+                live=False,
+                command_hint="python run_sync.py",
+            )
+        self.assertFalse(ready)
+        self.assertEqual(results[0].state, health.STATE_NO_SESSION)
+
 
 if __name__ == "__main__":
     unittest.main()
