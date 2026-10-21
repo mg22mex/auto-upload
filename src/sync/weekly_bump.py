@@ -10,7 +10,7 @@ VALID_MODES = frozenset({"renew", "repost"})
 # Relist-first: both ISO weeks default to full delete+recreate.
 DEFAULT_EVEN_WEEK = "repost"
 DEFAULT_ODD_WEEK = "repost"
-DEFAULT_MIN_AGE_DAYS = 2.0
+DEFAULT_MIN_AGE_DAYS = 7.0
 DEFAULT_MAX_PER_ACCOUNT_PER_RUN = 3
 
 

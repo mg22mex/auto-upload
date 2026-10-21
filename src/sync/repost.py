@@ -98,7 +98,7 @@ def plan_repost_actions(
     """Plan repost/renew actions for live listings.
 
     With ``all_eligible=True``, only rows with
-    ``now - posted_at >= older_than_days`` (default 2) are planned unless
+    ``now - posted_at >= older_than_days`` (default 7) are planned unless
     ``force=True`` or ``older_than_days == 0`` (all live dates).
     ``action_name='repost'`` means full delete+recreate (relist);
     ``'renew'`` is FB native Renovar (same URL). Prefer repost for momentum.

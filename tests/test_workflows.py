@@ -37,7 +37,7 @@ class TestRepostAgeInputs(unittest.TestCase):
         )
         inputs = _on(payload)["workflow_dispatch"]["inputs"]
         self.assertIn("min_age_days", inputs)
-        self.assertEqual(str(inputs["min_age_days"].get("default")), "2")
+        self.assertEqual(str(inputs["min_age_days"].get("default")), "7")
         self.assertIn("older_than", inputs)
         self.assertIn("force", inputs)
 

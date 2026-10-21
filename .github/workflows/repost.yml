@@ -44,10 +44,10 @@ on:
         required: false
         type: string
       min_age_days:
-        description: "Min listing age in days (default 2). Pass 0 to process all old listings."
+        description: "Min listing age in days (default 7). Pass 0 to process all old listings."
         required: false
         type: string
-        default: "2"
+        default: "7"
       skip_odoo:
         description: "Skip Odoo fetch (Use local cached catalog_latest.json)"
         required: false
@@ -179,8 +179,8 @@ jobs:
       - name: Relist (repost) or optional renew
         env:
           AUTOSELL_BASE_URL: ${{ secrets.AUTOSELL_BASE_URL }}
-          RENEW_MIN_AGE_DAYS: ${{ secrets.RENEW_MIN_AGE_DAYS || secrets.REPOST_MIN_AGE_DAYS || '2' }}
-          REPOST_MIN_AGE_DAYS: ${{ secrets.REPOST_MIN_AGE_DAYS || secrets.RENEW_MIN_AGE_DAYS || '2' }}
+          RENEW_MIN_AGE_DAYS: ${{ secrets.RENEW_MIN_AGE_DAYS || secrets.REPOST_MIN_AGE_DAYS || '7' }}
+          REPOST_MIN_AGE_DAYS: ${{ secrets.REPOST_MIN_AGE_DAYS || secrets.RENEW_MIN_AGE_DAYS || '7' }}
           RENEW_MAX_PER_ACCOUNT_PER_RUN: ${{ inputs.max_per_account || secrets.RENEW_MAX_PER_ACCOUNT_PER_RUN || '3' }}
           REPOST_MAX_PER_ACCOUNT_PER_RUN: ${{ inputs.max_per_account || secrets.REPOST_MAX_PER_ACCOUNT_PER_RUN || '3' }}
           PYTHONUNBUFFERED: "1"

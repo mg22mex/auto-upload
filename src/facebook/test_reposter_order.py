@@ -483,7 +483,7 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
             patch("src.facebook.reposter._repost_one") as repost_one,
             patch("src.facebook.reposter.random_delay"),
             patch("src.facebook.reposter.ensure_log_dir", return_value=Path("/tmp")),
-            patch.dict("os.environ", {"REPOST_SKIP_IF_BUMPED_HOURS": "36"}, clear=False),
+            patch.dict("os.environ", {"REPOST_SKIP_IF_BUMPED_HOURS": "168"}, clear=False),
         ):
             from contextlib import contextmanager
 

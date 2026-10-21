@@ -151,7 +151,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Marketplace listing bump: default full repost/relist (delete+recreate). "
-            "Optional --mode renew for FB native Renovar. Age floor defaults to 2 days. "
+            "Optional --mode renew for FB native Renovar. Age floor defaults to 7 days. "
             "With --all-eligible, catalog sync (creates missing vehicles) runs first."
         )
     )
@@ -179,7 +179,7 @@ def main() -> int:
         "--min-age-days",
         dest="older_than",
         default=None,
-        help="Min age days (default: config/env, usually 2; supports 1.5). Pass 0 to include fresh listings.",
+        help="Min age days (default: config/env, usually 7; supports 1.5). Pass 0 to include fresh listings.",
     )
     parser.add_argument(
         "--max",
@@ -418,7 +418,7 @@ def _run_bump(args, config: dict, bump: dict, repost_cfg: dict) -> int:
     print(f"Max/acct:  {'unlimited' if args.unlimited else max_per}", flush=True)
     print(
         f"Even/odd:  {bump['even_week']} / {bump['odd_week']} "
-        f"(min_age_days={args.older_than if args.older_than is not None else bump.get('min_age_days', 2)}"
+        f"(min_age_days={args.older_than if args.older_than is not None else bump.get('min_age_days', 7)}"
         f"{' overridden' if args.force or args.older_than == '0' else ''})",
         flush=True,
     )

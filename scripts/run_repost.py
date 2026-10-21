@@ -74,7 +74,7 @@ def main() -> int:
         default=None,
         help=(
             "Min days since last post for --all-eligible "
-            "(default: 2 or config; supports 1.5). Pass 0 to include fresh listings."
+            "(default: 7 or config; supports 1.5). Pass 0 to include fresh listings."
         ),
     )
     parser.add_argument(
@@ -108,7 +108,7 @@ def main() -> int:
     older_than = resolve_min_age_days(
         args.older_than,
         env_names=("REPOST_MIN_AGE_DAYS",),
-        config_default=float(repost_cfg.get("min_age_days", 2)),
+        config_default=float(repost_cfg.get("min_age_days", 7)),
         force=args.force,
     )
     max_per = resolve_max_per_account(

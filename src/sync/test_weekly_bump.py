@@ -59,7 +59,7 @@ class TestResolveWeeklyBumpMode(unittest.TestCase):
     def test_defaults_are_repost_both_weeks(self):
         self.assertEqual(DEFAULT_EVEN_WEEK, "repost")
         self.assertEqual(DEFAULT_ODD_WEEK, "repost")
-        self.assertEqual(DEFAULT_MIN_AGE_DAYS, 2.0)
+        self.assertEqual(DEFAULT_MIN_AGE_DAYS, 7.0)
         self.assertEqual(DEFAULT_MAX_PER_ACCOUNT_PER_RUN, 3)
 
     def test_even_iso_week_is_repost(self):
@@ -114,7 +114,7 @@ class TestWeeklyBumpConfig(unittest.TestCase):
         cfg = weekly_bump_config({})
         self.assertEqual(cfg["even_week"], "repost")
         self.assertEqual(cfg["odd_week"], "repost")
-        self.assertEqual(cfg["min_age_days"], 2.0)
+        self.assertEqual(cfg["min_age_days"], 7.0)
         self.assertEqual(cfg["timezone"], "America/Chihuahua")
         self.assertEqual(cfg["max_per_account_per_run"], 3)
 
@@ -173,13 +173,13 @@ class TestPlanRepostAgeFilter(unittest.TestCase):
         self.assertTrue(all(a.action == "repost" for a in actions))
         self.assertTrue(any("obj_new" in line and "min 2d" in line for line in skipped))
 
-    def test_exactly_2_days_is_eligible(self):
+    def test_exactly_7_days_is_eligible(self):
         now = datetime.now(timezone.utc)
         live = [
             _listing(
                 "obj_edge",
                 "account_1",
-                posted_at=(now - timedelta(days=2)).isoformat(),
+                posted_at=(now - timedelta(days=7)).isoformat(),
             ),
         ]
         actions, skipped = plan_repost_actions(
@@ -222,13 +222,13 @@ class TestPlanRepostAgeFilter(unittest.TestCase):
         self.assertEqual({a.autosell_id for a in actions}, {"obj_ok"})
         self.assertTrue(any("obj_young" in line and "min 1.5d" in line for line in skipped))
 
-    def test_default_older_than_is_2_days(self):
+    def test_default_older_than_is_7_days(self):
         now = datetime.now(timezone.utc)
         live = [
             _listing(
                 "obj_a",
                 "account_1",
-                posted_at=(now - timedelta(days=2, minutes=5)).isoformat(),
+                posted_at=(now - timedelta(days=7, minutes=5)).isoformat(),
             ),
         ]
         actions, _ = plan_repost_actions(

@@ -79,7 +79,8 @@ def _should_skip_already_bumped(
     """Skip listings bumped recently (posted_at reset on last successful relist)."""
     if force:
         return False, ""
-    skip_hours = env_float("REPOST_SKIP_IF_BUMPED_HOURS", 36.0)
+    # Align with 7-day refresh cadence (override via env for one-off tests).
+    skip_hours = env_float("REPOST_SKIP_IF_BUMPED_HOURS", 168.0)
     if skip_hours <= 0:
         return False, ""
     account_id = action.account_id or ""

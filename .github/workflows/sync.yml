@@ -25,7 +25,7 @@ on:
         required: false
         type: string
       min_age_days:
-        description: "After catalog sync, relist listings this old (default 2). 0 = all. Empty on schedule = skip relist."
+        description: "After catalog sync, relist listings this old (default 7). 0 = all. Empty on schedule = skip relist."
         required: false
         type: string
 
@@ -152,7 +152,7 @@ jobs:
           (inputs.force == true || inputs.older_than || inputs.min_age_days)
         env:
           AUTOSELL_BASE_URL: ${{ secrets.AUTOSELL_BASE_URL }}
-          REPOST_MIN_AGE_DAYS: ${{ secrets.REPOST_MIN_AGE_DAYS || '2' }}
+          REPOST_MIN_AGE_DAYS: ${{ secrets.REPOST_MIN_AGE_DAYS || '7' }}
           REPOST_MAX_PER_ACCOUNT_PER_RUN: ${{ secrets.REPOST_MAX_PER_ACCOUNT_PER_RUN || '3' }}
           PYTHONUNBUFFERED: "1"
           FB_HEADLESS: ${{ secrets.FB_HEADLESS || 'true' }}
