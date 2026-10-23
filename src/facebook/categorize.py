@@ -126,6 +126,7 @@ MANUAL_MARKERS = ("manual", "estándar", "estandar", "stick", " mt ")
 TRUCK_BODY_MARKERS = (
     "ram", "f-150", "f150", "silverado", "tundra", "tacoma", "ranger", "frontier",
     "np300", "titan", "1500", "2500", "3500", "cheyenne", "l200", "amarok", "pickup",
+    "colorado", "canyon", "maverick", "ridgeline", "gladiator", "hilux", "truck",
 )
 SUV_BODY_MARKERS = (
     "suv", "cx-", "cx50", "cx-5", "cx-9", "x-trail", "xtrail", "cr-v", "rav4",

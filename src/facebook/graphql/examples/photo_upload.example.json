@@ -1,0 +1,20 @@
+{
+  "url": "https://upload.facebook.com/ajax/react_composer/attachments/photo/upload",
+  "field_name": "farr",
+  "form_fields": {
+    "source": "8",
+    "waterfallxapp": "comet"
+  },
+  "id_paths": [
+    "payload.photoID",
+    "payload.originalPhotoID",
+    "payload.fbid",
+    "photoID",
+    "fbid",
+    "id"
+  ],
+  "alt_urls": [
+    "https://www.facebook.com/ajax/react_composer/attachments/photo/upload"
+  ],
+  "_comment": "Success body is for (;;);{…\"payload\":{\"photoID\":\"<digits>\",…}}. Dead URL: ajax/composerx/.../saveunpublished."
+}

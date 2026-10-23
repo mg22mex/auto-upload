@@ -1,0 +1,35 @@
+{
+  "doc_id": "9551550371629242",
+  "friendly_name": "useCometMarketplaceListingCreateMutation",
+  "listing_id_paths": [
+    "data.marketplace_listing_create.listing.id",
+    "data.marketplace_listing_create.listing_id"
+  ],
+  "variables": {
+    "input": {
+      "actor_id": "REPLACE_OR_AUTO_FILL",
+      "client_mutation_id": "1",
+      "attribution_id_v2": "…from capture…",
+      "audience": {
+        "marketplace": {
+          "marketplace_id": "630562697113569"
+        }
+      },
+      "data": {
+        "common": {
+          "category_id": "807311116002614",
+          "description": { "text": "…" },
+          "item_price": { "price": "0" },
+          "latitude": 28.644104003906,
+          "longitude": -106.06750488281,
+          "serialized_verticals_data": "{\"make\":\"…\",\"model\":\"…\",\"year\":2024,\"mileage\":\"0\",\"isKM\":true,\"type\":\"autos\",\"vehicleCategory\":\"car&truck/\",\"vehicleType\":\"suv\"}",
+          "title": "…",
+          "photo_ids": [],
+          "video_ids": [],
+          "xpost_target_ids": []
+        }
+      }
+    }
+  },
+  "_comment": "Runtime deep-fills actor_id, title, description, price(+currency), photo_ids, coords, serialized_verticals_data. Keep marketplace_id + category_id. Never reuse capture make id for another brand — map brands in config.yaml facebook.graphql_make_ids."
+}

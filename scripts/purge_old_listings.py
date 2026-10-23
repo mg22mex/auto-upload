@@ -1,14 +1,25 @@
 #!/usr/bin/env python3
 """Delete Facebook Marketplace listings older than a day threshold.
 
+Live ``run_sync.py`` already runs this as a preflight step (see
+``sync.preflight_purge`` / ``src/facebook/preflight_purge.py``). Use this CLI
+for one-off / manual cleanups only.
+
 Example:
   python scripts/purge_old_listings.py --max-days 3 --accounts account_1 account_2
   python scripts/purge_old_listings.py --max-days 3 --accounts account_1 --dry-run
+
+Preserve today's Mustang GT while purging older shelf cards (age > 0 days):
+  python scripts/purge_old_listings.py --max-days 0 \\
+    --accounts account_1 account_2 \\
+    --keep-ids obj1173 \\
+    --keep-title-re '(?i)mustang\\s*gt'
 """
 from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -18,6 +29,8 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from src.facebook.graphql.errors import FacebookGraphqlFallback
+from src.facebook.graphql.mode import graphql_enabled, graphql_ui_fallback
 from src.facebook.purge_old import purge_old_listings_on_page
 from src.facebook.session import (
     format_session_login_error,
@@ -66,7 +79,11 @@ def main() -> int:
         "--max-days",
         type=float,
         default=3.0,
-        help="Delete listings with age strictly greater than this many days (default: 3)",
+        help=(
+            "Delete listings with age strictly greater than this many days "
+            "(default: 3). Use 0 for total purge: also deletes items with "
+            "unknown age/creation_time (keep filters still apply)."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -78,6 +95,21 @@ def main() -> int:
         type=int,
         default=None,
         help="Stop after N successful deletes per account (safety cap)",
+    )
+    parser.add_argument(
+        "--keep-ids",
+        default="",
+        help="Comma-separated autosell ids to never delete (e.g. obj1173)",
+    )
+    parser.add_argument(
+        "--keep-item-ids",
+        default="",
+        help="Comma-separated Facebook marketplace item ids to never delete",
+    )
+    parser.add_argument(
+        "--keep-title-re",
+        default="",
+        help="Regex matched against card/catalog title to preserve (e.g. '(?i)mustang\\\\s*gt')",
     )
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument(
@@ -96,11 +128,29 @@ def main() -> int:
     db_path = args.db or os.getenv("DB_PATH", "data/sync.db")
     store = SyncStore(ROOT / db_path if not Path(db_path).is_absolute() else db_path)
 
+    keep_autosell = {
+        part.strip() for part in args.keep_ids.split(",") if part.strip()
+    }
+    keep_items = {
+        part.strip() for part in args.keep_item_ids.split(",") if part.strip()
+    }
+    keep_title_re = (
+        re.compile(args.keep_title_re) if str(args.keep_title_re).strip() else None
+    )
+
+    use_graphql = graphql_enabled()
     print("=== Purge old Marketplace listings ===", flush=True)
     print(f"Accounts:  {', '.join(account_ids)}", flush=True)
     print(f"Max days:  {args.max_days}  (delete when age > {args.max_days})", flush=True)
     print(f"Dry run:   {dry_run}", flush=True)
     print(f"DB:        {db_path}", flush=True)
+    print(f"GraphQL:   {use_graphql} (FB_USE_GRAPHQL)", flush=True)
+    if keep_autosell:
+        print(f"Keep ids:  {', '.join(sorted(keep_autosell))}", flush=True)
+    if keep_items:
+        print(f"Keep FB:   {', '.join(sorted(keep_items))}", flush=True)
+    if keep_title_re:
+        print(f"Keep title re: {keep_title_re.pattern}", flush=True)
     print("", flush=True)
 
     total_found = 0
@@ -117,29 +167,78 @@ def main() -> int:
             f"path={session_dir} ---",
             flush=True,
         )
+        stats = None
         try:
-            with open_account_context(
-                config, account_id, root=ROOT, headless=headless
-            ) as context:
-                page = get_page(context)
-                if not is_logged_in(page):
+            if use_graphql:
+                try:
+                    from src.facebook.graphql.purge import purge_old_listings_graphql
+                    from src.facebook.graphql.session_ctx import (
+                        extract_session_context_from_profile,
+                    )
+
+                    session = extract_session_context_from_profile(
+                        config, account_id, root=ROOT, headless=headless
+                    )
                     print(
-                        format_session_login_error(account_id, session_dir),
-                        file=sys.stderr,
+                        f"  [{account_id}] GraphQL session {session.redacted_summary()}",
                         flush=True,
                     )
-                    total_failed += 1
-                    continue
-                stats = purge_old_listings_on_page(
-                    page,
-                    store,
-                    account_id=account_id,
-                    max_days=args.max_days,
-                    dry_run=dry_run,
-                    max_deletes=args.max_deletes,
-                    delay_min_sec=2.0,
-                    delay_max_sec=4.0,
-                )
+                    stats = purge_old_listings_graphql(
+                        session,
+                        store,
+                        account_id=account_id,
+                        max_days=args.max_days,
+                        dry_run=dry_run,
+                        max_deletes=args.max_deletes,
+                        delay_min_sec=2.0,
+                        delay_max_sec=4.0,
+                        keep_item_ids=keep_items or None,
+                        keep_autosell_ids=keep_autosell or None,
+                        keep_title_re=keep_title_re,
+                        root=ROOT,
+                    )
+                except FacebookGraphqlFallback as exc:
+                    if not graphql_ui_fallback():
+                        raise
+                    print(
+                        f"  [{account_id}] GraphQL purge fallback → UI ({exc})",
+                        flush=True,
+                    )
+                except Exception as exc:
+                    if not graphql_ui_fallback():
+                        raise
+                    print(
+                        f"  [{account_id}] GraphQL purge error → UI ({exc})",
+                        flush=True,
+                    )
+
+            if stats is None:
+                with open_account_context(
+                    config, account_id, root=ROOT, headless=headless
+                ) as context:
+                    page = get_page(context)
+                    if not is_logged_in(page):
+                        print(
+                            format_session_login_error(account_id, session_dir),
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        total_failed += 1
+                        continue
+                    stats = purge_old_listings_on_page(
+                        page,
+                        store,
+                        account_id=account_id,
+                        max_days=args.max_days,
+                        dry_run=dry_run,
+                        max_deletes=args.max_deletes,
+                        delay_min_sec=2.0,
+                        delay_max_sec=4.0,
+                        keep_item_ids=keep_items or None,
+                        keep_autosell_ids=keep_autosell or None,
+                        keep_title_re=keep_title_re,
+                        root=ROOT,
+                    )
         except Exception as exc:
             print(f"ERROR {account_id}: {exc}", file=sys.stderr, flush=True)
             total_failed += 1

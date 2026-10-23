@@ -1,0 +1,15 @@
+{
+  "doc_id": "30073389588942699",
+  "friendly_name": "useCometMarketplaceForSaleItemDeleteMutation",
+  "variables": {
+    "input": {
+      "actor_id": "{{c_user}}",
+      "client_mutation_id": "{{client_mutation_id}}",
+      "batch_delete_variants": true,
+      "for_sale_item_id": "{{item_id}}",
+      "referral_surface": null,
+      "surface": "MARKETPLACE_PAGE_SELLING"
+    }
+  },
+  "_comment": "Copy to data/graphql/delete_listing.json. doc_id rotates — re-capture if deletes start failing."
+}

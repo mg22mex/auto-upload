@@ -126,6 +126,35 @@ def run_sync_from_catalog(
         store.commit_catalog_snapshot(active_ids)
         store.commit()
 
+        # Shelf/history cleanup BEFORE slot allocation so free slots and
+        # sync.db live rows reflect purged Marketplace state.
+        from src.facebook.preflight_purge import (
+            preflight_purge_config,
+            run_preflight_shelf_purge,
+        )
+
+        purge_cfg = preflight_purge_config(config)
+        # Live sync only (skip browser on --dry-run unless forced).
+        run_purge = purge_cfg.enabled and (
+            not dry_run
+            or env_bool("FB_PREFLIGHT_PURGE_ON_DRY_RUN", False)
+        )
+        if run_purge:
+            run_preflight_shelf_purge(
+                config,
+                store,
+                account_ids,
+                root=ROOT,
+                dry_run=dry_run,
+            )
+            store.commit()
+        elif purge_cfg.enabled and dry_run:
+            print(
+                "Preflight purge: skipped on dry-run "
+                "(set FB_PREFLIGHT_PURGE_ON_DRY_RUN=1 to scan)",
+                flush=True,
+            )
+
         live_listings = store.get_live_listings()
         allocation = allocate_from_config(config, vehicles, account_ids, live_listings)
         alloc_cfg = slot_allocator_config(config)
@@ -140,6 +169,7 @@ def run_sync_from_catalog(
             max_creates_per_account=max_posts,
             allocation=allocation,
             enforce_overflow_removals=alloc_cfg["enforce_overflow_removals"],
+            is_create_blocked=store.is_duplicate_create_blocked,
         )
         executable, deferred = split_executable_actions(actions)
         print_report(vehicles, executable, deferred)

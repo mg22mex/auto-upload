@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from src.models import SyncAction, Vehicle
 from src.sync.allocator import Allocation
 
@@ -12,6 +14,7 @@ def plan_sync_actions(
     max_creates_per_account: int,
     allocation: Allocation | None = None,
     enforce_overflow_removals: bool = False,
+    is_create_blocked: Callable[[str, str], bool] | None = None,
 ) -> list[SyncAction]:
     active_by_id = {vehicle.autosell_id: vehicle for vehicle in vehicles}
     active_ids = set(active_by_id)
@@ -71,6 +74,11 @@ def plan_sync_actions(
                     continue
 
             if existing is None:
+                if is_create_blocked and is_create_blocked(
+                    vehicle.autosell_id, account_id
+                ):
+                    # Recent FB "duplicate listing" block — do not retry every run.
+                    continue
                 if create_budget[account_id] <= 0:
                     actions.append(
                         SyncAction(

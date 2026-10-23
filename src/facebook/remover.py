@@ -275,6 +275,58 @@ def remove_vehicle_listing(
         f"{' (must leave selling shelf before create)' if must_purge else ''}"
     )
 
+    # Direct GraphQL hard-delete (skips fragile UI menus) when enabled.
+    if action == "delete":
+        from src.facebook.graphql.mode import (
+            graphql_enabled,
+            graphql_ui_fallback,
+            project_root_from_log_dir,
+        )
+
+        if graphql_enabled():
+            from src.facebook.graphql.errors import FacebookGraphqlFallback
+            from src.facebook.graphql.remover import remove_vehicle_listing_graphql
+
+            try:
+                ok = remove_vehicle_listing_graphql(
+                    page.context,
+                    listing_url,
+                    autosell_id=autosell_id,
+                    removal_action=action,
+                    log_dir=log_dir,
+                    page=page,
+                    root=project_root_from_log_dir(log_dir),
+                    store=store,
+                    account_id=account_id,
+                )
+                if ok:
+                    print(f"  {autosell_id}: GraphQL hard-delete verified", flush=True)
+                    return True
+            except FacebookGraphqlFallback as exc:
+                if not graphql_ui_fallback():
+                    if require_verified:
+                        raise FacebookPostingError(
+                            f"GraphQL delete unavailable and UI fallback disabled: {exc}"
+                        ) from exc
+                    print(
+                        f"  WARNING: {autosell_id}: GraphQL delete unavailable: {exc}",
+                        flush=True,
+                    )
+                    return False
+                print(
+                    f"  {autosell_id}: GraphQL delete fallback → UI ({exc})",
+                    flush=True,
+                )
+            except FacebookPostingError:
+                raise
+            except Exception as exc:
+                if not graphql_ui_fallback():
+                    raise
+                print(
+                    f"  {autosell_id}: GraphQL delete error → UI ({exc})",
+                    flush=True,
+                )
+
     def _needles() -> list[str]:
         if title_needles:
             return list(title_needles)
@@ -956,18 +1008,44 @@ def _collect_matching_shelf_links(
 
 
 def _delete_shelf_link(page: Page, link: Locator) -> bool:
+    """Delete a shelf card via ⋮ menu, or fall back to opening the item detail."""
+    href = ""
+    try:
+        href = link.get_attribute("href") or ""
+    except Exception:
+        href = ""
     try:
         link.scroll_into_view_if_needed(timeout=4_000)
     except Exception:
         pass
     card = _shelf_card_root(link)
-    if not _click_more_on_shelf_card(page, card, link):
+    if _click_more_on_shelf_card(page, card, link):
+        if _click_menu_action(page, action="delete"):
+            _confirm_if_needed(page, prefer_delete=True)
+            page.wait_for_timeout(1_200)
+            return True
+    # Sold / Needs-attention cards often bury Delete — open detail and delete there.
+    if href and "/marketplace/item/" in href:
+        return _delete_matching_via_detail(page, href)
+    return False
+
+
+def _delete_matching_via_detail(page: Page, href: str) -> bool:
+    """Open listing detail and hard-delete (covers sold-history cards)."""
+    url = href if href.startswith("http") else f"https://www.facebook.com{href}"
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+        _settle(page, 1_000)
+    except Exception:
         return False
-    if not _click_menu_action(page, action="delete"):
+    try:
+        _perform_removal_on_current_page(page, action="delete")
+        _confirm_if_needed(page, prefer_delete=True)
+        page.wait_for_timeout(1_200)
+        return True
+    except Exception as exc:
+        print(f"  detail-delete failed for {url}: {exc}", flush=True)
         return False
-    _confirm_if_needed(page, prefer_delete=True)
-    page.wait_for_timeout(1_200)
-    return True
 
 
 def _is_content_unavailable(page: Page) -> bool:

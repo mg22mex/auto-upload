@@ -9,6 +9,15 @@ sync:
   timezone: America/Chihuahua
   max_posts_per_account_per_run: 15
   max_listings_per_account: 40  # live Marketplace slots per FB profile
+  # Auto shelf/history purge at start of every run_sync (before slot allocation).
+  # max_days: 0 → total purge (incl. unknown age/creation_time); keep filters still apply.
+  preflight_purge:
+    enabled: true
+    max_days: 0
+    # keep_autosell_ids:
+    # keep_title_re: 
+    # keep_item_ids: []
+    # max_deletes: null  # optional per-account safety cap
   slot_allocator:
     enabled: true
     # Remove duplicate / over-cap / FIFO-yielded live listings so waitlist can enter
@@ -50,11 +59,22 @@ sync:
 facebook:
   location_city: Chihuahua
   location_state: Chihuahua
+  # From captured create_vehicle.json (Chihuahua)
+  location_latitude: 28.644104003906
+  location_longitude: -106.06750488281
   country: MX
   max_photos_per_listing: 20
   headless: true
   create_url: https://www.facebook.com/marketplace/create/vehicle
   selling_url: https://www.facebook.com/marketplace/you/selling
+  # FB Marketplace make catalog ids for GraphQL create (from composer capture).
+  # Wrong/missing make id → field_exception on useCometMarketplaceListingCreateMutation.
+  # Capture: headed composer pick Marca → save serialized_verticals_data.make, or
+  #   python scripts/fb_capture_graphql.py --account account_1 --headed --save-as create_vehicle --match-name ListingCreate
+  graphql_make_ids:
+    mazda: "410067716491465"
+    chevrolet: "1914016008726893"  # from create_vehicle capture (title 2021 Chevrolet Test)
+    # ford / toyota / nissan / honda / … — capture via composer ListingCreate
 
 accounts:
   # facebook_profile = short label printed at repost start; facebook_c_user = FB cookie id

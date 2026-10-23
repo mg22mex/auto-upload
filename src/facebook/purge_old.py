@@ -69,9 +69,15 @@ class PurgeStats:
     found: int = 0
     skipped_young: int = 0
     skipped_unknown_age: int = 0
+    skipped_phantom: int = 0  # field_exception on unknown-age / archived ghosts
     deleted: int = 0
     failed: int = 0
     dry_run_candidates: int = 0
+
+
+def purge_unknown_age_when_total(max_days: float) -> bool:
+    """True when ``max_days <= 0`` (total purge): delete items with unknown age too."""
+    return float(max_days) <= 0.0
 
 
 def parse_listing_age_days(text: str, *, now: datetime | None = None) -> float | None:
@@ -341,6 +347,38 @@ def _posted_at_age_days(row: Any) -> float | None:
         return None
 
 
+def _should_keep_listing(
+    card: ShelfListing,
+    *,
+    keep_item_ids: set[str] | None,
+    keep_autosell_ids: set[str] | None,
+    keep_title_re: re.Pattern[str] | None,
+    store: SyncStore,
+    account_id: str,
+    catalog: dict[str, Any],
+) -> str | None:
+    """Return a reason string when this card must be preserved; else None."""
+    if keep_item_ids and card.item_id in keep_item_ids:
+        return f"keep-item-id={card.item_id}"
+    row = _lookup_db_row(store, account_id, card.item_id)
+    autosell_id = str(row["autosell_id"]) if row is not None else ""
+    if keep_autosell_ids and autosell_id and autosell_id in keep_autosell_ids:
+        return f"keep-autosell-id={autosell_id}"
+    if keep_title_re is not None:
+        haystacks = [card.card_text or ""]
+        vehicle = catalog.get(autosell_id) if autosell_id else None
+        if vehicle is not None:
+            haystacks.append(getattr(vehicle, "marketplace_title", "") or "")
+            haystacks.append(getattr(vehicle, "title", "") or "")
+            haystacks.append(
+                f"{getattr(vehicle, 'brand', '')} {getattr(vehicle, 'title', '')}"
+            )
+        for hay in haystacks:
+            if hay and keep_title_re.search(hay):
+                return f"keep-title-re matched {hay[:60]!r}"
+    return None
+
+
 def purge_old_listings_on_page(
     page: Page,
     store: SyncStore,
@@ -351,9 +389,63 @@ def purge_old_listings_on_page(
     max_deletes: int | None = None,
     delay_min_sec: float = 2.0,
     delay_max_sec: float = 4.0,
+    keep_item_ids: set[str] | None = None,
+    keep_autosell_ids: set[str] | None = None,
+    keep_title_re: re.Pattern[str] | None = None,
+    root: Path | None = None,
 ) -> PurgeStats:
-    """Delete selling-shelf cards older than ``max_days``; update sync.db."""
+    """Delete selling-shelf cards older than ``max_days``; update sync.db.
+
+    Optional keep filters preserve specific item ids, autosell ids, or title
+    regex matches (e.g. today's Ford Mustang GT).
+
+    When ``FB_USE_GRAPHQL=1``, discovers active item ids via GraphQL/HTTP and
+    deletes with ``data/graphql/delete_listing.json`` (no DOM scan).
+    """
+    from src.facebook.graphql.errors import FacebookGraphqlFallback
+    from src.facebook.graphql.mode import graphql_enabled, graphql_ui_fallback
     from src.facebook.remover import remove_vehicle_listing
+
+    if graphql_enabled():
+        try:
+            from src.facebook.graphql.purge import purge_old_listings_graphql
+            from src.facebook.graphql.session_ctx import extract_session_context
+
+            session = extract_session_context(
+                page.context, page=page, account_id=account_id, fetch_tokens=True
+            )
+            print(
+                f"  [{account_id}] GraphQL purge session {session.redacted_summary()}",
+                flush=True,
+            )
+            return purge_old_listings_graphql(
+                session,
+                store,
+                account_id=account_id,
+                max_days=max_days,
+                dry_run=dry_run,
+                max_deletes=max_deletes,
+                delay_min_sec=delay_min_sec,
+                delay_max_sec=delay_max_sec,
+                keep_item_ids=keep_item_ids,
+                keep_autosell_ids=keep_autosell_ids,
+                keep_title_re=keep_title_re,
+                root=root,
+            )
+        except FacebookGraphqlFallback as exc:
+            if not graphql_ui_fallback():
+                raise
+            print(
+                f"  [{account_id}] GraphQL purge fallback → DOM ({exc})",
+                flush=True,
+            )
+        except Exception as exc:
+            if not graphql_ui_fallback():
+                raise
+            print(
+                f"  [{account_id}] GraphQL purge error → DOM ({exc})",
+                flush=True,
+            )
 
     stats = PurgeStats()
     listings = collect_selling_listings(page)
@@ -398,8 +490,26 @@ def purge_old_listings_on_page(
             flush=True,
         )
 
+    catalog = _catalog_by_autosell_id()
     targets: list[ShelfListing] = []
+    skipped_keep = 0
     for card in listings:
+        keep_reason = _should_keep_listing(
+            card,
+            keep_item_ids=keep_item_ids,
+            keep_autosell_ids=keep_autosell_ids,
+            keep_title_re=keep_title_re,
+            store=store,
+            account_id=account_id,
+            catalog=catalog,
+        )
+        if keep_reason:
+            skipped_keep += 1
+            print(
+                f"  KEEP item={card.item_id} ({keep_reason})",
+                flush=True,
+            )
+            continue
         age = card.age_days
         source = "ui" if "sync.db" not in (card.age_text or "") else "sync.db"
         if age is None:
@@ -408,6 +518,23 @@ def purge_old_listings_on_page(
             if age is not None:
                 source = "sync.db posted_at"
         if age is None:
+            if purge_unknown_age_when_total(max_days):
+                print(
+                    f"  PURGE unknown age item={card.item_id} "
+                    f"(max_days={max_days} total mode) "
+                    f"text={card.age_text or card.card_text[:60]!r}",
+                    flush=True,
+                )
+                targets.append(
+                    ShelfListing(
+                        item_id=card.item_id,
+                        href=card.href,
+                        age_days=None,
+                        age_text=card.age_text or "unknown age (total purge)",
+                        card_text=card.card_text,
+                    )
+                )
+                continue
             stats.skipped_unknown_age += 1
             print(
                 f"  SKIP unknown age item={card.item_id} "
@@ -435,21 +562,24 @@ def purge_old_listings_on_page(
 
     print(
         f"  [{account_id}] purge candidates: {len(targets)} "
-        f"(skipped young={stats.skipped_young}, unknown_age={stats.skipped_unknown_age})",
+        f"(skipped young={stats.skipped_young}, unknown_age={stats.skipped_unknown_age}, "
+        f"kept={skipped_keep})",
         flush=True,
     )
 
-    catalog = _catalog_by_autosell_id() if not dry_run else {}
     if used_db_fallback and not dry_run:
         _sort_selling_oldest_first(page)
-
     for card in targets:
         if max_deletes is not None and stats.deleted >= max_deletes:
             print(f"  hit --max-deletes={max_deletes}; stopping", flush=True)
             break
+        age_label = (
+            f"{card.age_days:.1f}d"
+            if card.age_days is not None
+            else "unknown"
+        )
         print(
-            f"  PURGE item={card.item_id} age={card.age_days:.1f}d "
-            f"({card.age_text})",
+            f"  PURGE item={card.item_id} age={age_label} ({card.age_text})",
             flush=True,
         )
         if dry_run:

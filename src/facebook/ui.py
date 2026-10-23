@@ -80,11 +80,26 @@ VEHICLE_SUGGESTION_DECLINE_RE = re.compile(
 def human_pause_before_next(
     page: Page,
     *,
-    lo_s: float = 3.0,
-    hi_s: float = 7.0,
+    lo_s: float | None = None,
+    hi_s: float | None = None,
 ) -> None:
-    """Short randomized pause after Next enables — mimics human reaction time."""
-    delay = random.uniform(lo_s, hi_s)
+    """Short randomized pause after Next enables — mimics human reaction time.
+
+    Defaults 1.0–2.5s (was 3–7). Override with ``FB_HUMAN_PAUSE_MIN_SEC`` /
+    ``FB_HUMAN_PAUSE_MAX_SEC``, or scale both via ``FB_HUMAN_PAUSE_SCALE``.
+    """
+    from src.facebook.util import env_float
+
+    base_lo = 1.0 if lo_s is None else lo_s
+    base_hi = 2.5 if hi_s is None else hi_s
+    lo = env_float("FB_HUMAN_PAUSE_MIN_SEC", base_lo)
+    hi = env_float("FB_HUMAN_PAUSE_MAX_SEC", base_hi)
+    scale = env_float("FB_HUMAN_PAUSE_SCALE", 1.0)
+    lo = max(0.0, lo * scale)
+    hi = max(lo, hi * scale)
+    delay = random.uniform(lo, hi)
+    if delay <= 0:
+        return
     print(f"  human pause {delay:.1f}s before Next")
     page.wait_for_timeout(int(delay * 1000))
 

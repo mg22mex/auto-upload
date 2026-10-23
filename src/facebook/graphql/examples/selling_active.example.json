@@ -1,0 +1,13 @@
+{
+  "doc_id": "REPLACE_WITH_CAPTURED_DOC_ID",
+  "friendly_name": "useCometMarketplaceSellingFastActiveSectionPaginationQuery",
+  "count": 24,
+  "cursor_path": "",
+  "has_next_path": "",
+  "variables": {
+    "count": 24,
+    "cursor": "{{cursor}}",
+    "scale": 1
+  },
+  "_comment": "Optional. Capture while opening Marketplace → Your listings (active). Without this file, purge scrapes /you/selling HTML over HTTP for item ids."
+}

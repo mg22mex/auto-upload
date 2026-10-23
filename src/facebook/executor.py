@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from src.facebook.errors import FacebookAutomationError, FacebookSessionError
-from src.facebook.poster import create_vehicle_listing
+from src.facebook.poster import create_vehicle_listing, is_duplicate_listing_error
 from src.facebook.remover import remove_vehicle_listing
 from src.facebook.session import get_page, is_logged_in, open_account_context, page_shows_login_form
 from src.facebook.updater import update_vehicle_listing
@@ -46,8 +46,9 @@ def execute_actions(
         "MAX_PHOTOS_PER_LISTING",
         int(fb_config.get("max_photos_per_listing", 20)),
     )
-    delay_min = env_float("FB_ACTION_DELAY_MIN_SEC", 60.0)
-    delay_max = env_float("FB_ACTION_DELAY_MAX_SEC", 120.0)
+    # Paced but faster than legacy 60–120s (still jittered anti-bot spacing).
+    delay_min = env_float("FB_ACTION_DELAY_MIN_SEC", 25.0)
+    delay_max = env_float("FB_ACTION_DELAY_MAX_SEC", 45.0)
     removal_action = env_str(
         "REMOVAL_ACTION",
         str(config.get("sync", {}).get("removal_action", "mark_sold")),
@@ -103,6 +104,23 @@ def execute_actions(
                         msg = f"{action.action} {action.autosell_id} on {account_id}: {exc}"
                         print(f"ERROR: {msg}")
                         result.errors.append(msg)
+                        if action.action == "create" and is_duplicate_listing_error(exc):
+                            hash_val = (
+                                action.vehicle.content_hash()
+                                if action.vehicle
+                                else ""
+                            )
+                            store.mark_duplicate_blocked(
+                                action.autosell_id,
+                                account_id,
+                                content_hash=hash_val,
+                                reason="fb_duplicate",
+                            )
+                            print(
+                                f"  sync.db: marked {action.autosell_id} on {account_id} "
+                                f"as duplicate_blocked (skip create retries ~7d)",
+                                flush=True,
+                            )
                     random_delay(delay_min, delay_max)
         except FacebookSessionError as exc:
             print(

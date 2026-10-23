@@ -167,13 +167,77 @@ class SyncStore:
     def get_fb_listing(self, autosell_id: str, account_id: str) -> sqlite3.Row | None:
         cursor = self._conn.execute(
             """
-            SELECT autosell_id, account_id, fb_listing_url, status, content_hash, posted_at
+            SELECT autosell_id, account_id, fb_listing_url, status, content_hash,
+                   posted_at, updated_at
             FROM fb_listings
             WHERE autosell_id = ? AND account_id = ?
             """,
             (autosell_id, account_id),
         )
         return cursor.fetchone()
+
+    def mark_duplicate_blocked(
+        self,
+        autosell_id: str,
+        account_id: str,
+        *,
+        content_hash: str = "",
+        reason: str = "fb_duplicate",
+    ) -> None:
+        """Record FB duplicate filter so sync does not retry create every run.
+
+        Sets ``status='duplicate_blocked'`` (not ``live``) and clears URL.
+        Also places a time-limited repost/create hold (default 7 days).
+        """
+        from datetime import datetime, timedelta, timezone
+
+        now = utc_now()
+        self._conn.execute(
+            """
+            INSERT INTO fb_listings (
+                autosell_id, account_id, fb_listing_url, status, content_hash,
+                posted_at, updated_at
+            ) VALUES (?, ?, NULL, 'duplicate_blocked', ?, ?, ?)
+            ON CONFLICT(autosell_id, account_id) DO UPDATE SET
+                fb_listing_url = NULL,
+                status = 'duplicate_blocked',
+                content_hash = COALESCE(NULLIF(excluded.content_hash, ''),
+                                        fb_listings.content_hash),
+                updated_at = excluded.updated_at
+            """,
+            (autosell_id, account_id, content_hash or "", now, now),
+        )
+        self._conn.commit()
+        hold_until = (
+            datetime.now(timezone.utc) + timedelta(days=7)
+        ).isoformat()
+        self.add_repost_hold(
+            autosell_id,
+            account_id,
+            reason=reason or "fb_duplicate",
+            hold_until=hold_until,
+        )
+
+    def is_duplicate_create_blocked(
+        self,
+        autosell_id: str,
+        account_id: str,
+        *,
+        max_age_days: float = 7.0,
+    ) -> bool:
+        """True when a recent duplicate_blocked row should skip create planning."""
+        row = self.get_fb_listing(autosell_id, account_id)
+        if row is None or str(row["status"] or "") != "duplicate_blocked":
+            return False
+        if self.is_on_repost_hold(autosell_id, account_id):
+            return True
+        updated = self._parse_iso(row["updated_at"] if "updated_at" in row.keys() else None)
+        if updated is None:
+            return True
+        from datetime import datetime, timedelta, timezone
+
+        age = datetime.now(timezone.utc) - updated
+        return age <= timedelta(days=float(max_age_days))
 
     def add_repost_hold(
         self,

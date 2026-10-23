@@ -34,6 +34,7 @@ from src.facebook.categorize import (
     spanish_candidates,
 )
 from src.facebook.util import (
+    env_float,
     mileage_for_listing,
     parse_mxn_price,
     vehicle_description,
@@ -46,6 +47,51 @@ VEHICLE_CREATE_URL = "https://www.facebook.com/marketplace/create/vehicle"
 CREATE_VEHICLE_PATH_RE = re.compile(r"/marketplace/create/vehicle", re.I)
 CREATE_ITEM_PATH_RE = re.compile(r"/marketplace/create/item\b", re.I)
 
+# FB duplicate / publish blockers (EN + ES) — abort item immediately.
+_DUPLICATE_LISTING_PHRASES = (
+    "this looks like a duplicate",
+    "looks like a duplicate",
+    "looks like you already",
+    "duplicate listing",
+    "already listed",
+    "you've already listed",
+    "you already have a listing",
+    "publicación duplicada",
+    "publicacion duplicada",
+    "parece un duplicado",
+    "parece que ya tienes",
+    "ya tienes una publicación",
+    "ya publicaste",
+    "anuncio duplicado",
+)
+_PUBLISH_ERROR_PHRASES = (
+    "something went wrong",
+    "algo salió mal",
+    "algo salio mal",
+    "couldn't publish",
+    "could not publish",
+    "no se pudo publicar",
+    "unable to publish",
+    "try again later",
+    "inténtalo de nuevo más tarde",
+    "intentelo de nuevo mas tarde",
+)
+_PUBLISH_SUCCESS_PHRASES = (
+    "listing is live",
+    "has been listed",
+    "your listing",
+    "publicación publicada",
+    "publicacion publicada",
+    "publicación está activa",
+    "publicacion esta activa",
+    "se publicó",
+    "se publico",
+    "view listing",
+    "ver anuncio",
+    "ver publicación",
+    "ver publicacion",
+)
+
 
 def _resolve_vehicle_create_url(fb_config: dict) -> str:
     """Always land on Marketplace vehicle composer — never /create/item."""
@@ -57,6 +103,18 @@ def _resolve_vehicle_create_url(fb_config: dict) -> str:
     if not CREATE_VEHICLE_PATH_RE.search(raw):
         return VEHICLE_CREATE_URL
     return raw
+
+
+def is_duplicate_listing_error(exc: BaseException | str) -> bool:
+    """True when create failed due to FB duplicate filter / shelf cleanup refuse."""
+    text = str(exc).lower()
+    markers = (
+        "duplicate",
+        "duplicad",
+        "skip_create",
+        "matching listing still on selling shelf",
+    )
+    return any(m in text for m in markers)
 
 
 def create_vehicle_listing(
@@ -76,6 +134,10 @@ def create_vehicle_listing(
     owns cleanup when provided. ``skip_shelf_gate``: skip the pre-create shelf
     scan when the caller already verified hard delete (avoids composer→selling→
     composer round-trip / visibility gap). Requires ``delete_verified=True``.
+
+    When ``FB_USE_GRAPHQL=1``, tries direct ``/api/graphql/`` create first
+    (requires captured templates under ``data/graphql/``), then falls back to
+    Playwright UI unless ``FB_GQL_FALLBACK_UI=0``.
     """
     if skip_shelf_gate and not delete_verified:
         raise FacebookPostingError(
@@ -83,7 +145,76 @@ def create_vehicle_listing(
             f"{vehicle.autosell_id} — refusing create without hard-delete proof"
         )
 
+    from src.facebook.graphql.mode import (
+        graphql_create_ui_fallback,
+        graphql_enabled,
+        project_root_from_log_dir,
+    )
+
+    if graphql_enabled():
+        from src.facebook.graphql.errors import FacebookGraphqlFallback
+        from src.facebook.graphql.poster import create_vehicle_listing_graphql
+
+        allow_ui = graphql_create_ui_fallback()
+        try:
+            return create_vehicle_listing_graphql(
+                page.context,
+                vehicle,
+                fb_config=fb_config,
+                max_photos=max_photos,
+                log_dir=log_dir,
+                photo_paths=photo_paths,
+                skip_shelf_gate=skip_shelf_gate,
+                delete_verified=delete_verified,
+                page=page,
+                root=project_root_from_log_dir(log_dir),
+            )
+        except FacebookGraphqlFallback as exc:
+            if not allow_ui:
+                raise FacebookPostingError(
+                    f"GraphQL create failed (UI fallback disabled to avoid "
+                    f"duplicate spam): {exc}"
+                ) from exc
+            print(
+                f"  {vehicle.autosell_id}: GraphQL create fallback → UI ({exc})",
+                flush=True,
+            )
+        except FacebookPostingError:
+            # Duplicate / hard create failures must not fall through to UI.
+            raise
+        except Exception as exc:
+            if not allow_ui:
+                raise FacebookPostingError(
+                    f"GraphQL create failed (UI fallback disabled): {exc}"
+                ) from exc
+            print(
+                f"  {vehicle.autosell_id}: GraphQL create error → UI ({exc})",
+                flush=True,
+            )
+
     create_url = _resolve_vehicle_create_url(fb_config)
+
+    # Purge matching active/sold/attention cards *before* opening composer so
+    # FB's duplicate filter sees a clean history and we avoid composer→shelf→composer.
+    if not skip_shelf_gate:
+        from src.facebook.remover import ensure_no_matching_shelf_listings
+
+        print(
+            f"  {vehicle.autosell_id}: pre-create shelf/history cleanup "
+            f"(active + sold + needs attention)",
+            flush=True,
+        )
+        if not ensure_no_matching_shelf_listings(
+            page,
+            vehicle,
+            autosell_id=vehicle.autosell_id,
+            max_passes=2,
+        ):
+            raise FacebookPostingError(
+                f"SKIP_CREATE: matching listing still on selling shelf/history for "
+                f"{vehicle.autosell_id} — refusing duplicate publish"
+            )
+
     page.goto(create_url, wait_until="domcontentloaded", timeout=90_000)
     _wait_for_photo_file_input(page, timeout_ms=15_000)
     accept_vehicle_category_suggestion(page)
@@ -103,20 +234,6 @@ def create_vehicle_listing(
             f"Not on vehicle composer after opening create URL (at {page.url})"
         )
 
-    if not skip_shelf_gate:
-        # Hard gate: any matching shelf card (any tab) must be deleted first.
-        from src.facebook.remover import ensure_no_matching_shelf_listings
-
-        if not ensure_no_matching_shelf_listings(
-            page, vehicle, autosell_id=vehicle.autosell_id, max_passes=1
-        ):
-            raise FacebookPostingError(
-                f"SKIP_CREATE: matching listing still on selling shelf for "
-                f"{vehicle.autosell_id} — refusing duplicate publish"
-            )
-        # Shelf scan navigates to /you/selling* — reopen composer and wait for DOM.
-        _reopen_vehicle_composer(page, create_url=create_url)
-
     own_photos = photo_paths is None
     if own_photos:
         photo_paths = download_vehicle_photos(vehicle, max_photos=max_photos)
@@ -128,7 +245,9 @@ def create_vehicle_listing(
     capture = MarketplaceItemCapture()
     capture.attach(page)
     try:
+        raise_if_duplicate_listing(page, autosell_id=vehicle.autosell_id)
         _upload_photos(page, photo_paths, log_dir, vehicle.autosell_id)
+        raise_if_duplicate_listing(page, autosell_id=vehicle.autosell_id)
         filled_names = _fill_vehicle_form(
             page, vehicle, fb_config, log_dir, vehicle.autosell_id,
             photo_count=len(photo_paths),
@@ -160,6 +279,9 @@ def create_vehicle_listing(
             )
         return listing_url
     except FacebookDeferredError:
+        raise
+    except FacebookPostingError:
+        # Keep SKIP_CREATE / duplicate messages intact — do not wrap or URL-hunt.
         raise
     except Exception as exc:
         _save_debug(page, log_dir, vehicle.autosell_id, "create_failed")
@@ -745,6 +867,69 @@ def _on_review_or_past_form(page: Page) -> bool:
     return "/marketplace/create/vehicle" not in page.url
 
 
+def _page_body_lower(page: Page, *, timeout_ms: int = 3_000) -> str:
+    try:
+        return (page.locator("body").inner_text(timeout=timeout_ms) or "").lower()
+    except Exception:
+        return ""
+
+
+def _body_has_any(body: str, phrases: tuple[str, ...]) -> str | None:
+    for phrase in phrases:
+        if phrase in body:
+            return phrase
+    return None
+
+
+def raise_if_duplicate_listing(page: Page, *, autosell_id: str = "") -> None:
+    """Abort immediately when FB shows a duplicate-listing warning."""
+    body = _page_body_lower(page)
+    hit = _body_has_any(body, _DUPLICATE_LISTING_PHRASES)
+    if not hit:
+        return
+    label = autosell_id or "?"
+    raise FacebookPostingError(
+        f"SKIP_CREATE: Facebook duplicate listing detected for {label} "
+        f"({hit!r}) — aborting item without further wait"
+    )
+
+
+def _publish_outcome(page: Page) -> str:
+    """Classify post-Publish DOM: success | duplicate | error | pending."""
+    body = _page_body_lower(page)
+    if _body_has_any(body, _DUPLICATE_LISTING_PHRASES):
+        return "duplicate"
+    if _body_has_any(body, _PUBLISH_SUCCESS_PHRASES):
+        return "success"
+    if _body_has_any(body, _PUBLISH_ERROR_PHRASES):
+        return "error"
+    return "pending"
+
+
+def _wait_for_publish_outcome(
+    page: Page,
+    *,
+    autosell_id: str,
+    timeout_ms: int = 14_000,
+    poll_ms: int = 500,
+) -> str:
+    """Race success / duplicate / error after Publish (no fixed 5+10+15 ladder)."""
+    deadline = time.monotonic() + (timeout_ms / 1000.0)
+    last = "pending"
+    while time.monotonic() < deadline:
+        _dismiss_vehicle_category_prompts(page)
+        last = _publish_outcome(page)
+        if last == "duplicate":
+            raise_if_duplicate_listing(page, autosell_id=autosell_id)
+        if last in ("success", "error"):
+            return last
+        try:
+            page.wait_for_timeout(poll_ms)
+        except Exception:
+            break
+    return last
+
+
 def _publish_and_capture_url(
     page: Page,
     vehicle: Vehicle,
@@ -763,37 +948,57 @@ def _publish_and_capture_url(
             f"Still on review page before Publish — {hint}"
         )
 
+    raise_if_duplicate_listing(page, autosell_id=autosell_id)
+
     try:
         click_labeled_action(page, PUBLISH_LABELS, timeout_ms=30_000)
     except FacebookPostingError:
         click_labeled_action(page, PUBLISH_LABELS, timeout_ms=30_000, allow_force=True)
 
     try:
-        page.wait_for_url(re.compile(r"facebook\.com/marketplace"), timeout=45_000)
+        page.wait_for_url(re.compile(r"facebook\.com/marketplace"), timeout=20_000)
     except PlaywrightTimeoutError:
         pass
 
-    for wait_sec in (5, 10, 15):
-        page.wait_for_timeout(wait_sec * 1000)
-        _dismiss_vehicle_category_prompts(page)
-        if _publish_succeeded(page):
-            break
+    outcome = _wait_for_publish_outcome(page, autosell_id=autosell_id)
+    # Duplicate already raises inside wait; re-check so we never URL-hunt a failed post.
+    raise_if_duplicate_listing(page, autosell_id=autosell_id)
+    if outcome == "error":
+        _log_publish_errors(page)
+        raise FacebookPostingError(
+            f"Publish failed for {autosell_id} — Facebook showed an error after Publish"
+        )
+    if outcome == "duplicate":
+        raise FacebookPostingError(
+            f"SKIP_CREATE: Facebook duplicate listing detected for {autosell_id}"
+        )
 
     log_page_state(page, "after_publish")
     _save_debug(page, log_dir, autosell_id, "after_publish")
-    _log_publish_errors(page)
+    try:
+        _log_publish_errors(page)
+    except FacebookPostingError:
+        raise
+    raise_if_duplicate_listing(page, autosell_id=autosell_id)
 
+    # Prefer network-captured item ids before heavy shelf/dashboard hunts.
     if capture.item_ids:
         print(f"Network saw item ids: {', '.join(capture.item_ids)}")
+        for item_id in capture.item_ids:
+            url = f"https://www.facebook.com/marketplace/item/{item_id}/"
+            if _verify_listing_url(page, url, vehicle):
+                print(f"Verified network item id: {url}")
+                return url
 
-    # Prefer dashboard/selling match by vehicle identity — not the first /item/ link on page.
+    # Lightweight selling shelf match (single pass) before dashboard retries.
     for listing_page in (
         "https://www.facebook.com/marketplace/you/selling",
         "https://www.facebook.com/marketplace/you/dashboard",
     ):
-        page.goto(listing_page, wait_until="domcontentloaded", timeout=60_000)
-        page.wait_for_timeout(4_000)
+        page.goto(listing_page, wait_until="domcontentloaded", timeout=45_000)
+        page.wait_for_timeout(1_200)
         _dismiss_vehicle_category_prompts(page)
+        raise_if_duplicate_listing(page, autosell_id=autosell_id)
         listing_url = _find_top_matching_listing(page, vehicle)
         if listing_url and _verify_listing_url(page, listing_url, vehicle):
             print(f"Found listing on {listing_page}: {listing_url}")
@@ -807,29 +1012,16 @@ def _publish_and_capture_url(
     if listing_url and _verify_listing_url(page, listing_url, vehicle):
         return listing_url
 
-    for listing_page in (
-        "https://www.facebook.com/marketplace/you/selling",
-        "https://www.facebook.com/marketplace/you/dashboard",
-    ):
-        for attempt in range(2):
-            page.goto(listing_page, wait_until="domcontentloaded", timeout=60_000)
-            page.wait_for_timeout(4_000)
-            _dismiss_vehicle_category_prompts(page)
-            listing_url = _find_top_matching_listing(page, vehicle)
-            if listing_url and _verify_listing_url(page, listing_url, vehicle):
-                print(f"Found listing on {listing_page}: {listing_url}")
-                return listing_url
-            page.wait_for_timeout(5_000)
-
     listing_url = _open_listing_by_clicking_card(page, vehicle)
     if listing_url and _verify_listing_url(page, listing_url, vehicle):
         print(f"Found listing by clicking card: {listing_url}")
         return listing_url
 
+    # Late network ids (response may arrive after shelf scan).
     for item_id in capture.item_ids:
         url = f"https://www.facebook.com/marketplace/item/{item_id}/"
         if _verify_listing_url(page, url, vehicle):
-            print(f"Verified network item id: {url}")
+            print(f"Verified network item id (late): {url}")
             return url
 
     return None
@@ -837,45 +1029,63 @@ def _publish_and_capture_url(
 
 def _verify_listing_url(page: Page, url: str, vehicle: Vehicle) -> bool:
     try:
-        page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-        page.wait_for_timeout(3_000)
+        page.goto(url, wait_until="domcontentloaded", timeout=45_000)
     except Exception:
         return False
+
+    # Fast settle: brand/price text or short fixed cap (~0.8–1.2s).
+    brand = (vehicle.brand or "").strip()
+    price_digits = parse_mxn_price(vehicle.price)
+    try:
+        page.wait_for_function(
+            """([brand, price]) => {
+              const t = (document.body && document.body.innerText) || '';
+              const low = t.toLowerCase();
+              if (brand && low.includes(String(brand).toLowerCase())) return true;
+              if (price && t.replace(/\\D/g, '').includes(String(price))) return true;
+              return false;
+            }""",
+            arg=[brand, price_digits],
+            timeout=1_200,
+        )
+    except PlaywrightTimeoutError:
+        page.wait_for_timeout(800)
+    except Exception:
+        page.wait_for_timeout(800)
 
     if "/marketplace/item/" not in page.url:
         return False
 
-    try:
-        body = page.locator("body").inner_text(timeout=5_000).lower()
-    except Exception:
+    body = _page_body_lower(page, timeout_ms=4_000)
+    if not body:
         return False
 
     unavailable = (
         "isn't available",
         "no longer available",
         "no está disponible",
+        "no esta disponible",
         "content isn't available",
         "contenido no está disponible",
+        "contenido no esta disponible",
     )
     if any(phrase in body for phrase in unavailable):
         return False
 
-    brand = vehicle.brand.strip().lower()
-    if not brand or brand not in body:
+    brand_l = brand.lower()
+    if not brand_l or brand_l not in body:
         return False
 
-    price_digits = parse_mxn_price(vehicle.price)
     has_price = price_digits in re.sub(r"[^\d]", "", body)
 
     model = fb_model_name(vehicle.title).lower()
     has_model = bool(model) and model.replace(" ", "") in body.replace(" ", "")
 
     title = vehicle.marketplace_title.lower()
-    has_title = title in body or f"{vehicle.year} {brand}" in body
+    has_title = title in body or f"{vehicle.year} {brand_l}" in body
 
     # Year alone is NOT enough ("Joined Facebook in 2020" appears on every listing).
     return has_price or has_model or has_title
-
 
 def _complete_review_step(page: Page, vehicle: Vehicle, log_dir: Path, autosell_id: str) -> None:
     """Review page: vehicle type, promote toggle, then Next."""
@@ -974,21 +1184,7 @@ def _review_blocker_hint(page: Page) -> str:
 
 
 def _publish_succeeded(page: Page) -> bool:
-    try:
-        body = page.locator("body").inner_text(timeout=5_000).lower()
-    except Exception:
-        return False
-    phrases = (
-        "listing is live",
-        "has been listed",
-        "your listing",
-        "publicación publicada",
-        "publicación está activa",
-        "se publicó",
-        "view listing",
-        "ver anuncio",
-    )
-    return any(phrase in body for phrase in phrases)
+    return _publish_outcome(page) == "success"
 
 
 def _dismiss_vehicle_category_prompts(page: Page) -> None:
@@ -2853,10 +3049,15 @@ def _fill_vehicle_field(
 
 
 def _log_publish_errors(page: Page) -> None:
-    try:
-        body = page.locator("body").inner_text(timeout=3_000).lower()
-    except Exception:
+    body = _page_body_lower(page)
+    if not body:
         return
+    dup = _body_has_any(body, _DUPLICATE_LISTING_PHRASES)
+    if dup:
+        # Hard fail — callers must not continue shelf hunts after a duplicate flag.
+        raise FacebookPostingError(
+            f"SKIP_CREATE: Facebook duplicate listing detected ({dup!r})"
+        )
     for phrase in (
         "something went wrong",
         "algo salió mal",

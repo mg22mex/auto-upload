@@ -1,1 +1,1 @@
-"""Facebook Marketplace automation via Playwright."""
+"""Facebook Marketplace automation (Playwright UI + optional GraphQL/httpx)."""
