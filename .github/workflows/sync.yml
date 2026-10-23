@@ -132,7 +132,8 @@ jobs:
           MAX_POSTS_PER_ACCOUNT_PER_RUN: ${{ secrets.MAX_POSTS_PER_ACCOUNT_PER_RUN || '3' }}
           FB_ACTION_DELAY_MIN_SEC: ${{ secrets.FB_ACTION_DELAY_MIN_SEC || '60' }}
           FB_ACTION_DELAY_MAX_SEC: ${{ secrets.FB_ACTION_DELAY_MAX_SEC || '120' }}
-          REMOVAL_ACTION: ${{ secrets.REMOVAL_ACTION || 'mark_sold' }}
+          FB_USE_GRAPHQL: ${{ secrets.FB_USE_GRAPHQL || '1' }}
+          REMOVAL_ACTION: ${{ secrets.REMOVAL_ACTION || 'delete' }}
           FB_HEADLESS: ${{ secrets.FB_HEADLESS || 'true' }}
           DB_PATH: data/sync.db
           SNAPSHOT_DIR: data/snapshots
@@ -155,6 +156,7 @@ jobs:
           REPOST_MIN_AGE_DAYS: ${{ secrets.REPOST_MIN_AGE_DAYS || '7' }}
           REPOST_MAX_PER_ACCOUNT_PER_RUN: ${{ secrets.REPOST_MAX_PER_ACCOUNT_PER_RUN || '3' }}
           PYTHONUNBUFFERED: "1"
+          FB_USE_GRAPHQL: ${{ secrets.FB_USE_GRAPHQL || '1' }}
           FB_HEADLESS: ${{ secrets.FB_HEADLESS || 'true' }}
           DB_PATH: data/sync.db
           SKIP_ODOO: ${{ inputs.skip_odoo == true && 'true' || 'false' }}
