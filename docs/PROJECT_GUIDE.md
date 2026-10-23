@@ -611,6 +611,8 @@ flowchart LR
 
 Facebook Marketplace sync remains independent: `sync.db` + Playwright on `sessions/account_*`. Listing bump: default full repost/relist (`min_age_days: 3`) via `run_weekly_bump.py` (optional `--mode renew`).
 
+**Catalog branch markers** (`*` Periférico, `+` San Felipe, `-` consignment) are part of autosell titles and must remain on `Vehicle`, snapshots, `sync.db`, and create/sync logs. With `FB_USE_GRAPHQL=1`, only `src/facebook/graphql/create_fill.py` maps markers out of the **mutation** title/model strings (and writes `Sucursal: …` in the description). Do not strip markers from inventory scrape, catalog JSON, or DB upserts.
+
 ### Isolation rules (scraping vs messaging)
 
 | Rule | Scraping workers (`src/facebook/`, inventory) | Messaging / webhooks (`whatsapp_worker`, `meta_gateway`) |

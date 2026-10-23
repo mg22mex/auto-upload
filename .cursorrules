@@ -16,7 +16,7 @@
 | `src/inventory/` | autosell.mx scrape + catalog snapshots |
 | `src/sync/` | Diff engine, repost planning |
 | `src/store/` | `sync.db` persistence |
-| `src/facebook/` | Playwright Marketplace workers |
+| `src/facebook/` | Playwright Marketplace workers (+ `graphql/` httpx create/delete) |
 | `src/quote_engine/` | Phase 2 — local French Amortization calculator |
 | `src/odoo_sync/` | Phase 2 — Odoo XML-RPC (CRM + WhatsApp + Fleet + Documents) |
 | `src/whatsapp_worker/` | Phase 2 — open-wa / Evolution API wrapper |
@@ -39,6 +39,7 @@
 - Settings: read `config.yaml` + env via `python-dotenv`. Prefer existing helpers (`env_bool`, `env_int`, account scoping).
 - Sessions: Playwright state lives in `sessions/account_*` as configured in `config.yaml`. Never commit session cookies. Never invent alternate session roots.
 - Persistence: `DB_PATH` / `SNAPSHOT_DIR` from env; default `data/sync.db`, `data/snapshots`.
+- **Branch markers:** catalog titles keep trailing `*` / `+` / `-` on `Vehicle`, snapshots, `sync.db`, and logs. Strip only inside GraphQL mutation string builders (`src/facebook/graphql/create_fill.py` → `Sucursal:`). Never mutate catalog objects to “clean” FB titles.
 
 ## Skill Hierarchy & Boundaries
 

@@ -410,12 +410,92 @@ class FillCreateVariablesTests(unittest.TestCase):
         self.assertIsInstance(verticals["vehicleFeatures"], list)
         self.assertNotIn("**", fill_common["description"]["text"])
         self.assertEqual(colorado.title, "Colorado ZR2 +")
+        self.assertIn("+", colorado.marketplace_title)
+        self.assertNotIn("+", fill_common["title"])
         self.assertIn("Sucursal: San Felipe", fill_common["description"]["text"])
         # client_mutation_id must be a plain digit string like the capture.
         self.assertTrue(
             str(filled["input"]["client_mutation_id"]).isdigit(),
             filled["input"]["client_mutation_id"],
         )
+
+    def test_fill_never_mutates_vehicle_title(self):
+        """GraphQL fill must not rewrite Vehicle / catalog branch markers."""
+        vehicle = Vehicle(
+            autosell_id="obj1199",
+            slug="chevrolet-colorado-zr2-2025",
+            title="Colorado ZR2 +",
+            brand="Chevrolet",
+            year="2025",
+            price="$949,000",
+            mileage="13,000 kms",
+            version="ZR2",
+            url="https://www.autosell.mx/x",
+        )
+        before = vehicle.to_dict()
+        session = FbSessionContext(
+            c_user="1", xs="xs", fb_dtsg="dtsg", cookies={}
+        )
+        template = {
+            "input": {
+                "actor_id": "1",
+                "client_mutation_id": "1",
+                "audience": {"marketplace": {"marketplace_id": "630562697113569"}},
+                "data": {
+                    "client_application": None,
+                    "common": {
+                        "category_id": "807311116002614",
+                        "comments_disabled": False,
+                        "description": {"text": "x"},
+                        "draft_type": None,
+                        "is_photo_order_set_by_seller": False,
+                        "item_price": {"price": "1"},
+                        "latitude": 28.6,
+                        "listing_email_id": None,
+                        "longitude": -106.0,
+                        "serialized_verticals_data": json.dumps(
+                            {
+                                "exteriorColor": "white",
+                                "fuelType": "GASOLINE",
+                                "interiorColor": "black",
+                                "isKM": True,
+                                "isManualTransmission": False,
+                                "make": "1914016008726893",
+                                "mileage": "1",
+                                "model": "Test",
+                                "titleStatus": "CLEAN",
+                                "type": "autos",
+                                "vehicleCategory": "car&truck/",
+                                "vehicleCondition": "excellent",
+                                "vehicleFeatures": [],
+                                "vehicleType": "suv",
+                                "vin": "",
+                                "year": 2021,
+                            }
+                        ),
+                        "source_type": None,
+                        "title": "old",
+                        "video_ids": [],
+                        "xpost_target_ids": [],
+                        "photo_ids": [],
+                    },
+                },
+                "vin_autofill_summary": None,
+            }
+        }
+        fill_create_vehicle_variables(
+            template,
+            session=session,
+            vehicle=vehicle,
+            fb_config={
+                "location_latitude": 28.6,
+                "location_longitude": -106.0,
+                "graphql_make_ids": {"chevrolet": "1914016008726893"},
+            },
+            photo_ids=["1"],
+        )
+        self.assertEqual(vehicle.to_dict(), before)
+        self.assertTrue(vehicle.title.endswith("+"))
 
 
 class CreateNoUiFallbackTests(unittest.TestCase):

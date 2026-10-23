@@ -209,12 +209,17 @@ def publish_vehicle_graphql(
     friendly = str(
         template.get("friendly_name") or "useCometMarketplaceListingCreateMutation"
     )
-    sent_title = _payload_title(variables) or graphql_listing_title(vehicle)
+    # Operator logs keep catalog title (+/*/-). Payload title is FB-safe only.
+    catalog_title = vehicle.marketplace_title
+    gql_title = _payload_title(variables) or graphql_listing_title(vehicle)
 
     with GraphQLClient(session) as gql:
+        title_note = f"title={catalog_title!r}"
+        if gql_title != catalog_title:
+            title_note += f" gql_title={gql_title!r}"
         print(
             f"  {vehicle.autosell_id}: GraphQL create doc_id={doc_id} "
-            f"photos={len(photo_ids)} title={sent_title!r}",
+            f"photos={len(photo_ids)} {title_note}",
             flush=True,
         )
         try:

@@ -1,4 +1,10 @@
-"""Deep-fill captured ``useCometMarketplaceListingCreateMutation`` variables."""
+"""Deep-fill captured ``useCometMarketplaceListingCreateMutation`` variables.
+
+Branch markers (``*`` Periférico, ``+`` San Felipe, ``-`` consignment) live on
+catalog / ``Vehicle.title`` / ``sync.db`` forever. This module only maps them
+out of **mutation strings** (title, model, description) and records the lot as
+``Sucursal: …``. Never mutate ``Vehicle`` or rewrite the snapshot.
+"""
 from __future__ import annotations
 
 import copy

@@ -100,9 +100,10 @@ Live website catalog (`data/catalog_latest.json` / autosell.mx) is the **source 
 
 | Rule | Meaning |
 |------|---------|
-| **Consignment (`*` in title)** | Customer vehicle hosted for sale → tag **Consignación**, category `VEHICULO CONSIGNACION` |
-| **Agency lot (no asterisk)** | Own inventory → tag **Lote / Propio**, category `vehiculos` |
-| **Branch markers** | Trailing `*` / `-` → warehouse **Periférico**; `+` → **San Felipe** |
+| **Branch markers (catalog truth)** | Trailing ``*`` → lot **Periférico**; ``+`` → **San Felipe**; ``-`` → consignment (Periférico desk). Markers stay on `Vehicle.title`, snapshots, `sync.db`, and sync/create logs. |
+| **Consignment (`-` in title)** | Customer vehicle hosted for sale → tag **Consignación**, category `VEHICULO CONSIGNACION` |
+| **Agency lot (`*` / `+`)** | Branch stock → tag **Lote / Propio**, category `vehiculos` |
+| **GraphQL create only** | `src/facebook/graphql/create_fill.py` maps ``*``/``+``/``-`` out of **mutation** title/model strings and adds `Sucursal: …`. Never rewrite catalog objects. |
 | **Missing from web** | Archive (`active=False`, status sold) — unit left the published catalog |
 
 Warehouses in Odoo: `Periferico` (code Peri), `San Felipe` (code Sanf).
