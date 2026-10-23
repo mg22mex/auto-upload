@@ -613,6 +613,8 @@ Facebook Marketplace sync remains independent: `sync.db` + Playwright on `sessio
 
 **Catalog branch markers** (`*` Periférico, `+` San Felipe, `-` consignment) are part of autosell titles and must remain on `Vehicle`, snapshots, `sync.db`, and create/sync logs. With `FB_USE_GRAPHQL=1`, only `src/facebook/graphql/create_fill.py` maps markers out of the **mutation** title/model strings (and writes `Sucursal: …` in the description). Do not strip markers from inventory scrape, catalog JSON, or DB upserts.
 
+**Sold / removed catalog units:** sync `remove` actions hard-delete the Marketplace listing (`data/graphql/delete_listing.json` / `useCometMarketplaceForSaleItemDeleteMutation`) when `FB_USE_GRAPHQL=1`. Default `sync.removal_action` / `REMOVAL_ACTION` is `delete`; GraphQL coerces `mark_sold` → delete so listings do not linger as sold shelf ghosts.
+
 ### Isolation rules (scraping vs messaging)
 
 | Rule | Scraping workers (`src/facebook/`, inventory) | Messaging / webhooks (`whatsapp_worker`, `meta_gateway`) |

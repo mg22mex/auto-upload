@@ -51,8 +51,18 @@ def execute_actions(
     delay_max = env_float("FB_ACTION_DELAY_MAX_SEC", 45.0)
     removal_action = env_str(
         "REMOVAL_ACTION",
-        str(config.get("sync", {}).get("removal_action", "mark_sold")),
+        str(config.get("sync", {}).get("removal_action", "delete")),
     )
+    # GraphQL path has no mark_sold mutation — always hard-delete when enabled.
+    from src.facebook.graphql.mode import graphql_enabled
+
+    if graphql_enabled() and removal_action.strip().lower() != "delete":
+        print(
+            f"  GraphQL mode: coercing sync removal_action "
+            f"{removal_action!r} → 'delete'",
+            flush=True,
+        )
+        removal_action = "delete"
     log_dir = ensure_log_dir(root / "data" / "logs" / "facebook")
 
     ordered = _sort_actions(actions)

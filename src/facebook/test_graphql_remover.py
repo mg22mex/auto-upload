@@ -7,7 +7,11 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from src.facebook.graphql.errors import FacebookGraphqlFallback
-from src.facebook.graphql.remover import delete_listing_graphql, extract_item_id
+from src.facebook.graphql.remover import (
+    delete_listing_graphql,
+    extract_item_id,
+    remove_vehicle_listing_graphql,
+)
 from src.facebook.graphql.session_ctx import FbSessionContext
 
 
@@ -17,6 +21,32 @@ class RemoverGraphqlTests(unittest.TestCase):
             extract_item_id("https://www.facebook.com/marketplace/item/1234567890/"),
             "1234567890",
         )
+
+    def test_mark_sold_coerced_to_hard_delete(self):
+        """Sync sold/removed must GraphQL-delete, not fall back for mark_sold."""
+        context = MagicMock()
+        page = MagicMock()
+        session = FbSessionContext(c_user="1", xs="x", fb_dtsg="d", cookies={})
+        with (
+            patch(
+                "src.facebook.graphql.remover.extract_session_context",
+                return_value=session,
+            ),
+            patch(
+                "src.facebook.graphql.remover.delete_listing_graphql",
+                return_value=True,
+            ) as delete,
+        ):
+            ok = remove_vehicle_listing_graphql(
+                context,
+                "https://www.facebook.com/marketplace/item/123456789012345/",
+                autosell_id="obj99",
+                removal_action="mark_sold",
+                page=page,
+            )
+        self.assertTrue(ok)
+        delete.assert_called_once()
+        self.assertEqual(delete.call_args.kwargs.get("autosell_id"), "obj99")
 
     def test_delete_posts_template(self):
         with tempfile.TemporaryDirectory() as tmp:

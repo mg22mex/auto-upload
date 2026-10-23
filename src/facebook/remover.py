@@ -263,9 +263,23 @@ def remove_vehicle_listing(
     4. Fallback: titled ``Más opciones para {title}`` / ``More options for`` menu
     5. Optional mark-sold if primary action was delete but only sold controls appear
     """
-    action = (removal_action or "mark_sold").strip().lower()
+    action = (removal_action or "delete").strip().lower()
     if action not in ("delete", "mark_sold"):
-        action = "mark_sold"
+        action = "delete"
+
+    from src.facebook.graphql.mode import (
+        graphql_enabled,
+        graphql_ui_fallback,
+        project_root_from_log_dir,
+    )
+
+    # GraphQL has no mark_sold mutation — sold/removed catalog units hard-delete.
+    if graphql_enabled() and action == "mark_sold":
+        print(
+            f"  {autosell_id}: GraphQL mode — coerce mark_sold → hard delete",
+            flush=True,
+        )
+        action = "delete"
 
     item_id = extract_item_id(listing_url)
     must_purge = bool(require_verified and action == "delete")
@@ -276,56 +290,49 @@ def remove_vehicle_listing(
     )
 
     # Direct GraphQL hard-delete (skips fragile UI menus) when enabled.
-    if action == "delete":
-        from src.facebook.graphql.mode import (
-            graphql_enabled,
-            graphql_ui_fallback,
-            project_root_from_log_dir,
-        )
+    if action == "delete" and graphql_enabled():
+        from src.facebook.graphql.errors import FacebookGraphqlFallback
+        from src.facebook.graphql.remover import remove_vehicle_listing_graphql
 
-        if graphql_enabled():
-            from src.facebook.graphql.errors import FacebookGraphqlFallback
-            from src.facebook.graphql.remover import remove_vehicle_listing_graphql
-
-            try:
-                ok = remove_vehicle_listing_graphql(
-                    page.context,
-                    listing_url,
-                    autosell_id=autosell_id,
-                    removal_action=action,
-                    log_dir=log_dir,
-                    page=page,
-                    root=project_root_from_log_dir(log_dir),
-                    store=store,
-                    account_id=account_id,
-                )
-                if ok:
-                    print(f"  {autosell_id}: GraphQL hard-delete verified", flush=True)
-                    return True
-            except FacebookGraphqlFallback as exc:
-                if not graphql_ui_fallback():
-                    if require_verified:
-                        raise FacebookPostingError(
-                            f"GraphQL delete unavailable and UI fallback disabled: {exc}"
-                        ) from exc
-                    print(
-                        f"  WARNING: {autosell_id}: GraphQL delete unavailable: {exc}",
-                        flush=True,
-                    )
-                    return False
+        try:
+            ok = remove_vehicle_listing_graphql(
+                page.context,
+                listing_url,
+                autosell_id=autosell_id,
+                removal_action="delete",
+                log_dir=log_dir,
+                page=page,
+                root=project_root_from_log_dir(log_dir),
+                store=store,
+                account_id=account_id,
+            )
+            if ok:
+                print(f"  {autosell_id}: GraphQL hard-delete verified", flush=True)
+                return True
+        except FacebookGraphqlFallback as exc:
+            if not graphql_ui_fallback():
+                if require_verified:
+                    raise FacebookPostingError(
+                        f"GraphQL delete unavailable and UI fallback disabled: {exc}"
+                    ) from exc
                 print(
-                    f"  {autosell_id}: GraphQL delete fallback → UI ({exc})",
+                    f"  WARNING: {autosell_id}: GraphQL delete unavailable: {exc}",
                     flush=True,
                 )
-            except FacebookPostingError:
+                return False
+            print(
+                f"  {autosell_id}: GraphQL delete fallback → UI ({exc})",
+                flush=True,
+            )
+        except FacebookPostingError:
+            raise
+        except Exception as exc:
+            if not graphql_ui_fallback():
                 raise
-            except Exception as exc:
-                if not graphql_ui_fallback():
-                    raise
-                print(
-                    f"  {autosell_id}: GraphQL delete error → UI ({exc})",
-                    flush=True,
-                )
+            print(
+                f"  {autosell_id}: GraphQL delete error → UI ({exc})",
+                flush=True,
+            )
 
     def _needles() -> list[str]:
         if title_needles:

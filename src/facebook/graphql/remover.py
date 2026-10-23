@@ -151,14 +151,19 @@ def remove_vehicle_listing_graphql(
     store: Any = None,
     account_id: str | None = None,
 ) -> bool:
-    """GraphQL remove entry used by ``remover.remove_vehicle_listing``."""
+    """GraphQL remove entry used by ``remover.remove_vehicle_listing``.
+
+    Always hard-deletes. ``mark_sold`` is coerced to ``delete`` (no GraphQL
+    mark-sold mutation); sync sold/removed catalog units leave Marketplace.
+    """
     _ = log_dir  # reserved for debug dumps
     action = (removal_action or "delete").strip().lower()
     if action != "delete":
-        raise FacebookGraphqlFallback(
-            f"GraphQL remover only supports hard delete (got {action!r}); "
-            "mark_sold stays on Playwright UI"
+        print(
+            f"  {autosell_id}: GraphQL coerce removal_action={action!r} → delete",
+            flush=True,
         )
+        action = "delete"
     if not env_str("FB_GQL_DELETE_DOC_ID", "") and not (
         (root or Path.cwd()) / "data" / "graphql" / "delete_listing.json"
     ).is_file():

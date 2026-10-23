@@ -26,7 +26,9 @@ sync:
     fifo_rotation: true
     # Cap sticky yields per account per plan (defaults to max_posts_per_account_per_run)
     max_rotations_per_account: 15
-  removal_action: mark_sold  # mark_sold | delete
+  # Hard-delete sold/removed catalog units (GraphQL when FB_USE_GRAPHQL=1).
+  # mark_sold is UI-only and often leaves shelf ghosts / duplicate spam on recreate.
+  removal_action: delete  # delete | mark_sold
   # Live sync accounts. account_3 excluded until operator clears old FB listings.
   active_accounts:
     - account_1

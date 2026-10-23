@@ -49,7 +49,7 @@ def print_report(vehicles, executable, deferred) -> None:
     print(f"Public catalog vehicles: {len(vehicles)}")
     print(f"Would create now:        {len(creates)}")
     print(f"Would update:            {len(updates)}")
-    print(f"Would remove/mark sold:  {len(removals)}")
+    print(f"Would remove (hard delete): {len(removals)}")
     print(f"Deferred creates:        {len(deferred_creates)}")
     print("")
 

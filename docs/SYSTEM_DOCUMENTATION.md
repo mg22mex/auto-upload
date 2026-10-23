@@ -104,6 +104,7 @@ Live website catalog (`data/catalog_latest.json` / autosell.mx) is the **source 
 | **Consignment (`-` in title)** | Customer vehicle hosted for sale → tag **Consignación**, category `VEHICULO CONSIGNACION` |
 | **Agency lot (`*` / `+`)** | Branch stock → tag **Lote / Propio**, category `vehiculos` |
 | **GraphQL create only** | `src/facebook/graphql/create_fill.py` maps ``*``/``+``/``-`` out of **mutation** title/model strings and adds `Sucursal: …`. Never rewrite catalog objects. |
+| **GraphQL remove (sold/out)** | `run_sync` “Would remove” → hard delete via `useCometMarketplaceForSaleItemDeleteMutation` when `FB_USE_GRAPHQL=1` (`sync.removal_action: delete`). `mark_sold` is coerced to delete under GraphQL. |
 | **Missing from web** | Archive (`active=False`, status sold) — unit left the published catalog |
 
 Warehouses in Odoo: `Periferico` (code Peri), `San Felipe` (code Sanf).
