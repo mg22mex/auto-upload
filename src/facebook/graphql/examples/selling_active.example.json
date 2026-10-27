@@ -1,13 +1,18 @@
 {
-  "doc_id": "REPLACE_WITH_CAPTURED_DOC_ID",
-  "friendly_name": "useCometMarketplaceSellingFastActiveSectionPaginationQuery",
-  "count": 24,
-  "cursor_path": "",
-  "has_next_path": "",
+  "doc_id": "28940125368958089",
+  "friendly_name": "MarketplaceYouSellingFastActiveSectionPaginationQuery",
   "variables": {
-    "count": 24,
-    "cursor": "{{cursor}}",
-    "scale": 1
+    "count": 10,
+    "cursor": "AQHTEHqMFAnv7CHYDaKoFAsfPW24FQ5cV_BKIurz7edszl_dsJ3XBKiDEZVSTExSvOd6nQxLCW81aQ0kK6DvNrqbKA",
+    "order": "CREATION_TIMESTAMP_DESC",
+    "scale": 1,
+    "state": null,
+    "status": null,
+    "title_search": null,
+    "__relay_internal__pv__ShouldUpdateMarketplaceBoostListingBoostedStatusrelayprovider": false
   },
-  "_comment": "Optional. Capture while opening Marketplace → Your listings (active). Without this file, purge scrapes /you/selling HTML over HTTP for item ids."
+  "captured_at": {
+    "account": "account_1",
+    "note": "review placeholders before commit"
+  }
 }

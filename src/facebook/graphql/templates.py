@@ -22,6 +22,12 @@ def default_graphql_dir(root: Path | None = None) -> Path:
     return base / "data" / "graphql"
 
 
+def examples_graphql_dir(root: Path | None = None) -> Path:
+    """Versioned templates under ``src/facebook/graphql/examples/``."""
+    base = root if root is not None else Path.cwd()
+    return base / "src" / "facebook" / "graphql" / "examples"
+
+
 def load_template(
     name: str,
     *,
@@ -30,9 +36,15 @@ def load_template(
 ) -> dict[str, Any] | None:
     """Load ``data/graphql/{name}.json`` (or env override path).
 
+    If the runtime file is missing, fall back to
+    ``src/facebook/graphql/examples/{name}.example.json`` (and seed the runtime
+    copy when the directory is writable). Prefer running
+    ``scripts/sync_graphql_templates.py`` on fb-worker after checkout.
+
     Env shortcuts:
       FB_GQL_DELETE_DOC_ID / FB_GQL_CREATE_DOC_ID — inject doc_id when file missing fields.
     """
+    base = root if root is not None else Path.cwd()
     directory = default_graphql_dir(root)
     path = directory / f"{name}.json"
     data: dict[str, Any] | None = None
@@ -42,13 +54,37 @@ def load_template(
         if not isinstance(loaded, dict):
             raise FacebookGraphqlFallback(f"Template {path} must be a JSON object")
         data = loaded
-    elif required:
-        raise FacebookGraphqlFallback(
-            f"Missing GraphQL template {path}. Capture with "
-            f"scripts/fb_capture_graphql.py or copy from *.example.json"
-        )
     else:
-        data = None
+        example = examples_graphql_dir(base) / f"{name}.example.json"
+        if example.is_file():
+            with example.open(encoding="utf-8") as handle:
+                loaded = json.load(handle)
+            if not isinstance(loaded, dict):
+                raise FacebookGraphqlFallback(
+                    f"Template example {example} must be a JSON object"
+                )
+            data = loaded
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+                print(
+                    f"  seeded GraphQL template {path} ← {example}",
+                    flush=True,
+                )
+            except OSError:
+                # Read-only checkout — use in-memory example only.
+                pass
+        elif required:
+            raise FacebookGraphqlFallback(
+                f"Missing GraphQL template {path} (and no example at {example}). "
+                f"Run scripts/sync_graphql_templates.py or capture with "
+                f"scripts/fb_capture_graphql.py"
+            )
+        else:
+            data = None
 
     if data is None:
         data = {}

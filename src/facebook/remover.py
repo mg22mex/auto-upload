@@ -146,6 +146,15 @@ _MESSAGE_SELLER = re.compile(
     re.I,
 )
 _DELETE_PATTERNS = (
+    # Needs attention / duplicates primary CTA (EN + ES).
+    re.compile(
+        r"delete and try again|"
+        r"elim[ií]nala y vuelve a intentarlo|"
+        r"elim[ií]nalo y vuelve a intentarlo|"
+        r"eliminar y volver a intentar|"
+        r"borra(?:r)? y vuelve a intentarlo",
+        re.I,
+    ),
     re.compile(
         r"delete listing|eliminar publicación|delete this listing|"
         r"eliminar esta publicación|eliminar anuncio|delete item|"
@@ -1014,6 +1023,24 @@ def _collect_matching_shelf_links(
     return found
 
 
+def _reveal_shelf_card_actions(
+    card: Locator, anchor: Locator | None = None
+) -> None:
+    """Hover the listing card so FB reveals hidden ⋮ / Delete on Needs attention cards."""
+    for target in (card, anchor):
+        if target is None:
+            continue
+        try:
+            target.hover(timeout=3_000)
+            return
+        except Exception:
+            try:
+                target.hover(timeout=3_000, force=True)
+                return
+            except Exception:
+                continue
+
+
 def _delete_shelf_link(page: Page, link: Locator) -> bool:
     """Delete a shelf card via ⋮ menu, or fall back to opening the item detail."""
     href = ""
@@ -1021,11 +1048,12 @@ def _delete_shelf_link(page: Page, link: Locator) -> bool:
         href = link.get_attribute("href") or ""
     except Exception:
         href = ""
+    card = _shelf_card_root(link)
+    _reveal_shelf_card_actions(card, link)
     try:
         link.scroll_into_view_if_needed(timeout=4_000)
     except Exception:
         pass
-    card = _shelf_card_root(link)
     if _click_more_on_shelf_card(page, card, link):
         if _click_menu_action(page, action="delete"):
             _confirm_if_needed(page, prefer_delete=True)
@@ -1492,13 +1520,14 @@ def _remove_from_selling_shelf(
             continue
 
         saw_card = True
+        card = _shelf_card_root(link)
+        _reveal_shelf_card_actions(card, link)
         try:
             link.scroll_into_view_if_needed(timeout=5_000)
         except Exception:
             pass
         page.wait_for_timeout(400)
 
-        card = _shelf_card_root(link)
         already_sold = _shelf_card_is_sold(card)
 
         if already_sold and action == "mark_sold" and not confirm_gone:
@@ -1723,7 +1752,12 @@ def _shelf_card_is_sold(card: Locator) -> bool:
 
 
 def _click_more_on_shelf_card(page: Page, card: Locator, anchor: Locator) -> bool:
-    """Click the card-local ⋮ / More options control (required before Delete)."""
+    """Click the card-local ⋮ / More options control (required before Delete).
+
+    Hovers the listing card first so Needs attention / duplicate UIs reveal
+    hidden action buttons before scroll + force-click.
+    """
+    _reveal_shelf_card_actions(card, anchor)
     selectors = list(_MORE_ARIA_SELECTORS) + [
         '[aria-label*="More" i]',
         '[aria-label*="Más" i]',
@@ -1745,8 +1779,12 @@ def _click_more_on_shelf_card(page: Page, card: Locator, anchor: Locator) -> boo
                     # Skip promote / boost / share lookalikes when possible.
                     if any(x in label for x in ("boost", "promote", "share", "compartir")):
                         continue
-                    btn.scroll_into_view_if_needed(timeout=2_000)
-                    btn.click(timeout=5_000)
+                    _reveal_shelf_card_actions(card, btn)
+                    try:
+                        btn.scroll_into_view_if_needed(timeout=2_000)
+                    except Exception:
+                        pass
+                    btn.click(timeout=5_000, force=True)
                     page.wait_for_timeout(1_200)
                     if _menu_open(page):
                         return True
@@ -1761,7 +1799,12 @@ def _click_more_on_shelf_card(page: Page, card: Locator, anchor: Locator) -> boo
             try:
                 b = named.nth(i)
                 if b.is_visible():
-                    b.click(timeout=5_000)
+                    _reveal_shelf_card_actions(card, b)
+                    try:
+                        b.scroll_into_view_if_needed(timeout=2_000)
+                    except Exception:
+                        pass
+                    b.click(timeout=5_000, force=True)
                     page.wait_for_timeout(1_200)
                     if _menu_open(page):
                         return True
@@ -1830,6 +1873,7 @@ def _click_more_near_locator(page: Page, anchor: Locator) -> bool:
             if card.count() == 0:
                 continue
             root = card.first
+            _reveal_shelf_card_actions(root, anchor)
             for selector in _MORE_ARIA_SELECTORS:
                 btn = root.locator(selector)
                 if btn.count() == 0:
@@ -1837,7 +1881,12 @@ def _click_more_near_locator(page: Page, anchor: Locator) -> bool:
                 try:
                     target = btn.first
                     if target.is_visible():
-                        target.click(timeout=5_000)
+                        _reveal_shelf_card_actions(root, target)
+                        try:
+                            target.scroll_into_view_if_needed(timeout=2_000)
+                        except Exception:
+                            pass
+                        target.click(timeout=5_000, force=True)
                         page.wait_for_timeout(1_200)
                         if _menu_open(page):
                             return True
@@ -1849,7 +1898,12 @@ def _click_more_near_locator(page: Page, anchor: Locator) -> bool:
                 try:
                     b = named.nth(i)
                     if b.is_visible():
-                        b.click(timeout=5_000)
+                        _reveal_shelf_card_actions(root, b)
+                        try:
+                            b.scroll_into_view_if_needed(timeout=2_000)
+                        except Exception:
+                            pass
+                        b.click(timeout=5_000, force=True)
                         page.wait_for_timeout(1_200)
                         if _menu_open(page):
                             return True
@@ -2533,8 +2587,19 @@ def _click_menu_action(page: Page, *, action: str) -> bool:
                 try:
                     if not item.is_visible():
                         continue
-                    item.scroll_into_view_if_needed(timeout=2_000)
-                    item.click(timeout=8_000)
+                    # Hover first — attention/duplicate cards hide Delete until hover.
+                    try:
+                        item.hover(timeout=2_000)
+                    except Exception:
+                        try:
+                            item.hover(timeout=2_000, force=True)
+                        except Exception:
+                            pass
+                    try:
+                        item.scroll_into_view_if_needed(timeout=2_000)
+                    except Exception:
+                        pass
+                    item.click(timeout=8_000, force=True)
                     page.wait_for_timeout(1_500)
                     return True
                 except Exception:
@@ -2599,11 +2664,146 @@ def _open_listing_menu(page: Page) -> bool:
     return _menu_open(page)
 
 
+_SURVEY_PREFER_NOT = re.compile(
+    r"prefer not to answer|prefer not to say|"
+    r"prefiero no responder|prefiero no decirlo|"
+    r"preferiría no responder|rather not say|"
+    r"no quiero responder",
+    re.I,
+)
+_SURVEY_SUBMIT = re.compile(
+    r"^\s*submit\s*$|^\s*enviar\s*$|^\s*done\s*$|^\s*listo\s*$|"
+    r"^\s*continue\s*$|^\s*continuar\s*$|^\s*next\s*$|^\s*siguiente\s*$|"
+    r"^\s*skip\s*$|^\s*omitir\s*$|^\s*close\s*$|^\s*cerrar\s*$|"
+    r"^\s*ok\s*$|^\s*okay\s*$|send feedback|enviar comentarios",
+    re.I,
+)
+
+
+def _dismiss_delete_survey_if_needed(page: Page, *, timeout_ms: int = 2_500) -> bool:
+    """Dismiss FB post-deletion feedback survey so purge loops do not stall.
+
+    Looks for EN/ES ``Prefer not to answer`` / ``Prefiero no responder`` radio
+    (or label), then the survey Submit/Done/Continue button. Best-effort —
+    returns True if anything was clicked.
+    """
+    clicked = False
+    try:
+        # Brief pause for survey modal to appear after delete confirm.
+        page.wait_for_timeout(400)
+    except Exception:
+        pass
+
+    # Radio / option: Prefer not to answer (EN + ES).
+    prefer_getters = (
+        lambda: page.get_by_role("radio", name=_SURVEY_PREFER_NOT),
+        lambda: page.locator('[role="radio"]').filter(has_text=_SURVEY_PREFER_NOT),
+        lambda: page.get_by_role("option", name=_SURVEY_PREFER_NOT),
+        lambda: page.get_by_label(_SURVEY_PREFER_NOT),
+        lambda: page.locator('label').filter(has_text=_SURVEY_PREFER_NOT),
+        lambda: page.get_by_text(_SURVEY_PREFER_NOT),
+    )
+    for getter in prefer_getters:
+        try:
+            loc = getter()
+            try:
+                loc.first.wait_for(state="visible", timeout=timeout_ms)
+            except Exception:
+                pass
+            if loc.count() == 0 or not loc.first.is_visible():
+                continue
+            target = loc.first
+            try:
+                target.scroll_into_view_if_needed(timeout=1_500)
+            except Exception:
+                pass
+            try:
+                target.click(timeout=timeout_ms, force=True)
+                clicked = True
+                page.wait_for_timeout(300)
+                break
+            except Exception:
+                continue
+        except Exception:
+            continue
+
+    # Submit / Done / Continuar / Enviar on the survey dialog.
+    submit_getters = (
+        lambda: page.get_by_role("button", name=_SURVEY_SUBMIT),
+        lambda: page.locator('[role="dialog"] button').filter(has_text=_SURVEY_SUBMIT),
+        lambda: page.locator('[role="alertdialog"] button').filter(
+            has_text=_SURVEY_SUBMIT
+        ),
+        lambda: page.locator('[role="button"]').filter(has_text=_SURVEY_SUBMIT),
+    )
+    for getter in submit_getters:
+        try:
+            loc = getter()
+            try:
+                loc.first.wait_for(state="visible", timeout=timeout_ms)
+            except Exception:
+                pass
+            if loc.count() == 0 or not loc.first.is_visible():
+                continue
+            btn = loc.first
+            try:
+                btn.scroll_into_view_if_needed(timeout=1_500)
+            except Exception:
+                pass
+            try:
+                btn.click(timeout=timeout_ms, force=True)
+                clicked = True
+                page.wait_for_timeout(500)
+                break
+            except Exception:
+                continue
+        except Exception:
+            continue
+
+    if not clicked:
+        # Last resort: Escape closes many FB overlays without answering.
+        try:
+            dlg = page.locator('[role="dialog"], [role="alertdialog"]')
+            if dlg.count() and dlg.first.is_visible():
+                # Only Escape if survey-ish text is present.
+                blob = ""
+                try:
+                    blob = (dlg.first.inner_text(timeout=800) or "").lower()
+                except Exception:
+                    blob = ""
+                if any(
+                    m in blob
+                    for m in (
+                        "prefer not",
+                        "prefiero no",
+                        "feedback",
+                        "comentarios",
+                        "why did you",
+                        "por qué",
+                        "survey",
+                        "encuesta",
+                    )
+                ):
+                    page.keyboard.press("Escape")
+                    page.wait_for_timeout(300)
+                    clicked = True
+        except Exception:
+            pass
+    return clicked
+
+
 def _confirm_if_needed(page: Page, *, prefer_delete: bool = False) -> None:
+    """Click EN/ES confirmation modal (Delete / Eliminar / Confirm / Confirmar).
+
+    After confirm, dismisses the post-deletion survey if Facebook shows it.
+    """
     patterns = (
         [
             re.compile(
-                r"delete listing|eliminar publicación|delete|eliminar|remove",
+                r"delete listing|eliminar publicación|"
+                r"delete and try again|"
+                r"elim[ií]nala y vuelve a intentarlo|"
+                r"^\s*delete\s*$|^\s*eliminar\s*$|^\s*borrar\s*$|remove",
                 re.I,
             ),
             re.compile(r"confirm|confirmar", re.I),
@@ -2613,24 +2813,62 @@ def _confirm_if_needed(page: Page, *, prefer_delete: bool = False) -> None:
         else [
             re.compile(r"confirm|confirmar", re.I),
             re.compile(r"mark as sold|marcar como vendido", re.I),
-            re.compile(r"delete listing|eliminar publicación|delete|eliminar", re.I),
+            re.compile(
+                r"delete listing|eliminar publicación|"
+                r"^\s*delete\s*$|^\s*eliminar\s*$",
+                re.I,
+            ),
             re.compile(r"yes|sí|ok|aceptar", re.I),
         ]
     )
+    confirmed = False
     for pattern in patterns:
         try:
             button = page.get_by_role("button", name=pattern)
             if button.count() and button.first.is_visible():
-                button.first.click(timeout=5_000)
-                page.wait_for_timeout(2_000)
-                return
+                try:
+                    button.first.scroll_into_view_if_needed(timeout=2_000)
+                except Exception:
+                    pass
+                button.first.click(timeout=5_000, force=True)
+                page.wait_for_timeout(1_200)
+                confirmed = True
+                break
         except Exception:
-            continue
+            pass
+        if confirmed:
+            break
         try:
             alt = page.locator('[role="button"]').filter(has_text=pattern)
             if alt.count() and alt.first.is_visible():
-                alt.first.click(timeout=5_000)
-                page.wait_for_timeout(2_000)
-                return
+                try:
+                    alt.first.scroll_into_view_if_needed(timeout=2_000)
+                except Exception:
+                    pass
+                alt.first.click(timeout=5_000, force=True)
+                page.wait_for_timeout(1_200)
+                confirmed = True
+                break
+        except Exception:
+            pass
+        if confirmed:
+            break
+        # Dialog / aria-label fallbacks (EN + ES).
+        try:
+            dlg = page.locator('[role="dialog"], [role="alertdialog"]')
+            scoped = dlg.get_by_role("button", name=pattern)
+            if scoped.count() and scoped.first.is_visible():
+                try:
+                    scoped.first.scroll_into_view_if_needed(timeout=2_000)
+                except Exception:
+                    pass
+                scoped.first.click(timeout=5_000, force=True)
+                page.wait_for_timeout(1_200)
+                confirmed = True
+                break
         except Exception:
             continue
+
+    # Always attempt survey dismiss after a delete confirm (or if already open).
+    if prefer_delete or confirmed:
+        _dismiss_delete_survey_if_needed(page)

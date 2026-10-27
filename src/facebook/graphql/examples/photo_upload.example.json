@@ -10,11 +10,11 @@
     "payload.originalPhotoID",
     "payload.fbid",
     "photoID",
-    "fbid",
-    "id"
+    "fbid"
   ],
   "alt_urls": [
     "https://www.facebook.com/ajax/react_composer/attachments/photo/upload"
   ],
-  "_comment": "Success body is for (;;);{…\"payload\":{\"photoID\":\"<digits>\",…}}. Dead URL: ajax/composerx/.../saveunpublished."
+  "response_example": "for (;;);{\"__ar\":1,\"rid\":\"…\",\"payload\":{\"isSpherical\":false,\"height\":799,\"imageSrc\":\"…\",\"originalPhotoID\":\"\",\"photoID\":\"1661606905435115\",\"thumbSrc\":\"…\",\"width\":1200},\"lid\":\"…\"}",
+  "_comment": "Live Marketplace composer upload returns for (;;); JSON with payload.photoID. Multipart: profile_id+source+waterfallxapp+upload_id+farr. CSRF: query fb_dtsg (fallback: body tokens)."
 }

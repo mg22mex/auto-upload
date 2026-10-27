@@ -109,6 +109,14 @@ jobs:
           ln -s ~/auto-upload-data/data data
           ln -s ~/auto-upload-data/sessions sessions
 
+      - name: Seed GraphQL templates into data/graphql
+        run: |
+          set -eux
+          mkdir -p data/graphql
+          python scripts/sync_graphql_templates.py
+          test -f data/graphql/create_vehicle.json
+          ls -la data/graphql/
+
       - name: Scrape autosell.mx (fresh catalog for eligibility)
         if: ${{ inputs.skip_odoo != true }}
         env:

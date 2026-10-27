@@ -98,9 +98,11 @@ def delete_listing_graphql(
     # Captured templates often hardcode for_sale_item_id/actor_id — rewrite them.
     variables = prepare_mutation_variables(template, mapping)
     doc_id = str(template["doc_id"])
+    # Prefer captured/env name; default Direct (mass-purge friendly).
     friendly = str(
         template.get("friendly_name")
-        or "useCometMarketplaceForSaleItemDeleteMutation"
+        or env_str("FB_GQL_DELETE_FRIENDLY", "")
+        or "useDirectMarketplaceForSaleItemDeleteMutation"
     )
 
     owns = client is None

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +11,7 @@ from src.facebook.graphql.errors import (
     FacebookGraphqlFallback,
     is_phantom_delete_error,
 )
-from src.facebook.graphql.remover import delete_listing_graphql
+from src.facebook.graphql.remover import delete_listing_graphql, extract_item_id
 from src.facebook.graphql.selling import ActiveListing, fetch_active_selling_listings
 from src.facebook.graphql.session_ctx import FbSessionContext
 from src.facebook.purge_old import (
@@ -227,6 +228,169 @@ def purge_old_listings_graphql(
     return stats
 
 
+def mass_purge_all_listings_graphql(
+    session: FbSessionContext,
+    store: SyncStore,
+    *,
+    account_id: str,
+    dry_run: bool = False,
+    max_deletes: int | None = None,
+    delay_sec: float = 0.15,
+    root: Path | None = None,
+    client: GraphQLClient | None = None,
+) -> PurgeStats:
+    """Aggressive GraphQL wipe: every discovered item id, never stop on errors.
+
+    Discovers ids via selling GraphQL/HTTP (all shelves) + sync.db URLs, then
+    issues ``useDirectMarketplaceForSaleItemDeleteMutation`` (or captured
+    ``delete_listing.json`` friendly_name) sequentially. field_exception and
+    other failures are logged and skipped — the loop continues.
+    """
+    stats = PurgeStats()
+    owns = client is None
+    gql = client or GraphQLClient(session)
+    try:
+        listings = fetch_active_selling_listings(
+            session, root=root, client=gql, max_pages=50
+        )
+        listings = _merge_with_sync_db_all(listings, store, account_id)
+        stats.found = len(listings)
+        print(
+            f"  [{account_id}] MASS GraphQL: {stats.found} listing id(s) to wipe "
+            f"(delay={delay_sec:.2f}s, continue-on-error)",
+            flush=True,
+        )
+        if dry_run:
+            stats.dry_run_candidates = stats.found
+            for item in listings[:50]:
+                print(
+                    f"  DRY-RUN would delete item={item.item_id} "
+                    f"title={item.title[:50]!r}",
+                    flush=True,
+                )
+            if stats.found > 50:
+                print(f"  … and {stats.found - 50} more", flush=True)
+            return stats
+
+        t0 = time.monotonic()
+        for idx, item in enumerate(listings, start=1):
+            if max_deletes is not None and stats.deleted >= max_deletes:
+                print(f"  hit --max-deletes={max_deletes}; stopping", flush=True)
+                break
+            href = item.href or (
+                f"https://www.facebook.com/marketplace/item/{item.item_id}/"
+            )
+            row = _lookup_db_row(store, account_id, item.item_id)
+            autosell_id = (
+                str(row["autosell_id"]) if row is not None else item.item_id
+            )
+            try:
+                ok = delete_listing_graphql(
+                    session,
+                    href,
+                    autosell_id=autosell_id,
+                    root=root,
+                    client=gql,
+                    verify=False,
+                )
+            except Exception as exc:
+                if is_phantom_delete_error(exc):
+                    stats.skipped_phantom += 1
+                    print(
+                        f"  [{idx}/{stats.found}] PHANTOM item={item.item_id} "
+                        f"— continue ({exc})",
+                        flush=True,
+                    )
+                    _clear_sync_mapping_if_any(store, account_id, item.item_id)
+                else:
+                    stats.failed += 1
+                    print(
+                        f"  [{idx}/{stats.found}] FAIL item={item.item_id} "
+                        f"— continue ({exc})",
+                        flush=True,
+                    )
+                if delay_sec > 0:
+                    time.sleep(delay_sec)
+                continue
+
+            if not ok:
+                stats.failed += 1
+                print(
+                    f"  [{idx}/{stats.found}] FAIL item={item.item_id} "
+                    f"(delete returned False) — continue",
+                    flush=True,
+                )
+            else:
+                stats.deleted += 1
+                if row is not None:
+                    try:
+                        store.mark_fb_listing_removed(
+                            row["autosell_id"], account_id, clear_url=True
+                        )
+                    except Exception:
+                        pass
+                if idx == 1 or idx % 25 == 0 or idx == stats.found:
+                    elapsed = time.monotonic() - t0
+                    print(
+                        f"  [{idx}/{stats.found}] OK deleted={stats.deleted} "
+                        f"failed={stats.failed} phantom={stats.skipped_phantom} "
+                        f"({elapsed:.0f}s)",
+                        flush=True,
+                    )
+            if delay_sec > 0:
+                time.sleep(delay_sec)
+
+        print(
+            f"  [{account_id}] MASS GraphQL done: deleted={stats.deleted} "
+            f"failed={stats.failed} phantom={stats.skipped_phantom} "
+            f"found={stats.found}",
+            flush=True,
+        )
+    finally:
+        if owns:
+            gql.close()
+    return stats
+
+
+def _merge_with_sync_db_all(
+    listings: list[ActiveListing],
+    store: SyncStore,
+    account_id: str,
+) -> list[ActiveListing]:
+    """Union discovery with every sync.db row that has a Marketplace URL."""
+    by_id = {item.item_id: item for item in listings}
+    try:
+        rows = store._conn.execute(
+            """
+            SELECT autosell_id, account_id, fb_listing_url, status, posted_at
+            FROM fb_listings
+            WHERE account_id = ?
+              AND fb_listing_url IS NOT NULL
+              AND fb_listing_url != ''
+            """,
+            (account_id,),
+        ).fetchall()
+    except Exception:
+        rows = []
+    for row in rows:
+        url = row["fb_listing_url"] or ""
+        item_id = extract_item_id(url)
+        if not item_id or item_id in by_id:
+            continue
+        age = _posted_at_age_days(row)
+        by_id[item_id] = ActiveListing(
+            item_id=item_id,
+            title=str(row["autosell_id"]),
+            age_days=age,
+            age_text=f"sync.db status={row['status']}",
+            href=url
+            if url.startswith("http")
+            else f"https://www.facebook.com/marketplace/item/{item_id}/",
+            source="sync.db",
+        )
+    return list(by_id.values())
+
+
 def _clear_sync_mapping_if_any(
     store: SyncStore, account_id: str, item_id: str
 ) -> None:
@@ -256,8 +420,6 @@ def _merge_with_sync_db(
         if row["account_id"] != account_id:
             continue
         url = row["fb_listing_url"] or ""
-        from src.facebook.graphql.remover import extract_item_id
-
         item_id = extract_item_id(url)
         if not item_id:
             continue

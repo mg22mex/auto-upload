@@ -1,35 +1,48 @@
 {
   "doc_id": "9551550371629242",
   "friendly_name": "useCometMarketplaceListingCreateMutation",
-  "listing_id_paths": [
-    "data.marketplace_listing_create.listing.id",
-    "data.marketplace_listing_create.listing_id"
-  ],
   "variables": {
     "input": {
-      "actor_id": "REPLACE_OR_AUTO_FILL",
+      "actor_id": "100047574648142",
       "client_mutation_id": "1",
-      "attribution_id_v2": "…from capture…",
+      "attribution_id_v2": "CometMarketplaceComposerRoot.react,comet.marketplace.composer,unexpected,1792780173375,746354,1606854132932955,,;CometMarketplaceComposerRoot.react,comet.marketplace.composer,via_cold_start,1792780106682,63587,1606854132932955,,",
       "audience": {
         "marketplace": {
           "marketplace_id": "630562697113569"
         }
       },
       "data": {
+        "client_application": null,
         "common": {
           "category_id": "807311116002614",
-          "description": { "text": "…" },
-          "item_price": { "price": "0" },
-          "latitude": 28.644104003906,
-          "longitude": -106.06750488281,
-          "serialized_verticals_data": "{\"make\":\"…\",\"model\":\"…\",\"year\":2024,\"mileage\":\"0\",\"isKM\":true,\"type\":\"autos\",\"vehicleCategory\":\"car&truck/\",\"vehicleType\":\"suv\"}",
-          "title": "…",
-          "photo_ids": [],
+          "comments_disabled": false,
+          "description": {
+            "text": "2025 Chevrolet Colorado ZR2 +\nKilometraje: 13000 km\nVersión: ZR2\nAño: 2025\nMás información: https://www.autosell.mx/catalogo/chevrolet-colorado-zr2-2025\nRef. 31d60560\n\n📲 **¡Contáctanos por WhatsApp!**\nHaz clic en el enlace para iniciar chat directo con un asesor de Periférico:\nhttps://wa.me/526142274381?text=Hola%2C%20me%20interesa%20informaci%C3%B3n%20sobre%20el%202025%20Chevrolet%20Colorado%20ZR2%20%2B"
+          },
+          "draft_type": null,
+          "is_photo_order_set_by_seller": false,
+          "item_price": {
+            "price": "949000"
+          },
+          "latitude": 28.6454,
+          "listing_email_id": null,
+          "longitude": -106.0658,
+          "serialized_verticals_data": "{\"conversionPostID\":\"\",\"conversionSource\":\"\",\"engineSize\":\"\",\"exteriorColor\":\"silver\",\"fuelType\":\"GASOLINE\",\"horsepower\":\"\",\"interiorColor\":\"black\",\"isKM\":true,\"isManualTransmission\":false,\"make\":\"1914016008726893\",\"mileage\":\"13000\",\"model\":\"Colorado ZR2 +\",\"numberOfOwners\":\"\",\"titleStatus\":\"CLEAN\",\"trim\":\"\",\"type\":\"autos\",\"vehicleCategory\":\"car&truck/\",\"vehicleCondition\":\"excellent\",\"vehicleFeatures\":[],\"vehicleType\":\"truck\",\"vin\":\"\",\"year\":2025}",
+          "source_type": null,
+          "title": "2025 Chevrolet Colorado ZR2 +",
           "video_ids": [],
-          "xpost_target_ids": []
+          "xpost_target_ids": [],
+          "photo_ids": [
+            "1661687945427011"
+          ]
         }
-      }
+      },
+      "vin_autofill_summary": null
     }
   },
-  "_comment": "Runtime deep-fills actor_id, title, description, price(+currency), photo_ids, coords, serialized_verticals_data. Keep marketplace_id + category_id. Never reuse capture make id for another brand — map brands in config.yaml facebook.graphql_make_ids."
+  "captured_at": {
+    "account": "account_1",
+    "note": "Recaptured from live UI create 2026-10-23; verticals include fuelType/titleStatus/vehicleCondition required by marketplace_listing_create",
+    "make_id": "1914016008726893"
+  }
 }

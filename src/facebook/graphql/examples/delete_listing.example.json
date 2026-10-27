@@ -11,5 +11,8 @@
       "surface": "MARKETPLACE_PAGE_SELLING"
     }
   },
-  "_comment": "Copy to data/graphql/delete_listing.json. doc_id rotates — re-capture if deletes start failing."
+  "captured_at": {
+    "account": "account_1",
+    "note": "placeholders for actor_id / for_sale_item_id / client_mutation_id"
+  }
 }

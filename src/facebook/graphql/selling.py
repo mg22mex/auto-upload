@@ -29,6 +29,13 @@ SELLING_URLS = (
     "https://www.facebook.com/marketplace/you/selling",
     "https://www.facebook.com/marketplace/you/selling?status=ACTIVE",
     "https://www.facebook.com/marketplace/you/selling?state=LIVE",
+    "https://www.facebook.com/marketplace/you/selling?status=NEED_ATTENTION",
+    "https://www.facebook.com/marketplace/you/selling?status=NEEDS_ATTENTION",
+    "https://www.facebook.com/marketplace/you/selling?status=PENDING",
+    "https://www.facebook.com/marketplace/you/selling?status=IN_REVIEW",
+    "https://www.facebook.com/marketplace/you/selling?status=SOLD",
+    "https://www.facebook.com/marketplace/you/selling?status=DRAFT",
+    "https://www.facebook.com/marketplace/you/notifications",
 )
 
 _ITEM_URL_RE = re.compile(r"/marketplace/item/(\d{8,})")
@@ -225,10 +232,15 @@ def _fetch_via_selling_html(session: FbSessionContext) -> list[ActiveListing]:
                 )
                 continue
             html = response.text or ""
+            before = len(found)
             for item in parse_active_listings_from_text(html, source="selling_html"):
                 found.setdefault(item.item_id, item)
-            if found:
-                break
+            if len(found) > before:
+                print(
+                    f"  selling HTML {url}: +{len(found) - before} "
+                    f"(total {len(found)})",
+                    flush=True,
+                )
     # Also try Marketplace home embed as a weak secondary signal.
     if not found:
         try:
