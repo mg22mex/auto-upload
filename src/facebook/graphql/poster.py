@@ -20,6 +20,7 @@ from src.facebook.graphql.errors import (
     extract_listing_id_from_payload,
     is_duplicate_graphql_payload,
     raise_for_graphql_payload,
+    skipped_duplicate_message,
 )
 from src.facebook.session import get_page
 from src.facebook.graphql.photos import upload_photos_for_listing
@@ -124,7 +125,9 @@ def create_vehicle_listing_graphql(
                 pass
         return listing_url
     except FacebookPostingError as exc:
-        if store is not None and account_id and "duplicate" in str(exc).lower():
+        from src.facebook.poster import is_duplicate_listing_error
+
+        if store is not None and account_id and is_duplicate_listing_error(exc):
             try:
                 store.mark_duplicate_blocked(
                     vehicle.autosell_id,
@@ -133,8 +136,9 @@ def create_vehicle_listing_graphql(
                     reason="fb_duplicate_graphql",
                 )
                 print(
-                    f"  sync.db: marked {vehicle.autosell_id} on {account_id} "
-                    f"as duplicate_blocked (GraphQL)",
+                    f"SKIPPED_DUPLICATE {vehicle.autosell_id} on {account_id}: "
+                    f"GraphQL create blocked; sync.db=duplicate_blocked "
+                    f"(no create retries ~7d) — {exc}",
                     flush=True,
                 )
             except Exception:
@@ -245,10 +249,15 @@ def publish_vehicle_graphql(
                 _dump_payload(log_dir, vehicle.autosell_id, "create_error", dump)
             raise
 
+    # Soft duplicate in data (banner / didn't-post) even when HTTP 200.
     if is_duplicate_graphql_payload(payload):
+        phantom_id = extract_listing_id_from_payload(payload)
         raise FacebookPostingError(
-            f"SKIP_CREATE: Facebook duplicate listing detected via GraphQL "
-            f"for {vehicle.autosell_id}"
+            skipped_duplicate_message(
+                f"for {vehicle.autosell_id}"
+                + (f" phantom_item={phantom_id}" if phantom_id else ""),
+                action="create_vehicle",
+            )
         )
     raise_for_graphql_payload(payload, action="create_vehicle")
 
@@ -266,9 +275,45 @@ def publish_vehicle_graphql(
             payload=payload,
         )
 
+    # Listing id present but payload still smells like duplicate / not-posted.
+    if _payload_looks_unposted_duplicate(payload):
+        raise FacebookPostingError(
+            skipped_duplicate_message(
+                f"for {vehicle.autosell_id} item={item_id} "
+                f"(create returned id but FB flagged duplicate / didn't post)",
+                action="create_vehicle",
+            )
+        )
+
     listing_url = f"https://www.facebook.com/marketplace/item/{item_id}/"
     print(f"  {vehicle.autosell_id}: GraphQL create OK → {listing_url}", flush=True)
     return listing_url
+
+
+def _payload_looks_unposted_duplicate(payload: Any) -> bool:
+    """True when create response has an id but FB still refused as duplicate."""
+    if is_duplicate_graphql_payload(payload):
+        return True
+    blob = ""
+    try:
+        import json as _json
+
+        blob = (
+            _json.dumps(payload).lower()
+            if not isinstance(payload, str)
+            else payload.lower()
+        )
+    except (TypeError, ValueError):
+        blob = str(payload).lower()
+    # Narrow markers only — avoid false positives on normal creates.
+    markers = (
+        "hidden_for_duplicate",
+        "rejected_for_duplicate",
+        "duplicate_of_listing",
+        "is_duplicate_listing",
+        "listing_duplicate_error",
+    )
+    return any(m in blob for m in markers)
 
 
 def _dig_id(payload: Any, paths: list[str]) -> str | None:

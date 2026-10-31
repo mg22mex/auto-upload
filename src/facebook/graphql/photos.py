@@ -374,7 +374,7 @@ def _upload_one(
                 payload = _parse_upload_payload(response.text)
                 if is_duplicate_graphql_payload(payload):
                     raise FacebookPostingError(
-                        f"SKIP_CREATE: Facebook duplicate listing detected during "
+                        f"SKIPPED_DUPLICATE: Facebook duplicate listing during "
                         f"photo upload for {autosell_id or path.name}"
                     )
                 soft = _soft_reject_message(payload, response.text or "")

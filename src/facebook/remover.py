@@ -254,23 +254,24 @@ def remove_vehicle_listing(
     vehicle: Vehicle | None = None,
     title_needles: list[str] | None = None,
 ) -> bool:
-    """Remove a Marketplace listing (delete or mark sold).
+    """Remove a Marketplace listing.
 
-    Returns True when the listing is confirmed gone/sold/unavailable.
+    Returns True when the listing is confirmed gone/unavailable.
 
-    When ``require_verified`` is True (repost path), a verified removal is
-    required before create. Soft failures (controls not found) return False
-    with a WARNING instead of raising, so the caller can continue the queue.
+    When ``require_verified`` is True (repost/bump path), **always hard-deletes**
+    (never Mark as sold) and requires shelf absence before create.
+
+    Soft failures (controls not found) return False with a WARNING instead of
+    raising, so the caller can continue the queue.
 
     Optional ``store`` + ``account_id``: call ``mark_fb_listing_removed`` when
     treating visitor-chrome orphans (not on selling shelf) as already deleted.
 
     Strategies (in order):
     1. Open ``listing_url`` — treat 404 / unavailable as already removed
-    2. Delete / mark-sold via listing detail menu (ES/EN + three-dot aria-labels)
+    2. Delete via listing detail menu (ES/EN + three-dot aria-labels)
     3. Fallback: find item on ``/marketplace/you/selling`` by item id
     4. Fallback: titled ``Más opciones para {title}`` / ``More options for`` menu
-    5. Optional mark-sold if primary action was delete but only sold controls appear
     """
     action = (removal_action or "delete").strip().lower()
     if action not in ("delete", "mark_sold"):
@@ -281,6 +282,15 @@ def remove_vehicle_listing(
         graphql_ui_fallback,
         project_root_from_log_dir,
     )
+
+    # Repost/bump (7-day rotation): never Mark as sold — hard-delete only.
+    if require_verified and action != "delete":
+        print(
+            f"  {autosell_id}: require_verified bump path — "
+            f"coerce {action!r} → hard delete (no Mark as sold)",
+            flush=True,
+        )
+        action = "delete"
 
     # GraphQL has no mark_sold mutation — sold/removed catalog units hard-delete.
     if graphql_enabled() and action == "mark_sold":
@@ -384,15 +394,8 @@ def remove_vehicle_listing(
         )
         if remove_from_selling_by_title(page, needles, action=action):
             return True
-        # mark_sold-then-create often triggers FB "publicación duplicada" on
-        # the verified repost path — only use it for non-must_purge removes.
-        if action == "delete" and not must_purge:
-            print(
-                f"  {autosell_id}: title-menu delete failed — retry mark_sold",
-                flush=True,
-            )
-            if remove_from_selling_by_title(page, needles, action="mark_sold"):
-                return True
+        # Never fall back to Mark as sold on delete/bump — sold ghosts cause
+        # FB "This looks like a duplicate" when recreating.
         return False
 
     def _confirm_already_removed() -> bool:
@@ -542,15 +545,7 @@ def remove_vehicle_listing(
         except Exception as exc:
             last_error = exc
             print(f"  {autosell_id}: detail-page remove failed: {exc}")
-            # Owner page often has direct Marcar como vendido but no Eliminar in menu
-            if action == "delete" and not must_purge:
-                try:
-                    print(f"  {autosell_id}: detail fallback mark_sold (owner chrome)")
-                    _perform_removal_on_current_page(page, action="mark_sold")
-                    page.wait_for_timeout(2_000)
-                    last_error = None
-                except Exception as alt_exc:
-                    last_error = alt_exc
+            # No Mark as sold fallback — bump/delete path must hard-delete only.
 
     if _is_content_unavailable(page) or _listing_already_gone(
         page, listing_url=listing_url, item_id=item_id
@@ -583,13 +578,7 @@ def remove_vehicle_listing(
             ):
                 shelf_removed = True
                 page.wait_for_timeout(1_000)
-            elif action == "delete" and not must_purge:
-                print(f"  {autosell_id}: selling-shelf retry with mark_sold")
-                if _remove_from_selling_shelf(
-                    page, item_id, action="mark_sold", quick=False
-                ):
-                    shelf_removed = True
-                    page.wait_for_timeout(1_000)
+            # No mark_sold shelf retry — hard-delete only.
         except Exception as exc:
             last_error = exc
             print(f"  {autosell_id}: selling-shelf remove failed: {exc}")
@@ -658,13 +647,14 @@ def remove_vehicle_listing(
             if require_verified and not _is_content_unavailable(page):
                 _assert_removed_or_raise(page, listing_url, autosell_id, log_dir)
             return True
-        alt = "mark_sold" if action == "delete" else "delete"
-        try:
-            print(f"  {autosell_id}: fallback action={alt}")
-            _perform_removal_on_current_page(page, action=alt)
-            page.wait_for_timeout(2_000)
-        except Exception as exc:
-            last_error = exc
+        # Hard-delete only — no Mark as sold alternate.
+        if action != "delete":
+            try:
+                print(f"  {autosell_id}: fallback action=delete")
+                _perform_removal_on_current_page(page, action="delete")
+                page.wait_for_timeout(2_000)
+            except Exception as exc:
+                last_error = exc
     except Exception as exc:
         last_error = exc
 
@@ -1537,7 +1527,7 @@ def _remove_from_selling_shelf(
             )
             return True
 
-        # Required path: open this card's "…" then Delete / Mark as sold.
+        # Required path: open this card's "…" then Delete (hard-delete only).
         if _click_more_on_shelf_card(page, card, link):
             if action == "delete":
                 if _click_menu_action(page, action="delete"):
@@ -1555,17 +1545,15 @@ def _remove_from_selling_shelf(
                         )
                         return False
                     return True
-                if not confirm_gone and _click_menu_action(page, action="mark_sold"):
-                    return _finish_mark_sold_flow(page) or already_sold
+                # No Mark as sold fallback — bump/rotation must hard-delete.
                 if already_sold and not confirm_gone:
                     print(
-                        f"  shelf item {item_id}: sold (Mark as available) and "
+                        f"  shelf item {item_id}: already sold badge and "
                         f"no Delete in menu — treating as handled"
                     )
                     return True
             else:
-                if _click_menu_action(page, action="mark_sold"):
-                    return _finish_mark_sold_flow(page)
+                # Legacy mark_sold callers: prefer Delete first, then sold.
                 if _click_menu_action(page, action="delete"):
                     _confirm_if_needed(page, prefer_delete=True)
                     deleted = True
@@ -1574,13 +1562,15 @@ def _remove_from_selling_shelf(
                             page, item_id, thorough=True
                         )
                     return True
+                if _click_menu_action(page, action="mark_sold"):
+                    return _finish_mark_sold_flow(page)
                 if already_sold and not confirm_gone:
                     return True
 
         if already_sold and not confirm_gone:
             print(
-                f"  shelf item {item_id}: Mark as available on card — "
-                f"treating as already sold/handled"
+                f"  shelf item {item_id}: already sold badge on card — "
+                f"treating as handled"
             )
             return True
 
@@ -1607,7 +1597,7 @@ def _remove_from_selling_shelf(
                     continue
                 return True
             try:
-                _perform_removal_on_current_page(page, action=action)
+                _perform_removal_on_current_page(page, action="delete")
                 deleted = True
                 if confirm_gone:
                     return _wait_until_item_gone_from_shelf(
@@ -1615,14 +1605,10 @@ def _remove_from_selling_shelf(
                     )
                 return True
             except Exception:
+                # No Mark as sold alternate — hard-delete only.
                 if confirm_gone:
                     continue
-                alt = "mark_sold" if action == "delete" else "delete"
-                try:
-                    _perform_removal_on_current_page(page, action=alt)
-                    return True
-                except Exception:
-                    continue
+                continue
         except Exception:
             continue
 

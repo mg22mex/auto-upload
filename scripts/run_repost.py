@@ -54,7 +54,10 @@ def resolve_accounts(config: dict, requested: list[str] | None) -> list[str]:
 def main() -> int:
     ensure_unbuffered_stdio()
     parser = argparse.ArgumentParser(
-        description="Repost live Facebook listings (mark sold → create → update sync.db URL)."
+        description=(
+            "Repost live Facebook listings (hard-delete at ≥7d → create → "
+            "update sync.db URL). Never Mark as sold."
+        )
     )
     parser.add_argument("--account", nargs="+", help="Limit to these accounts")
     group = parser.add_mutually_exclusive_group(required=True)

@@ -803,9 +803,24 @@ _MASS_DOM_URLS = (
     f"{SELLING_URL}?status=NEEDS_ATTENTION",
     f"{SELLING_URL}?status=PENDING",
     f"{SELLING_URL}?status=IN_REVIEW",
+    f"{SELLING_URL}?status=HIDDEN",
+    f"{SELLING_URL}?status=INACTIVE",
     f"{SELLING_URL}?status=SOLD",
     f"{SELLING_URL}?status=DRAFT",
     "https://www.facebook.com/marketplace/you/notifications",
+)
+# Card banner text for rejected duplicate creates (account_1 EN / account_2 ES).
+_DUPLICATE_BANNER_RE = re.compile(
+    r"this looks like a duplicate|"
+    r"we didn'?t post it|"
+    r"didn'?t post it|"
+    r"delete it and try again|"
+    r"parece un duplicado|"
+    r"no lo publicamos|"
+    r"no la publicamos|"
+    r"elim[ií]nala y vuelve a intentarlo|"
+    r"elim[ií]nalo y vuelve a intentarlo",
+    re.I,
 )
 _FAST_CLICK_MS = 2000  # cards need ~2s to settle; 200ms was too aggressive
 _FAST_SETTLE_AFTER_MS = 800  # wait after delete/confirm before next card
@@ -1001,11 +1016,72 @@ def _aggressive_scroll_load(page: Page, *, max_scrolls: int = 60) -> None:
         pass
 
 
+def _purge_duplicate_banner_cards(page: Page, *, account_id: str, timeout_ms: int) -> int:
+    """Delete cards showing 'This looks like a duplicate… / Delete it and try again'."""
+    deleted = 0
+    try:
+        banners = page.get_by_text(_DUPLICATE_BANNER_RE)
+        n = banners.count()
+    except Exception:
+        n = 0
+    if not isinstance(n, int) or n <= 0:
+        return 0
+    print(
+        f"  [{account_id}] duplicate banner card(s) visible≈{n} — purging",
+        flush=True,
+    )
+    for _ in range(min(n, 40)):
+        # Prefer the explicit attention CTA near the banner.
+        if _fast_click_label(page, _ATTENTION_DELETE_CTA, timeout_ms=timeout_ms):
+            _wait_menu_or_dialog(page, timeout_ms=timeout_ms)
+            _fast_click_label(page, _FAST_CONFIRM_RE, timeout_ms=timeout_ms)
+            _dismiss_delete_survey_if_needed(page, timeout_ms=timeout_ms)
+            deleted += 1
+            try:
+                page.wait_for_timeout(int(_FAST_SETTLE_AFTER_MS))
+            except Exception:
+                pass
+            continue
+        # Fallback: hover banner card → ⋮ → Eliminar/Delete.
+        try:
+            banners = page.get_by_text(_DUPLICATE_BANNER_RE)
+            if banners.count() <= 0:
+                break
+            node = banners.first
+            try:
+                node.scroll_into_view_if_needed(timeout=timeout_ms)
+                node.hover(timeout=timeout_ms)
+            except Exception:
+                pass
+            card = node.locator("xpath=ancestor::div[5]")
+            more = card.locator(_FAST_MORE_SEL).first
+            if more.count() > 0 and _fast_hover_scroll_click(more, timeout_ms=timeout_ms):
+                if _fast_click_label(page, _FAST_DELETE_RE, timeout_ms=timeout_ms):
+                    _wait_menu_or_dialog(page, timeout_ms=timeout_ms)
+                    _fast_click_label(page, _FAST_CONFIRM_RE, timeout_ms=timeout_ms)
+                    _dismiss_delete_survey_if_needed(page, timeout_ms=timeout_ms)
+                    deleted += 1
+                    try:
+                        page.wait_for_timeout(int(_FAST_SETTLE_AFTER_MS))
+                    except Exception:
+                        pass
+                    continue
+        except Exception as exc:
+            print(f"  [{account_id}] duplicate-banner purge skip: {exc}", flush=True)
+        break
+    return deleted
+
+
 def _fast_delete_pass_on_page(page: Page, *, account_id: str) -> int:
     """One pass: await every attention CTA / ⋮→Delete / confirm. Returns deletes."""
     deleted = 0
     ms = int(_FAST_CLICK_MS)
     settle = int(_FAST_SETTLE_AFTER_MS)
+
+    # 0) Explicit duplicate-warning cards first (account_1 EN banner).
+    deleted += _purge_duplicate_banner_cards(
+        page, account_id=account_id, timeout_ms=ms
+    )
 
     # 1) Direct attention / duplicate CTAs (no menu).
     for _ in range(80):

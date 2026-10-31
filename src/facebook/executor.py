@@ -19,6 +19,7 @@ class ExecutionResult:
     creates: int = 0
     updates: int = 0
     removals: int = 0
+    skipped_duplicates: int = 0
     errors: list[str] = None  # type: ignore[assignment]
     session_expired_accounts: list[str] = None  # type: ignore[assignment]
 
@@ -52,14 +53,13 @@ def execute_actions(
     removal_action = env_str(
         "REMOVAL_ACTION",
         str(config.get("sync", {}).get("removal_action", "delete")),
-    )
-    # GraphQL path has no mark_sold mutation — always hard-delete when enabled.
-    from src.facebook.graphql.mode import graphql_enabled
-
-    if graphql_enabled() and removal_action.strip().lower() != "delete":
+    ).strip().lower()
+    # Always hard-delete catalog removals (never Mark as sold — shelf ghosts /
+    # duplicate filters on recreate). GraphQL and UI paths both delete.
+    if removal_action != "delete":
         print(
-            f"  GraphQL mode: coercing sync removal_action "
-            f"{removal_action!r} → 'delete'",
+            f"  Sync removal_action {removal_action!r} → 'delete' "
+            f"(Mark as sold disabled)",
             flush=True,
         )
         removal_action = "delete"
@@ -111,9 +111,6 @@ def execute_actions(
                             result=result,
                         )
                     except Exception as exc:
-                        msg = f"{action.action} {action.autosell_id} on {account_id}: {exc}"
-                        print(f"ERROR: {msg}")
-                        result.errors.append(msg)
                         if action.action == "create" and is_duplicate_listing_error(exc):
                             hash_val = (
                                 action.vehicle.content_hash()
@@ -126,11 +123,26 @@ def execute_actions(
                                 content_hash=hash_val,
                                 reason="fb_duplicate",
                             )
+                            result.skipped_duplicates += 1
                             print(
-                                f"  sync.db: marked {action.autosell_id} on {account_id} "
-                                f"as duplicate_blocked (skip create retries ~7d)",
+                                f"SKIPPED_DUPLICATE {action.autosell_id} on "
+                                f"{account_id}: {exc}",
                                 flush=True,
                             )
+                            print(
+                                f"  sync.db: marked {action.autosell_id} on "
+                                f"{account_id} as duplicate_blocked "
+                                f"(no create retries ~7d)",
+                                flush=True,
+                            )
+                            # Do not append to result.errors — not a hard fail.
+                        else:
+                            msg = (
+                                f"{action.action} {action.autosell_id} "
+                                f"on {account_id}: {exc}"
+                            )
+                            print(f"ERROR: {msg}")
+                            result.errors.append(msg)
                     random_delay(delay_min, delay_max)
         except FacebookSessionError as exc:
             print(

@@ -38,7 +38,7 @@ class TestDuplicatePhrases(unittest.TestCase):
         )
         with self.assertRaises(FacebookPostingError) as cm:
             raise_if_duplicate_listing(page, autosell_id="obj1")
-        self.assertIn("SKIP_CREATE", str(cm.exception))
+        self.assertIn("SKIPPED_DUPLICATE", str(cm.exception))
         self.assertIn("duplicate", str(cm.exception).lower())
 
 

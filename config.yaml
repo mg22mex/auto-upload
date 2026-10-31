@@ -27,8 +27,8 @@ sync:
     # Cap sticky yields per account per plan (defaults to max_posts_per_account_per_run)
     max_rotations_per_account: 15
   # Hard-delete sold/removed catalog units (GraphQL when FB_USE_GRAPHQL=1).
-  # mark_sold is UI-only and often leaves shelf ghosts / duplicate spam on recreate.
-  removal_action: delete  # delete | mark_sold
+  # Do not use mark_sold — leaves shelf ghosts / duplicate spam on recreate.
+  removal_action: delete
   # Live sync accounts. account_3 excluded until operator clears old FB listings.
   active_accounts:
     - account_1
@@ -48,11 +48,10 @@ sync:
     restart_browser_every: 10  # close/reopen Chromium to limit VPS RAM flake
     max_browser_reopens: 5
     schedule: "0 */3 * * *"
-  # Full delete+recreate (primary bump path; listings ≥ min_age_days old)
+  # Full hard-delete+recreate (primary 7-day bump; never Mark as sold)
   repost:
     min_age_days: 7
-    # Hard delete before create — mark_sold alone often triggers FB "publicación duplicada"
-    removal_action: delete
+    removal_action: delete  # hard-coded in code; mark_sold is ignored
     max_per_account_per_run: 3  # ~20–30m/run; cron every 3h
     restart_browser_every: 5  # fewer Chromium restarts → less session churn
     max_browser_reopens: 5

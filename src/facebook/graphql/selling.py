@@ -33,6 +33,8 @@ SELLING_URLS = (
     "https://www.facebook.com/marketplace/you/selling?status=NEEDS_ATTENTION",
     "https://www.facebook.com/marketplace/you/selling?status=PENDING",
     "https://www.facebook.com/marketplace/you/selling?status=IN_REVIEW",
+    "https://www.facebook.com/marketplace/you/selling?status=HIDDEN",
+    "https://www.facebook.com/marketplace/you/selling?status=INACTIVE",
     "https://www.facebook.com/marketplace/you/selling?status=SOLD",
     "https://www.facebook.com/marketplace/you/selling?status=DRAFT",
     "https://www.facebook.com/marketplace/you/notifications",
@@ -108,12 +110,26 @@ def fetch_active_selling_listings(
             flush=True,
         )
 
-    if not by_id:
-        for item in _fetch_via_selling_html(session):
-            by_id.setdefault(item.item_id, item)
+    # Always supplement GraphQL with HTTP shelf scrape so flagged / Needs
+    # attention / Hidden / draft cards are included even when the active
+    # pagination query only returns LIVE rows.
+    before_html = len(by_id)
+    for item in _fetch_via_selling_html(session):
+        by_id.setdefault(item.item_id, item)
+    html_added = len(by_id) - before_html
+    if html_added:
+        print(
+            f"  selling HTML shelves added {html_added} "
+            f"flagged/hidden/attention id(s)",
+            flush=True,
+        )
 
     listings = list(by_id.values())
-    print(f"  GraphQL/HTTP selling discovery: {len(listings)} active item(s)", flush=True)
+    print(
+        f"  GraphQL/HTTP selling discovery: {len(listings)} item(s) "
+        f"(active + attention/hidden when present)",
+        flush=True,
+    )
     return listings
 
 

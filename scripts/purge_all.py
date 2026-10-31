@@ -14,6 +14,8 @@ Targets active/published AND phantom/duplicate/Needs-attention leftovers.
    (awaited clicks + container scroll to render all cards), then
    Confirm/Eliminar modals, then dismiss post-delete survey
    (Prefer not to answer / Prefiero no responder → Submit/Enviar).
+   Also targets "This looks like a duplicate so we didn't post it /
+   Delete it and try again" banner cards (account_1 EN).
 
 3. Reset ``data/sync.db`` fb_listings + repost_holds → 0 mappings.
 

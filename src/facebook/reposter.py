@@ -122,12 +122,17 @@ def execute_reposts(
     # Repost inter-listing delay (independent of create-sync FB_ACTION_DELAY_*).
     delay_min = env_float("REPOST_ACTION_DELAY_MIN_SEC", 20.0)
     delay_max = env_float("REPOST_ACTION_DELAY_MAX_SEC", 40.0)
-    # Relist: hard delete by default (avoids "publicación duplicada").
-    # REPOST_REMOVAL_ACTION > sync.repost.removal_action > delete
-    removal_action = env_str(
-        "REPOST_REMOVAL_ACTION",
-        str(repost_cfg.get("removal_action") or "delete"),
-    )
+    # Relist/bump: ALWAYS hard-delete (never mark_sold). Sold status leaves
+    # shelf ghosts and triggers FB "This looks like a duplicate" on recreate.
+    removal_action = "delete"
+    cfg_action = str(repost_cfg.get("removal_action") or "").strip().lower()
+    env_action = env_str("REPOST_REMOVAL_ACTION", "").strip().lower()
+    if cfg_action == "mark_sold" or env_action == "mark_sold":
+        print(
+            "WARNING: sync.repost.removal_action / REPOST_REMOVAL_ACTION="
+            "mark_sold ignored — bump path hard-deletes only",
+            flush=True,
+        )
     restart_every = env_int(
         "FB_REPOST_BROWSER_EVERY",
         int(repost_cfg.get("restart_browser_every", 3)),
@@ -344,17 +349,9 @@ def _repost_one(
         row = store.get_fb_listing(action.autosell_id, account_id)
         old_url = row["fb_listing_url"] if row else None
 
-    # Force hard-delete on the repost path (mark_sold alone often triggers
-    # Facebook's "publicación duplicada" when re-creating the same vehicle).
-    action_norm = (removal_action or "delete").strip().lower()
-    if action_norm not in ("delete", "mark_sold"):
-        action_norm = "delete"
-    if action_norm != "delete":
-        print(
-            f"WARNING: {action.autosell_id}: repost coerced removal_action "
-            f"{action_norm!r} → delete (avoid duplicate listing flag)"
-        )
-        action_norm = "delete"
+    # Bump/repost: hard-delete only (7-day rotation). Never Mark as sold.
+    action_norm = "delete"
+    _ = removal_action  # API compat; callers may still pass a string
 
     t0 = time.monotonic()
     # Freeze listing payload + download photos *before* delete so create has

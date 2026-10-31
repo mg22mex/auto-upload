@@ -43,6 +43,20 @@ _DUPLICATE_MARKERS = (
     "anuncio duplicado",
     "looks like a duplicate",
     "looks like you already",
+    # Exact Marketplace create banner (account_1 EN):
+    # "This looks like a duplicate so we didn't post it. Delete it and try again"
+    "didn't post it",
+    "did not post it",
+    "we didn't post",
+    "delete it and try again",
+    "delete and try again",
+    "no lo publicamos",
+    "no la publicamos",
+    "no se publicó porque parece",
+    "elimínala y vuelve a intentarlo",
+    "elimínalo y vuelve a intentarlo",
+    "duplicate_listing",
+    "listing_duplicate",
 )
 
 _SESSION_MARKERS = (
@@ -136,13 +150,26 @@ def is_phantom_delete_error(exc: BaseException | str | None = None, payload: Any
     return False
 
 
+def skipped_duplicate_message(detail: str = "", *, action: str = "") -> str:
+    """Canonical log/exception text for FB duplicate create rejects."""
+    bits = ["SKIPPED_DUPLICATE"]
+    if action:
+        bits.append(action)
+    if detail:
+        bits.append(detail.strip()[:240])
+    return ": ".join(bits)
+
+
 def raise_for_graphql_payload(payload: Any, *, action: str = "graphql") -> None:
     """Raise typed errors when FB returns error / duplicate payloads."""
     if payload is None:
         return
     if is_duplicate_graphql_payload(payload):
         raise FacebookPostingError(
-            f"SKIP_CREATE: Facebook duplicate listing detected via GraphQL ({action})"
+            skipped_duplicate_message(
+                "Facebook rejected create as duplicate listing",
+                action=action,
+            )
         )
     errors = None
     if isinstance(payload, dict):
@@ -152,7 +179,7 @@ def raise_for_graphql_payload(payload: Any, *, action: str = "graphql") -> None:
     blob = payload_text_blob(errors)
     if is_duplicate_graphql_payload(errors) or is_duplicate_graphql_payload(blob):
         raise FacebookPostingError(
-            f"SKIP_CREATE: Facebook duplicate listing detected via GraphQL ({action})"
+            skipped_duplicate_message(blob[:200], action=action)
         )
     if is_session_graphql_payload(errors) or is_session_graphql_payload(blob):
         raise FacebookSessionError(

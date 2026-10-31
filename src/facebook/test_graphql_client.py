@@ -26,12 +26,26 @@ class ParseResponseTests(unittest.TestCase):
                 {"errors": [{"message": "This looks like a duplicate listing"}]}
             )
         )
+        self.assertTrue(
+            is_duplicate_graphql_payload(
+                {
+                    "errors": [
+                        {
+                            "message": (
+                                "This looks like a duplicate so we didn't post it. "
+                                "Delete it and try again"
+                            )
+                        }
+                    ]
+                }
+            )
+        )
         with self.assertRaises(FacebookPostingError) as cm:
             raise_for_graphql_payload(
                 {"errors": [{"message": "publicación duplicada"}]},
                 action="create",
             )
-        self.assertIn("SKIP_CREATE", str(cm.exception))
+        self.assertIn("SKIPPED_DUPLICATE", str(cm.exception))
 
     def test_extract_listing_id(self):
         payload = {"data": {"x": {"listing_id": "123456789012345"}}}

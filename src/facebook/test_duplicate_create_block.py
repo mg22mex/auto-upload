@@ -109,7 +109,8 @@ class TestDuplicateBlockedDb(unittest.TestCase):
                 )
 
             self.assertEqual(result.creates, 0)
-            self.assertTrue(any("duplicate" in e.lower() for e in result.errors))
+            self.assertEqual(result.skipped_duplicates, 1)
+            self.assertEqual(result.errors, [])
             row = store.get_fb_listing("obj9", "account_1")
             self.assertIsNotNone(row)
             self.assertEqual(row["status"], "duplicate_blocked")

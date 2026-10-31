@@ -56,6 +56,11 @@ _DUPLICATE_LISTING_PHRASES = (
     "already listed",
     "you've already listed",
     "you already have a listing",
+    "didn't post it",
+    "did not post it",
+    "we didn't post",
+    "delete it and try again",
+    "delete and try again",
     "publicación duplicada",
     "publicacion duplicada",
     "parece un duplicado",
@@ -63,6 +68,10 @@ _DUPLICATE_LISTING_PHRASES = (
     "ya tienes una publicación",
     "ya publicaste",
     "anuncio duplicado",
+    "no lo publicamos",
+    "no la publicamos",
+    "elimínala y vuelve a intentarlo",
+    "elimínalo y vuelve a intentarlo",
 )
 _PUBLISH_ERROR_PHRASES = (
     "something went wrong",
@@ -109,9 +118,13 @@ def is_duplicate_listing_error(exc: BaseException | str) -> bool:
     """True when create failed due to FB duplicate filter / shelf cleanup refuse."""
     text = str(exc).lower()
     markers = (
+        "skipped_duplicate",
         "duplicate",
         "duplicad",
         "skip_create",
+        "didn't post it",
+        "did not post it",
+        "delete it and try again",
         "matching listing still on selling shelf",
     )
     return any(m in text for m in markers)
@@ -889,8 +902,8 @@ def raise_if_duplicate_listing(page: Page, *, autosell_id: str = "") -> None:
         return
     label = autosell_id or "?"
     raise FacebookPostingError(
-        f"SKIP_CREATE: Facebook duplicate listing detected for {label} "
-        f"({hit!r}) — aborting item without further wait"
+        f"SKIPPED_DUPLICATE: Facebook duplicate listing for {label} "
+        f"({hit!r}) — aborting; will not re-create this run"
     )
 
 
@@ -970,7 +983,7 @@ def _publish_and_capture_url(
         )
     if outcome == "duplicate":
         raise FacebookPostingError(
-            f"SKIP_CREATE: Facebook duplicate listing detected for {autosell_id}"
+            f"SKIPPED_DUPLICATE: Facebook duplicate listing for {autosell_id}"
         )
 
     log_page_state(page, "after_publish")
@@ -3056,7 +3069,7 @@ def _log_publish_errors(page: Page) -> None:
     if dup:
         # Hard fail — callers must not continue shelf hunts after a duplicate flag.
         raise FacebookPostingError(
-            f"SKIP_CREATE: Facebook duplicate listing detected ({dup!r})"
+            f"SKIPPED_DUPLICATE: Facebook duplicate listing ({dup!r})"
         )
     for phrase in (
         "something went wrong",
