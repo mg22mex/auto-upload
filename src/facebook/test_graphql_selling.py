@@ -337,6 +337,9 @@ class GraphqlPurgeTests(unittest.TestCase):
         self.assertEqual(stats.failed, 0)
         self.assertEqual(stats.ui_fallback_deletes, 1)
         ui_delete.assert_called_once()
+        kwargs = ui_delete.call_args.kwargs
+        self.assertEqual(kwargs.get("vehicle_title"), "Old Car")
+        self.assertIn("Old Car", kwargs.get("card_text") or "")
 
     def test_max_days_zero_purges_unknown_age(self):
         session = FbSessionContext(

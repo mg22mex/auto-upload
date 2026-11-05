@@ -319,6 +319,107 @@ class TestPurgeOldListingsOnPage(unittest.TestCase):
         remove.assert_not_called()
         store.mark_fb_listing_removed.assert_not_called()
 
+    def test_item_id_miss_falls_back_to_title_match_delete(self):
+        page = MagicMock()
+        store = MagicMock()
+        store.get_live_listings.return_value = []
+        store.lookup_by_fb_item_id.return_value = None
+        cards = [
+            ShelfListing(
+                "999",
+                "/marketplace/item/999/",
+                10.0,
+                "Listed on Oct 24",
+                "2018 Audi Q5 Listed on Oct 24 $350000",
+            ),
+        ]
+        with (
+            patch(
+                "src.facebook.purge_old.collect_selling_listings",
+                return_value=cards,
+            ),
+            patch(
+                "src.facebook.purge_old._remove_from_selling_shelf",
+                return_value=False,
+            ),
+            patch(
+                "src.facebook.purge_old.remove_from_selling_by_title",
+                return_value=True,
+            ) as title_rm,
+            patch("src.facebook.purge_old.random_delay"),
+            patch(
+                "src.facebook.purge_old._catalog_by_autosell_id",
+                return_value={},
+            ),
+            patch(
+                "src.facebook.purge_old._lookup_db_row",
+                return_value=None,
+            ),
+        ):
+            stats = purge_old_listings_on_page(
+                page,
+                store,
+                account_id="account_1",
+                max_days=7,
+                dry_run=False,
+            )
+        self.assertEqual(stats.deleted, 1)
+        self.assertEqual(stats.failed, 0)
+        title_rm.assert_called_once()
+        needles = title_rm.call_args.args[1]
+        self.assertTrue(any("2018 Audi Q5" in n for n in needles))
+
+    def test_title_needles_from_card_text(self):
+        from src.facebook.purge_old import _title_needles_for_purge
+
+        store = MagicMock()
+        store.lookup_by_fb_item_id.return_value = None
+        with patch(
+            "src.facebook.purge_old._catalog_by_autosell_id",
+            return_value={},
+        ), patch(
+            "src.facebook.purge_old._lookup_db_row",
+            return_value=None,
+        ):
+            needles = _title_needles_for_purge(
+                store=store,
+                account_id="account_1",
+                item_id="1",
+                autosell_id="",
+                vehicle_title="2018 Audi Q5",
+                card_text="2018 Audi Q5 Listed on Oct 24 $350000",
+            )
+        self.assertIn("2018 Audi Q5", needles)
+
+    def test_hard_delete_title_fallback_when_item_href_misses(self):
+        from src.facebook.purge_old import hard_delete_listing_via_playwright
+
+        page = MagicMock()
+        store = MagicMock()
+        with (
+            patch(
+                "src.facebook.purge_old._remove_from_selling_shelf",
+                return_value=False,
+            ),
+            patch(
+                "src.facebook.purge_old.remove_from_selling_by_title",
+                return_value=True,
+            ) as title_rm,
+        ):
+            ok = hard_delete_listing_via_playwright(
+                page,
+                item_id="123",
+                listing_url="",
+                autosell_id="obj1",
+                store=store,
+                account_id="account_1",
+                vehicle_title="2018 Audi Q5",
+                card_text="2018 Audi Q5 Listed on Oct 24",
+            )
+        self.assertTrue(ok)
+        title_rm.assert_called_once()
+        self.assertEqual(title_rm.call_args.kwargs.get("action"), "delete")
+
 
 if __name__ == "__main__":
     unittest.main()

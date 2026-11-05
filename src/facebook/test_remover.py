@@ -795,5 +795,69 @@ class TestExtractItemId(unittest.TestCase):
         )
 
 
+class TestRemoveFromSellingByTitle(unittest.TestCase):
+    def test_visible_title_opens_menu_deletes_and_verifies_gone(self):
+        from src.facebook.remover import remove_from_selling_by_title
+
+        page = MagicMock()
+        more_btn = MagicMock()
+        with (
+            patch(
+                "src.facebook.remover._sort_selling_oldest_first",
+            ),
+            patch(
+                "src.facebook.remover._find_selling_title_more_button",
+                return_value=None,
+            ),
+            patch(
+                "src.facebook.remover._find_selling_card_anchor_by_title",
+                return_value=more_btn,
+            ),
+            patch("src.facebook.remover._menu_open", return_value=True),
+            patch(
+                "src.facebook.remover._click_menu_action",
+                return_value=True,
+            ) as menu,
+            patch("src.facebook.remover._confirm_if_needed") as confirm,
+            patch("src.facebook.remover._dismiss_delete_survey_if_needed"),
+            patch(
+                "src.facebook.remover._title_still_on_selling_shelf",
+                return_value=False,
+            ),
+        ):
+            ok = remove_from_selling_by_title(
+                page, ["2018 Audi Q5"], action="delete"
+            )
+        self.assertTrue(ok)
+        more_btn.click.assert_called()
+        menu.assert_called_with(page, action="delete")
+        confirm.assert_called()
+
+    def test_unconfirmed_when_title_still_visible(self):
+        from src.facebook.remover import remove_from_selling_by_title
+
+        page = MagicMock()
+        more_btn = MagicMock()
+        with (
+            patch("src.facebook.remover._sort_selling_oldest_first"),
+            patch(
+                "src.facebook.remover._find_selling_title_more_button",
+                return_value=more_btn,
+            ),
+            patch("src.facebook.remover._menu_open", return_value=True),
+            patch("src.facebook.remover._click_menu_action", return_value=True),
+            patch("src.facebook.remover._confirm_if_needed"),
+            patch("src.facebook.remover._dismiss_delete_survey_if_needed"),
+            patch(
+                "src.facebook.remover._title_still_on_selling_shelf",
+                return_value=True,
+            ),
+        ):
+            ok = remove_from_selling_by_title(
+                page, ["2018 Audi Q5"], action="delete"
+            )
+        self.assertFalse(ok)
+
+
 if __name__ == "__main__":
     unittest.main()

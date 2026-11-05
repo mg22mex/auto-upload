@@ -1375,6 +1375,68 @@ def _find_selling_title_more_button(
     return None
 
 
+def _find_selling_card_anchor_by_title(
+    page: Page, needles: list[str]
+) -> Locator | None:
+    """Locate a selling-hub card via visible vehicle title text (no item_id href).
+
+    Seller Hub often omits ``/marketplace/item/`` anchors; match the title string
+    (e.g. ``2018 Audi Q5``) then return a locator inside that card for the ⋮ menu.
+    """
+    needles = _normalize_title_needles(needles)
+    if not needles:
+        return None
+    for needle in needles:
+        try:
+            hits = page.get_by_text(needle, exact=False)
+            count = hits.count()
+        except Exception:
+            continue
+        if not isinstance(count, int) or count == 0:
+            continue
+        for i in range(min(count, 40)):
+            node = hits.nth(i)
+            try:
+                if not node.is_visible():
+                    continue
+                text = (node.inner_text(timeout=800) or "").strip()
+            except Exception:
+                continue
+            # Prefer compact title nodes, not the whole page blob.
+            if len(text) > 240 and needle.lower() not in text.lower()[:240]:
+                continue
+            # Climb to card wrapper that also has a ⋮ / Más opciones control.
+            for xpath in (
+                "xpath=ancestor::div[.//*[@aria-label='Más opciones' or "
+                "@aria-label='More options' or contains(@aria-label,'Más opciones') or "
+                "contains(@aria-label,'More options') or "
+                "contains(@aria-label,'More') or contains(@aria-label,'Más')]][1]",
+                "xpath=ancestor::div[.//div[@aria-haspopup='menu']][1]",
+                "xpath=ancestor::div[8]",
+                "xpath=ancestor::div[6]",
+            ):
+                try:
+                    card = node.locator(xpath).first
+                    if card.count() == 0:
+                        continue
+                    # Prefer returning the more-button inside the card when present.
+                    for selector in _MORE_ARIA_SELECTORS:
+                        btn = card.locator(selector)
+                        if btn.count() > 0:
+                            try:
+                                if btn.first.is_visible():
+                                    return btn.first
+                            except Exception:
+                                return btn.first
+                    named = card.get_by_role("button", name=_MORE_MENU)
+                    if named.count() > 0:
+                        return named.first
+                    return card
+                except Exception:
+                    continue
+    return None
+
+
 def selling_title_present(
     page: Page,
     title_needles: list[str],
@@ -1424,6 +1486,26 @@ def _detail_looks_manually_gone(page: Page) -> bool:
     return False
 
 
+def _title_still_on_selling_shelf(
+    page: Page,
+    needles: list[str],
+    *,
+    max_scrolls: int = 12,
+) -> bool:
+    """True when titled more-menu or visible title text is still on the shelf."""
+    for _ in range(max_scrolls):
+        if _find_selling_title_more_button(page, needles) is not None:
+            return True
+        if _find_selling_card_anchor_by_title(page, needles) is not None:
+            return True
+        try:
+            page.mouse.wheel(0, 2600)
+            page.wait_for_timeout(600)
+        except Exception:
+            break
+    return False
+
+
 def remove_from_selling_by_title(
     page: Page,
     title_needles: list[str],
@@ -1431,10 +1513,13 @@ def remove_from_selling_by_title(
     action: str = "delete",
     max_scrolls: int = 24,
 ) -> bool:
-    """Delete/mark-sold via selling-shelf ``Más opciones para {title}`` menu.
+    """Hard-delete via selling shelf matched by vehicle title.
 
-    Current Marketplace selling UI often has no ``/marketplace/item/`` anchors;
-    cards expose titled more-menus instead.
+    Order:
+      1. ``Más opciones para {title}`` / ``More options for {title}`` aria menu
+      2. Visible title text on the card (e.g. ``2018 Audi Q5``) → ⋮ on that card
+      3. Click Delete listing / Eliminar publicación → confirm dialog
+      4. Verify the titled card vanished from ``/you/selling``
     """
     needles = _normalize_title_needles(title_needles)
     if not needles:
@@ -1449,9 +1534,15 @@ def remove_from_selling_by_title(
     _sort_selling_oldest_first(page)
 
     matched = None
+    match_via = ""
     for _ in range(max_scrolls):
         matched = _find_selling_title_more_button(page, needles)
         if matched is not None:
+            match_via = "aria-title-menu"
+            break
+        matched = _find_selling_card_anchor_by_title(page, needles)
+        if matched is not None:
+            match_via = "visible-title"
             break
         try:
             page.mouse.wheel(0, 2600)
@@ -1461,45 +1552,75 @@ def remove_from_selling_by_title(
 
     if matched is None:
         print(
-            f"  shelf title menu not found for needles={needles[:3]!r}",
+            f"  shelf title match not found for needles={needles[:3]!r}",
             flush=True,
         )
         return False
 
+    print(
+        f"  shelf title match via={match_via} needles={needles[:2]!r}",
+        flush=True,
+    )
     try:
         matched.scroll_into_view_if_needed(timeout=5_000)
     except Exception:
         pass
+
+    # Open ⋮ — matched may already be the more-button, or a card root.
+    menu_opened = False
     try:
-        matched.click(timeout=8_000)
+        matched.click(timeout=8_000, force=True)
         page.wait_for_timeout(1_200)
+        menu_opened = _menu_open(page)
     except Exception as exc:
         print(f"  shelf title more-click failed: {exc}", flush=True)
-        return False
+
+    if not menu_opened:
+        # If we clicked a title/card node, open ⋮ near it.
+        if _click_more_near_locator(page, matched):
+            menu_opened = True
+        else:
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+            print(
+                f"  shelf title ⋮ menu did not open for needles={needles[:2]!r}",
+                flush=True,
+            )
+            return False
 
     if not _click_menu_action(page, action=action):
         try:
             page.keyboard.press("Escape")
         except Exception:
             pass
+        print(
+            f"  shelf title Delete/Eliminar not clicked "
+            f"(needles={needles[:2]!r})",
+            flush=True,
+        )
         return False
     _confirm_if_needed(page, prefer_delete=(action == "delete"))
-    page.wait_for_timeout(1_500)
+    if action == "delete":
+        _dismiss_delete_survey_if_needed(page)
+    page.wait_for_timeout(1_800)
 
-    # Confirm: titled more-button for this listing is gone (or sold UI).
+    # Confirm removal: titled card must vanish from the selling shelf.
     try:
         page.goto(SELLING_URL, wait_until="domcontentloaded", timeout=90_000)
         page.wait_for_timeout(2_000)
     except Exception:
         pass
-    for _ in range(min(max_scrolls, 12)):
-        if _find_selling_title_more_button(page, needles) is None:
-            return True
-        try:
-            page.mouse.wheel(0, 2600)
-            page.wait_for_timeout(600)
-        except Exception:
-            break
+    if not _title_still_on_selling_shelf(
+        page, needles, max_scrolls=min(max_scrolls, 12)
+    ):
+        print(
+            f"  shelf title delete verified — card gone "
+            f"(needles={needles[:2]!r})",
+            flush=True,
+        )
+        return True
     print(
         f"  shelf title action={action} clicked; post-check still sees title "
         f"(treating as unconfirmed)",

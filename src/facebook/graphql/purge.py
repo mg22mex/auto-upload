@@ -315,10 +315,22 @@ def purge_old_listings_graphql(
 
             if not ok and allow_ui:
                 print(
-                    f"  RETRY item={item.item_id} via Playwright shelf delete",
+                    f"  RETRY item={item.item_id} via Playwright shelf delete "
+                    f"(title-match fallback if no item_id href)",
                     flush=True,
                 )
                 try:
+                    card_blob = " ".join(
+                        part
+                        for part in (
+                            item.title or "",
+                            item.age_text or "",
+                            item.card_text_like()
+                            if hasattr(item, "card_text_like")
+                            else "",
+                        )
+                        if part
+                    )
                     ok = hard_delete_listing_via_playwright(
                         page,
                         item_id=item.item_id,
@@ -329,6 +341,8 @@ def purge_old_listings_graphql(
                         log_dir=(root / "data/logs/facebook/purge")
                         if root
                         else None,
+                        vehicle_title=item.title or "",
+                        card_text=card_blob,
                     )
                     if ok:
                         stats.ui_fallback_deletes += 1

@@ -100,6 +100,64 @@ def purge_unknown_age_when_total(max_days: float) -> bool:
     return float(max_days) <= 0.0
 
 
+def _title_needles_for_purge(
+    *,
+    store: SyncStore,
+    account_id: str,
+    item_id: str,
+    autosell_id: str,
+    vehicle_title: str = "",
+    card_text: str = "",
+) -> list[str]:
+    """Build title needles for Seller Hub delete when item_id href is missing."""
+    needles: list[str] = []
+    title = (vehicle_title or "").strip()
+    if len(title) >= 5:
+        needles.append(title)
+    # Card text often starts with "YYYY Brand Model … Listed on …"
+    blob = (card_text or "").strip()
+    if blob:
+        # Take first line / chunk before Listed on / Publicado.
+        chunk = re.split(
+            r"(?i)\b(?:listed on|publicado)\b",
+            blob,
+            maxsplit=1,
+        )[0].strip()
+        chunk = re.sub(r"\s+", " ", chunk)
+        if len(chunk) >= 5:
+            needles.append(chunk[:120])
+        # Year + brand + model style: "2018 Audi Q5"
+        m = re.search(
+            r"\b(19|20)\d{2}\s+[A-Za-zÁÉÍÓÚÑáéíóúñ][A-Za-zÁÉÍÓÚÑáéíóúñ0-9\-\s]{2,60}",
+            blob,
+        )
+        if m:
+            needles.append(m.group(0).strip()[:80])
+
+    catalog = _catalog_by_autosell_id()
+    aid = (autosell_id or "").strip()
+    if not aid or aid == item_id:
+        row = _lookup_db_row(store, account_id, item_id)
+        if row is not None:
+            aid = str(row["autosell_id"] or "")
+    vehicle = catalog.get(aid) if aid else None
+    if vehicle is not None:
+        try:
+            needles.extend(_match_needles(vehicle))
+        except Exception:
+            pass
+        vt = str(getattr(vehicle, "title", "") or "").strip()
+        if len(vt) >= 5:
+            needles.append(vt)
+
+    # Dedupe longest-first (same as remover).
+    return sorted(
+        {n.strip() for n in needles if n and len(n.strip()) >= 5},
+        key=len,
+        reverse=True,
+    )
+
+
 def hard_delete_listing_via_playwright(
     page: Page,
     *,
@@ -109,8 +167,15 @@ def hard_delete_listing_via_playwright(
     store: SyncStore,
     account_id: str,
     log_dir: Path | None = None,
+    vehicle_title: str = "",
+    card_text: str = "",
+    title_needles: list[str] | None = None,
 ) -> bool:
-    """Playwright hard-delete for one shelf item (GraphQL failure / rate-limit fallback)."""
+    """Playwright hard-delete for one shelf item (GraphQL failure / rate-limit fallback).
+
+    When the card has no ``/marketplace/item/{id}`` href, matches by vehicle
+    title (⋮ → Delete listing / Eliminar → confirm) and verifies the card is gone.
+    """
     from src.facebook.remover import remove_vehicle_listing
 
     href = listing_url or ""
@@ -119,19 +184,48 @@ def hard_delete_listing_via_playwright(
     if not href and item_id:
         href = f"https://www.facebook.com/marketplace/item/{item_id}/"
 
-    ok = False
-    try:
-        ok = _remove_from_selling_shelf(
-            page,
-            item_id,
-            action="delete",
-            confirm_gone=True,
+    needles = list(title_needles or [])
+    if not needles:
+        needles = _title_needles_for_purge(
+            store=store,
+            account_id=account_id,
+            item_id=item_id,
+            autosell_id=autosell_id,
+            vehicle_title=vehicle_title,
+            card_text=card_text,
         )
-    except Exception as exc:
+
+    ok = False
+    if item_id:
+        try:
+            ok = _remove_from_selling_shelf(
+                page,
+                item_id,
+                action="delete",
+                confirm_gone=True,
+            )
+        except Exception as exc:
+            print(
+                f"  UI shelf delete miss item={item_id}: {exc}",
+                flush=True,
+            )
+
+    # Title-based Seller Hub delete when item_id link is missing / unconfirmed.
+    if not ok and needles:
         print(
-            f"  UI shelf delete miss item={item_id}: {exc}",
+            f"  UI title-match delete needles={needles[:3]!r} "
+            f"item={item_id or '?'}",
             flush=True,
         )
+        try:
+            ok = remove_from_selling_by_title(
+                page,
+                needles,
+                action="delete",
+            )
+        except Exception as exc:
+            print(f"  UI title-match delete fail item={item_id}: {exc}", flush=True)
+            ok = False
 
     if not ok and href:
         try:
@@ -148,6 +242,7 @@ def hard_delete_listing_via_playwright(
                     store=store,
                     account_id=account_id,
                     skip_graphql=True,  # already tried GraphQL; DOM only
+                    title_needles=needles or None,
                 )
             )
         except Exception as exc:
@@ -2141,11 +2236,33 @@ def purge_old_listings_on_page(
         autosell_id = str(row["autosell_id"]) if row is not None else card.item_id
 
         ok = False
+        needles = _title_needles_for_purge(
+            store=store,
+            account_id=account_id,
+            item_id=card.item_id,
+            autosell_id=autosell_id,
+            vehicle_title="",
+            card_text=card.card_text or card.age_text or "",
+        )
+        # Catalog needles only (no detail-page navigation mid-shelf purge).
+        vehicle = catalog.get(autosell_id) if autosell_id else None
+        if vehicle is not None:
+            try:
+                needles = sorted(
+                    set(needles) | set(_match_needles(vehicle)),
+                    key=len,
+                    reverse=True,
+                )
+            except Exception:
+                pass
+
         # Empty shelf DOM / DB fallback: delete via titled Más opciones menu.
         if used_db_fallback:
-            needles = _title_needles_for_row(
-                store, account_id, card, catalog, page
-            )
+            if not needles:
+                # Last resort for DB-only rows: may open detail once for title.
+                needles = _title_needles_for_row(
+                    store, account_id, card, catalog, page
+                )
             print(
                 f"  title-menu delete needles={needles[:3]!r} "
                 f"autosell_id={autosell_id}",
@@ -2162,6 +2279,15 @@ def purge_old_listings_on_page(
                 action="delete",
                 confirm_gone=True,
             )
+            if not ok and needles:
+                print(
+                    f"  item_id href miss — title-match delete "
+                    f"needles={needles[:3]!r}",
+                    flush=True,
+                )
+                ok = remove_from_selling_by_title(
+                    page, needles, action="delete"
+                )
 
         if not ok and listing_url and not used_db_fallback:
             try:
@@ -2176,6 +2302,7 @@ def purge_old_listings_on_page(
                         require_verified=True,
                         store=store,
                         account_id=account_id,
+                        title_needles=needles or None,
                     )
                 )
             except Exception as exc:
