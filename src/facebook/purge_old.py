@@ -72,6 +72,14 @@ _MONTHS_EN = {
     "dec": 12,
 }
 
+# Clicks / Marketplace meta — not a listing date (must precede calendar parsers).
+_CLICKS_META_RE = re.compile(
+    r"listed\s+on\s+marketplace|publicado\s+en\s+marketplace|"
+    r"clicks?\s+on\s+listing|clics?\s+en\s+la\s+publicaci[oó]n|"
+    r"visualizaciones",
+    re.I,
+)
+
 
 @dataclass
 class ShelfListing:
@@ -281,18 +289,152 @@ def _age_from_calendar_date(
     return max(0.0, (when - posted).total_seconds() / 86400.0)
 
 
-def parse_listing_age_days(text: str, *, now: datetime | None = None) -> float | None:
-    """Parse Marketplace age strings (EN/ES) into approximate age in days.
+def _parse_slash_date_age(
+    a: int,
+    b: int,
+    *,
+    year: int,
+    when: datetime,
+    year_explicit: bool,
+    prefer_md: bool = True,
+) -> float | None:
+    """Age from ``a/b`` slash date. ``10/24`` → Oct 24 (US MM/DD) when unambiguous."""
+    candidates: list[tuple[int, int]] = []
+    if a > 12 and 1 <= b <= 12:
+        candidates.append((b, a))  # DD/MM → (month, day)
+    elif b > 12 and 1 <= a <= 12:
+        candidates.append((a, b))  # MM/DD
+    elif 1 <= a <= 12 and 1 <= b <= 12:
+        # Ambiguous: Seller Hub US labels are MM/DD (10/24 = Oct 24).
+        candidates = [(a, b), (b, a)] if prefer_md else [(b, a), (a, b)]
+    ages: list[float] = []
+    for month, day in candidates:
+        if not (1 <= month <= 12 and 1 <= day <= 31):
+            continue
+        age = _age_from_calendar_date(
+            year, month, day, when=when, year_explicit=year_explicit
+        )
+        if age is not None and age <= 400:
+            ages.append(age)
+    if not ages:
+        return None
+    # Prefer first candidate (MM/DD when prefer_md); else oldest (purge-safe).
+    return ages[0] if prefer_md else max(ages)
 
-    Handles relative phrases and absolute shelf labels such as
-    ``Listed on 10/24``, ``Listed on Oct 24``, ``Publicado el 24/10``.
 
-    Returns ``None`` when no age phrase is recognized.
+def parse_explicit_dom_calendar_age(
+    text: str, *, now: datetime | None = None
+) -> float | None:
+    """Strict calendar-date age from DOM labels (overrides GraphQL/DB).
+
+    Recognizes ``Listed on 10/24``, ``Publicado el 24/10``, ``Oct 24``, and bare
+    ``10/24`` / ``10/28``. Ignores relative phrases and clicks meta so a wrong
+    ``live_age_days`` (~4.9d) cannot beat an explicit shelf date.
     """
-    blob = " ".join((text or "").lower().split())
+    raw = text or ""
+    # Drop clicks / Marketplace meta so they cannot confuse slash matching.
+    scrubbed = _CLICKS_META_RE.sub(" ", raw)
+    blob = " ".join(scrubbed.lower().split())
     if not blob:
         return None
     when = now or datetime.now(timezone.utc)
+
+    def _year_from(group: str | None) -> tuple[int, bool]:
+        if group:
+            year = int(group)
+            if year < 100:
+                year += 2000
+            return year, True
+        return when.year, False
+
+    # "Listed on 10/24" / "Listed on 10/24/2025" (US MM/DD) — not Marketplace.
+    m = re.search(
+        r"listed\s+on\s+(?!marketplace)(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?",
+        blob,
+    )
+    if m:
+        year, explicit = _year_from(m.group(3))
+        age = _age_from_calendar_date(
+            year, int(m.group(1)), int(m.group(2)), when=when, year_explicit=explicit
+        )
+        if age is not None:
+            return age
+
+    # "Publicado el/en 24/10" (ES DD/MM).
+    m = re.search(
+        r"publicado\s+(?:el|en)\s+(?!marketplace)(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?",
+        blob,
+    )
+    if m:
+        year, explicit = _year_from(m.group(3))
+        age = _age_from_calendar_date(
+            year, int(m.group(2)), int(m.group(1)), when=when, year_explicit=explicit
+        )
+        if age is not None:
+            return age
+
+    # "Publicado el 20 de agosto"
+    m = re.search(
+        r"(?:publicado\s+el|listed\s+on)\s+(\d{1,2})\s+de\s+([a-záéíóúñ]+)",
+        blob,
+    )
+    if m:
+        month = _MONTHS_ES.get(m.group(2))
+        if month:
+            age = _age_from_calendar_date(when.year, month, int(m.group(1)), when=when)
+            if age is not None:
+                return age
+
+    # "Listed on Oct 24" / "Listed on October 24, 2025"
+    m = re.search(
+        r"listed\s+on\s+(?!marketplace)([a-z]+)\s+(\d{1,2})(?:,\s*(\d{4}))?",
+        blob,
+    )
+    if m:
+        month = _MONTHS_EN.get(m.group(1))
+        if month:
+            year, explicit = _year_from(m.group(3))
+            age = _age_from_calendar_date(
+                year, month, int(m.group(2)), when=when, year_explicit=explicit
+            )
+            if age is not None:
+                return age
+
+    # Bare slash dates: 10/24, 10/28, 24/10, 28/10 (after scrubbing clicks meta).
+    for m in re.finditer(
+        r"(?<!\d)(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?(?!\d)",
+        blob,
+    ):
+        year, explicit = _year_from(m.group(3))
+        age = _parse_slash_date_age(
+            int(m.group(1)),
+            int(m.group(2)),
+            year=year,
+            when=when,
+            year_explicit=explicit,
+            prefer_md=True,
+        )
+        if age is not None:
+            return age
+
+    return None
+
+
+def parse_listing_age_days(text: str, *, now: datetime | None = None) -> float | None:
+    """Parse Marketplace age strings (EN/ES) into approximate age in days.
+
+    Prefers explicit calendar shelf labels (``10/24``, ``Listed on Oct 24``,
+    ``Publicado el 24/10``) over relative phrases so DOM dates drive the
+    7-day hard purge.
+    """
+    when = now or datetime.now(timezone.utc)
+    cal = parse_explicit_dom_calendar_age(text, now=when)
+    if cal is not None:
+        return cal
+
+    blob = " ".join((text or "").lower().split())
+    if not blob:
+        return None
 
     if re.search(r"\b(just now|hace un momento|hace unos momentos|publicado hoy|listed today)\b", blob):
         return 0.0
@@ -339,111 +481,6 @@ def parse_listing_age_days(text: str, *, now: datetime | None = None) -> float |
     if m:
         return float(int(m.group(1) or m.group(2)) * 30)
 
-    # Absolute numeric: "Listed on 10/24" / "Listed on 10/24/2025" (US MM/DD).
-    m = re.search(
-        r"listed\s+on\s+(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?",
-        blob,
-    )
-    if m:
-        month, day = int(m.group(1)), int(m.group(2))
-        year_raw = m.group(3)
-        year_explicit = bool(year_raw)
-        if year_raw:
-            year = int(year_raw)
-            if year < 100:
-                year += 2000
-        else:
-            year = when.year
-        age = _age_from_calendar_date(
-            year, month, day, when=when, year_explicit=year_explicit
-        )
-        if age is not None:
-            return age
-
-    # Absolute numeric ES: "Publicado el 24/10" / "Publicado el 24/10/2025" (DD/MM).
-    m = re.search(
-        r"publicado\s+(?:el|en)\s+(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?",
-        blob,
-    )
-    if m:
-        day, month = int(m.group(1)), int(m.group(2))
-        year_raw = m.group(3)
-        year_explicit = bool(year_raw)
-        if year_raw:
-            year = int(year_raw)
-            if year < 100:
-                year += 2000
-        else:
-            year = when.year
-        age = _age_from_calendar_date(
-            year, month, day, when=when, year_explicit=year_explicit
-        )
-        if age is not None:
-            return age
-
-    # Absolute: "Publicado el 20 de agosto" / "Listed on August 20"
-    m = re.search(
-        r"(?:publicado\s+el|listed\s+on)\s+(\d{1,2})\s+de\s+([a-záéíóúñ]+)",
-        blob,
-    )
-    if m:
-        day = int(m.group(1))
-        month = _MONTHS_ES.get(m.group(2))
-        if month:
-            age = _age_from_calendar_date(when.year, month, day, when=when)
-            if age is not None:
-                return age
-
-    m = re.search(
-        r"listed\s+on\s+([a-z]+)\s+(\d{1,2})(?:,\s*(\d{4}))?",
-        blob,
-    )
-    if m:
-        month = _MONTHS_EN.get(m.group(1))
-        day = int(m.group(2))
-        year_raw = m.group(3)
-        year = int(year_raw) if year_raw else when.year
-        if month:
-            age = _age_from_calendar_date(
-                year, month, day, when=when, year_explicit=bool(year_raw)
-            )
-            if age is not None:
-                return age
-
-    # Bare slash dates (ES UI often drops the "Publicado" prefix): 10/24, 24/10.
-    for m in re.finditer(
-        r"(?<!\d)(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?(?!\d)",
-        blob,
-    ):
-        a, b = int(m.group(1)), int(m.group(2))
-        year_raw = m.group(3)
-        year_explicit = bool(year_raw)
-        if year_raw:
-            year = int(year_raw)
-            if year < 100:
-                year += 2000
-        else:
-            year = when.year
-        candidates: list[tuple[int, int]] = []
-        if a > 12 and 1 <= b <= 12:
-            candidates.append((b, a))  # DD/MM → (month, day)
-        elif b > 12 and 1 <= a <= 12:
-            candidates.append((a, b))  # MM/DD
-        elif 1 <= a <= 12 and 1 <= b <= 12:
-            # Ambiguous: try MM/DD then DD/MM; prefer older (purge-safe).
-            candidates.extend([(a, b), (b, a)])
-        ages: list[float] = []
-        for month, day in candidates:
-            if not (1 <= month <= 12 and 1 <= day <= 31):
-                continue
-            age = _age_from_calendar_date(
-                year, month, day, when=when, year_explicit=year_explicit
-            )
-            if age is not None and age <= 400:
-                ages.append(age)
-        if ages:
-            return max(ages)
-
     return None
 
 
@@ -455,31 +492,62 @@ def resolve_listing_age_for_purge(
     db_age_days: float | None = None,
     now: datetime | None = None,
 ) -> tuple[float | None, str]:
-    """Resolve purge age: live FB shelf/GraphQL wins over ``sync.db``.
+    """Resolve purge age: explicit DOM calendar date beats everything else.
 
-    Re-parses ``Listed on …`` / relative age text when ``live_age_days`` is
-    missing. Database ``posted_at`` is used only when the live platform gives
-    no age signal.
+    Priority:
+      1. Explicit shelf calendar date (``10/24``, ``Listed on 10/28``, …)
+      2. Other live age text / relative phrases
+      3. Numeric ``live_age_days`` (GraphQL creation_time etc.)
+      4. ``sync.db`` ``posted_at`` (last resort only)
     """
     when = now or datetime.now(timezone.utc)
-    age = live_age_days
-    source = "live"
-    if age is None:
-        blob = f"{live_age_text} {live_card_text}".strip()
-        age = parse_listing_age_days(blob, now=when)
-        if age is not None:
-            source = "live_text"
+    blob = f"{live_age_text} {live_card_text}".strip()
 
-    if age is not None:
-        if db_age_days is not None and abs(float(age) - float(db_age_days)) >= 0.5:
+    # 1) Strict DOM calendar date — source of truth for 7-day hard purge.
+    cal = parse_explicit_dom_calendar_age(blob, now=when)
+    if cal is not None:
+        source = "dom_calendar"
+        if live_age_days is not None and abs(float(cal) - float(live_age_days)) >= 0.5:
             print(
-                f"  age conflict: live={age:.1f}d vs sync.db={db_age_days:.1f}d "
+                f"  age override: DOM calendar={cal:.1f}d "
+                f"overrides live_age_days={float(live_age_days):.1f}d",
+                flush=True,
+            )
+            source = "dom_calendar (live_age ignored)"
+        if db_age_days is not None and abs(float(cal) - float(db_age_days)) >= 0.5:
+            print(
+                f"  age conflict: DOM calendar={cal:.1f}d vs sync.db={db_age_days:.1f}d "
+                f"— using DOM date",
+                flush=True,
+            )
+            source = f"{source} (db={db_age_days:.1f}d ignored)"
+        return float(cal), source
+
+    # 2) Relative / other live text (no explicit calendar).
+    if blob:
+        text_age = parse_listing_age_days(blob, now=when)
+        if text_age is not None:
+            if db_age_days is not None and abs(float(text_age) - float(db_age_days)) >= 0.5:
+                print(
+                    f"  age conflict: live_text={text_age:.1f}d vs sync.db={db_age_days:.1f}d "
+                    f"— using live platform state",
+                    flush=True,
+                )
+                return float(text_age), f"live_text (db={db_age_days:.1f}d ignored)"
+            return float(text_age), "live_text"
+
+    # 3) Numeric live age (GraphQL) when no DOM date/text age.
+    if live_age_days is not None:
+        if db_age_days is not None and abs(float(live_age_days) - float(db_age_days)) >= 0.5:
+            print(
+                f"  age conflict: live={float(live_age_days):.1f}d vs sync.db={db_age_days:.1f}d "
                 f"— using live platform state",
                 flush=True,
             )
-            return float(age), f"{source} (db={db_age_days:.1f}d ignored)"
-        return float(age), source
+            return float(live_age_days), f"live (db={db_age_days:.1f}d ignored)"
+        return float(live_age_days), "live"
 
+    # 4) sync.db last resort.
     if db_age_days is not None:
         return float(db_age_days), "sync.db posted_at"
     return None, "unknown"
@@ -493,14 +561,6 @@ def is_purge_age_eligible(age_days: float, max_days: float) -> bool:
     if float(max_days) <= 0:
         return True
     return float(age_days) >= float(max_days)
-
-
-_CLICKS_META_RE = re.compile(
-    r"listed\s+on\s+marketplace|publicado\s+en\s+marketplace|"
-    r"clicks?\s+on\s+listing|clics?\s+en\s+la\s+publicaci[oó]n|"
-    r"visualizaciones",
-    re.I,
-)
 
 
 def extract_listed_on_snip(text: str) -> str:

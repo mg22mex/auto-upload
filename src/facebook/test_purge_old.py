@@ -78,7 +78,52 @@ class TestParseListingAgeDays(unittest.TestCase):
         assert age is not None
         self.assertGreaterEqual(age, 12.0)
         self.assertIn("ignored", source)
-        self.assertTrue(is_purge_age_eligible(age, 7.0))
+
+    def test_dom_calendar_overrides_wrong_live_age_days(self):
+        """GraphQL ~4.9d must not SKIP-young cards labeled 10/24 or 10/28."""
+        now = datetime(2026, 11, 5, tzinfo=timezone.utc)
+        age24, src24 = resolve_listing_age_for_purge(
+            live_age_days=4.9,
+            live_age_text="10/24",
+            live_card_text=(
+                "2022 Mercedes-Benz Listed on Marketplace · 12 clicks "
+                "on listing 10/24 $450000"
+            ),
+            db_age_days=4.9,
+            now=now,
+        )
+        self.assertIsNotNone(age24)
+        assert age24 is not None
+        self.assertGreaterEqual(age24, 12.0)
+        self.assertLess(age24, 13.0)
+        self.assertIn("dom_calendar", src24)
+        self.assertTrue(is_purge_age_eligible(age24, 7.0))
+
+        age28, src28 = resolve_listing_age_for_purge(
+            live_age_days=4.9,
+            live_age_text="10/28",
+            live_card_text="1957 Plymouth Savoy 10/28",
+            db_age_days=2.0,
+            now=now,
+        )
+        self.assertIsNotNone(age28)
+        assert age28 is not None
+        self.assertGreaterEqual(age28, 8.0)
+        self.assertLess(age28, 9.0)
+        self.assertIn("dom_calendar", src28)
+        self.assertTrue(is_purge_age_eligible(age28, 7.0))
+
+    def test_bare_oct_dates_vs_nov5(self):
+        from src.facebook.purge_old import parse_explicit_dom_calendar_age
+
+        now = datetime(2026, 11, 5, tzinfo=timezone.utc)
+        age24 = parse_explicit_dom_calendar_age("10/24", now=now)
+        age28 = parse_explicit_dom_calendar_age("10/28", now=now)
+        self.assertAlmostEqual(age24 or -1, 12.0)
+        self.assertAlmostEqual(age28 or -1, 8.0)
+        assert age24 is not None and age28 is not None
+        self.assertTrue(is_purge_age_eligible(age24, 7.0))
+        self.assertTrue(is_purge_age_eligible(age28, 7.0))
 
     def test_exactly_max_days_is_eligible(self):
         self.assertTrue(is_purge_age_eligible(7.0, 7.0))
