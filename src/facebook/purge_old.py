@@ -451,7 +451,10 @@ def parse_explicit_dom_calendar_age(
         )
         return age
 
-    # Bare slash dates: collect ALL, pick oldest plausible (10/24 over newer 11/1).
+    # Bare slash dates: US Seller Hub is MM/DD (10/24=Oct 24). Collect each
+    # primary reading and pick the oldest so a newer meta date (11/1→4.9d)
+    # cannot beat the real listing date (10/24→12d). Do NOT flip ambiguous
+    # pairs to DD/MM here — that turns 11/1 into Jan 11 (~300d) falsely.
     bare_ages: list[tuple[float, str]] = []
     for m in re.finditer(
         r"(?<!\d)(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?(?!\d)",
@@ -459,24 +462,19 @@ def parse_explicit_dom_calendar_age(
     ):
         year, explicit = _year_from(m.group(3))
         a, b = int(m.group(1)), int(m.group(2))
-        md = _parse_slash_md(a, b, prefer_md=True)
+        # Unambiguous ES DD/MM (24/10): a>12.
+        prefer_md = not (a > 12 and 1 <= b <= 12)
+        md = _parse_slash_md(a, b, prefer_md=prefer_md)
         if md is None:
             continue
         month, day = md
         age = _age_from_calendar_date(
             year, month, day, when=when, year_explicit=explicit
         )
-        if age is not None and 0 <= age <= 400:
+        if age is not None and 0 <= age <= 120:
+            # Cap at ~4 months — rejects bogus far-past flips while keeping
+            # October listings in a November purge window.
             bare_ages.append((age, f"bare {month:02d}/{day:02d}"))
-        # Ambiguous pair: also consider DD/MM so Oct 24 as 24/10 isn't lost.
-        if 1 <= a <= 12 and 1 <= b <= 12 and a != b:
-            alt = _parse_slash_md(a, b, prefer_md=False)
-            if alt is not None and alt != (month, day):
-                age_alt = _age_from_calendar_date(
-                    year, alt[0], alt[1], when=when, year_explicit=explicit
-                )
-                if age_alt is not None and 0 <= age_alt <= 400:
-                    bare_ages.append((age_alt, f"bare_alt {alt[0]:02d}/{alt[1]:02d}"))
 
     if bare_ages:
         bare_ages.sort(key=lambda t: t[0], reverse=True)

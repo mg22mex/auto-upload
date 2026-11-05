@@ -127,6 +127,8 @@ class TestParseListingAgeDays(unittest.TestCase):
         blob = "Boosted 11/1 · 2022 Mercedes-Benz 10/24 $450000"
         age = parse_explicit_dom_calendar_age(blob, now=now)
         self.assertEqual(age, 12.0)
+        # 11/1 alone would be ~4.9d — must not win over 10/24.
+        self.assertEqual(parse_explicit_dom_calendar_age("11/1", now=now), 4.0)
         age_r, src = resolve_listing_age_for_purge(
             live_age_days=4.9,
             live_age_text="",
