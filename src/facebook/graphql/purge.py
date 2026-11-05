@@ -6,10 +6,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+from playwright.sync_api import Page
+
 from src.facebook.graphql.client import GraphQLClient
 from src.facebook.graphql.errors import (
     FacebookGraphqlFallback,
     is_phantom_delete_error,
+    is_rate_limit_error,
 )
 from src.facebook.graphql.remover import delete_listing_graphql, extract_item_id
 from src.facebook.graphql.selling import ActiveListing, fetch_active_selling_listings
@@ -21,9 +24,10 @@ from src.facebook.purge_old import (
     _lookup_db_row,
     _posted_at_age_days,
     _should_keep_listing,
+    hard_delete_listing_via_playwright,
     purge_unknown_age_when_total,
 )
-from src.facebook.util import random_delay
+from src.facebook.util import env_bool, random_delay
 from src.store.db import SyncStore
 
 
@@ -32,7 +36,7 @@ def purge_old_listings_graphql(
     store: SyncStore,
     *,
     account_id: str,
-    max_days: float = 3.0,
+    max_days: float = 7.0,
     dry_run: bool = False,
     max_deletes: int | None = None,
     delay_min_sec: float = 2.0,
@@ -42,11 +46,13 @@ def purge_old_listings_graphql(
     keep_title_re: re.Pattern[str] | None = None,
     root: Path | None = None,
     client: GraphQLClient | None = None,
+    page: Page | None = None,
 ) -> PurgeStats:
     """Discover active listings via GraphQL/HTTP and hard-delete old ones.
 
-    Uses ``data/graphql/delete_listing.json`` (``useCometMarketplaceForSaleItemDeleteMutation``).
-    Does not touch Playwright DOM.
+    Uses ``data/graphql/delete_listing.json``. When GraphQL delete fails or is
+    rate-limited and ``page`` is provided, falls back to Playwright shelf delete
+    (``FB_GQL_FALLBACK_UI``, default on).
     """
     stats = PurgeStats()
     owns = client is None
@@ -148,8 +154,11 @@ def purge_old_listings_graphql(
             flush=True,
         )
 
-        for item in targets:
+        allow_ui = env_bool("FB_GQL_FALLBACK_UI", True) and page is not None
+        remaining_after_cap = 0
+        for idx, item in enumerate(targets):
             if max_deletes is not None and stats.deleted >= max_deletes:
+                remaining_after_cap = len(targets) - idx
                 print(f"  hit --max-deletes={max_deletes}; stopping", flush=True)
                 break
             age_label = (
@@ -170,6 +179,7 @@ def purge_old_listings_graphql(
             autosell_id = (
                 str(row["autosell_id"]) if row is not None else item.item_id
             )
+            ok = False
             try:
                 ok = delete_listing_graphql(
                     session,
@@ -177,7 +187,7 @@ def purge_old_listings_graphql(
                     autosell_id=autosell_id,
                     root=root,
                     client=gql,
-                    verify=False,
+                    verify=True,
                 )
             except Exception as exc:
                 # Unknown-age ghosts: FB field_exception on delete — ignore, not FAIL.
@@ -190,11 +200,46 @@ def purge_old_listings_graphql(
                     )
                     _clear_sync_mapping_if_any(store, account_id, item.item_id)
                     continue
-                print(f"  FAIL item={item.item_id}: {exc}", flush=True)
+                why = "rate-limit" if is_rate_limit_error(exc) else "error"
+                print(
+                    f"  GraphQL delete {why} item={item.item_id}: {exc}",
+                    flush=True,
+                )
                 ok = False
+
+            if not ok and allow_ui:
+                print(
+                    f"  RETRY item={item.item_id} via Playwright shelf delete",
+                    flush=True,
+                )
+                try:
+                    ok = hard_delete_listing_via_playwright(
+                        page,
+                        item_id=item.item_id,
+                        listing_url=item.href,
+                        autosell_id=autosell_id,
+                        store=store,
+                        account_id=account_id,
+                        log_dir=(root / "data/logs/facebook/purge")
+                        if root
+                        else None,
+                    )
+                    if ok:
+                        stats.ui_fallback_deletes += 1
+                except Exception as exc:
+                    print(
+                        f"  Playwright fallback FAIL item={item.item_id}: {exc}",
+                        flush=True,
+                    )
+                    ok = False
 
             if not ok:
                 stats.failed += 1
+                print(
+                    f"  FAIL item={item.item_id}: delete unconfirmed "
+                    f"(GraphQL + UI)",
+                    flush=True,
+                )
                 continue
 
             row = _lookup_db_row(store, account_id, item.item_id)
@@ -216,10 +261,25 @@ def purge_old_listings_graphql(
             stats.deleted += 1
             random_delay(delay_min_sec, delay_max_sec)
 
+        if remaining_after_cap > 0:
+            stats.incomplete = True
+            stats.failed += remaining_after_cap
+            print(
+                f"  [{account_id}] INCOMPLETE: {remaining_after_cap} age-eligible "
+                f"listing(s) left after max_deletes={max_deletes}",
+                flush=True,
+            )
+
         if stats.skipped_phantom:
             print(
                 f"  [{account_id}] ignored phantom/archived "
                 f"(field_exception): {stats.skipped_phantom}",
+                flush=True,
+            )
+        if stats.ui_fallback_deletes:
+            print(
+                f"  [{account_id}] Playwright fallback deletes: "
+                f"{stats.ui_fallback_deletes}",
                 flush=True,
             )
     finally:

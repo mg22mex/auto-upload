@@ -1,8 +1,10 @@
 """Pre-flight Marketplace shelf/history cleanup before slot allocation.
 
-Runs at the start of live ``run_sync`` so old selling-shelf cards are deleted
-(and ``sync.db`` updated) before the allocator plans creates. Keep filters
-protect specific listings (e.g. today's Ford Mustang GT).
+Runs at the start of live ``run_sync`` so every listing older than 7 days is
+hard-deleted (and ``sync.db`` updated) **before** the allocator plans creates.
+
+Zero-tolerance: any failed / unconfirmed 7-day delete aborts the sync cycle
+(``PreflightPurgeAborted``) so creates never run on a dirty shelf.
 """
 from __future__ import annotations
 
@@ -11,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from src.facebook.errors import PreflightPurgeAborted
 from src.facebook.purge_old import PurgeStats, purge_old_listings_on_page
 from src.facebook.session import (
     format_session_login_error,
@@ -23,17 +26,22 @@ from src.facebook.session import (
 from src.facebook.util import env_bool, env_float, env_str
 from src.store.db import SyncStore
 
+# Absolute first-step rule: hard-delete listings older than this many days.
+DEFAULT_MAX_DAYS = 7.0
+
 
 @dataclass
 class PreflightPurgeConfig:
     enabled: bool = True
-    max_days: float = 0.0
+    max_days: float = DEFAULT_MAX_DAYS
     keep_autosell_ids: set[str] = field(default_factory=set)
     keep_item_ids: set[str] = field(default_factory=set)
     keep_title_re: re.Pattern[str] | None = None
     max_deletes: int | None = None
     delay_min_sec: float = 2.0
     delay_max_sec: float = 4.0
+    # Abort sync when any age-eligible delete fails / is unconfirmed (default ON).
+    abort_on_failed_deletes: bool = True
 
 
 @dataclass
@@ -45,6 +53,7 @@ class PreflightPurgeResult:
     deleted: int = 0
     failed: int = 0
     dry_run_candidates: int = 0
+    aborted: bool = False
     by_account: dict[str, PurgeStats] = field(default_factory=dict)
 
 
@@ -68,7 +77,7 @@ def preflight_purge_config(config: dict[str, Any] | None = None) -> PreflightPur
 
     max_days = env_float(
         "FB_PREFLIGHT_PURGE_MAX_DAYS",
-        float(raw.get("max_days", 0.0)),
+        float(raw.get("max_days", DEFAULT_MAX_DAYS)),
         "PREFLIGHT_PURGE_MAX_DAYS",
     )
 
@@ -97,6 +106,13 @@ def preflight_purge_config(config: dict[str, Any] | None = None) -> PreflightPur
     else:
         max_deletes = None
 
+    abort_default = bool(raw.get("abort_on_failed_deletes", True))
+    abort_on_failed = env_bool(
+        "FB_PREFLIGHT_ABORT_ON_FAIL",
+        abort_default,
+        "PREFLIGHT_ABORT_ON_FAIL",
+    )
+
     return PreflightPurgeConfig(
         enabled=enabled,
         max_days=max_days,
@@ -106,6 +122,7 @@ def preflight_purge_config(config: dict[str, Any] | None = None) -> PreflightPur
         max_deletes=max_deletes,
         delay_min_sec=float(raw.get("delay_min_sec", 2.0)),
         delay_max_sec=float(raw.get("delay_max_sec", 4.0)),
+        abort_on_failed_deletes=abort_on_failed,
     )
 
 
@@ -117,14 +134,22 @@ def run_preflight_shelf_purge(
     root: Path,
     dry_run: bool = False,
     headless: bool | None = None,
+    raise_on_failure: bool | None = None,
 ) -> PreflightPurgeResult:
-    """Open each account session and purge old shelf listings (keep filters applied).
+    """Open each account session and purge shelf listings older than ``max_days``.
 
     Intended to run **before** slot allocation so ``sync.db`` live rows reflect
     the cleaned shelf. When ``dry_run`` is True, scans/report only (no deletes).
+
+    GraphQL deletes fall back to Playwright automatically on failure / rate-limit
+    (``FB_GQL_FALLBACK_UI``, default on). Any remaining failed delete aborts the
+    sync cycle when ``abort_on_failed_deletes`` is True (default).
     """
     cfg = preflight_purge_config(config)
     result = PreflightPurgeResult(accounts=list(account_ids))
+    should_raise = (
+        cfg.abort_on_failed_deletes if raise_on_failure is None else raise_on_failure
+    )
 
     if not cfg.enabled:
         result.skipped_reason = "disabled (sync.preflight_purge.enabled / FB_PREFLIGHT_PURGE)"
@@ -142,10 +167,11 @@ def run_preflight_shelf_purge(
             bool((config.get("facebook") or {}).get("headless", True)),
         )
 
-    print("=== Preflight shelf/history purge ===", flush=True)
+    print("=== Preflight shelf/history purge (7-day hard-delete first) ===", flush=True)
     print(
         f"Accounts: {', '.join(account_ids)}  max_days={cfg.max_days} "
-        f"(delete age > {cfg.max_days})  dry_run={dry_run}",
+        f"(delete age > {cfg.max_days}d)  dry_run={dry_run} "
+        f"abort_on_fail={should_raise and not dry_run}",
         flush=True,
     )
     if cfg.keep_autosell_ids:
@@ -164,13 +190,16 @@ def run_preflight_shelf_purge(
         print(f"Max deletes/account: {cfg.max_deletes}", flush=True)
     print("", flush=True)
 
-    from src.facebook.graphql.errors import FacebookGraphqlFallback
-    from src.facebook.graphql.mode import graphql_enabled, graphql_ui_fallback
+    from src.facebook.graphql.mode import graphql_enabled
 
     result.ran = True
     use_graphql = graphql_enabled()
     if use_graphql:
-        print("Preflight mode: GraphQL/HTTP (FB_USE_GRAPHQL=1)", flush=True)
+        print(
+            "Preflight mode: GraphQL/HTTP + Playwright fallback on delete fail "
+            "(FB_USE_GRAPHQL=1)",
+            flush=True,
+        )
 
     for account_id in account_ids:
         session_dir = resolve_session_dir(config, account_id, root)
@@ -180,83 +209,50 @@ def run_preflight_shelf_purge(
             flush=True,
         )
         try:
-            stats: PurgeStats | None = None
-            if use_graphql:
-                try:
-                    from src.facebook.graphql.purge import purge_old_listings_graphql
-                    from src.facebook.graphql.session_ctx import (
-                        extract_session_context_from_profile,
-                    )
-
-                    session = extract_session_context_from_profile(
-                        config,
-                        account_id,
-                        root=root,
-                        headless=headless,
-                    )
+            # Always open browser so GraphQL deletes can fall back to DOM.
+            with open_account_context(
+                config, account_id, root=root, headless=headless
+            ) as context:
+                page = get_page(context)
+                if not is_logged_in(page):
                     print(
-                        f"  [{account_id}] GraphQL session {session.redacted_summary()}",
+                        format_session_login_error(account_id, session_dir),
+                        file=__import__("sys").stderr,
                         flush=True,
                     )
-                    stats = purge_old_listings_graphql(
-                        session,
-                        store,
-                        account_id=account_id,
-                        max_days=cfg.max_days,
-                        dry_run=dry_run,
-                        max_deletes=cfg.max_deletes,
-                        delay_min_sec=cfg.delay_min_sec,
-                        delay_max_sec=cfg.delay_max_sec,
-                        keep_item_ids=cfg.keep_item_ids or None,
-                        keep_autosell_ids=cfg.keep_autosell_ids or None,
-                        keep_title_re=cfg.keep_title_re,
-                        root=root,
-                    )
-                except FacebookGraphqlFallback as exc:
-                    if not graphql_ui_fallback():
-                        raise
-                    print(
-                        f"  [{account_id}] GraphQL preflight fallback → UI ({exc})",
-                        flush=True,
-                    )
-                except Exception as exc:
-                    if not graphql_ui_fallback():
-                        raise
-                    print(
-                        f"  [{account_id}] GraphQL preflight error → UI ({exc})",
-                        flush=True,
-                    )
-
-            if stats is None:
-                with open_account_context(
-                    config, account_id, root=root, headless=headless
-                ) as context:
-                    page = get_page(context)
-                    if not is_logged_in(page):
-                        print(
-                            format_session_login_error(account_id, session_dir),
-                            file=__import__("sys").stderr,
-                            flush=True,
+                    result.failed += 1
+                    if should_raise and not dry_run:
+                        result.aborted = True
+                        raise PreflightPurgeAborted(
+                            f"Preflight abort: {account_id} not logged in — "
+                            f"cannot enforce 7-day hard-delete before sync"
                         )
-                        result.failed += 1
-                        continue
-                    stats = purge_old_listings_on_page(
-                        page,
-                        store,
-                        account_id=account_id,
-                        max_days=cfg.max_days,
-                        dry_run=dry_run,
-                        max_deletes=cfg.max_deletes,
-                        delay_min_sec=cfg.delay_min_sec,
-                        delay_max_sec=cfg.delay_max_sec,
-                        keep_item_ids=cfg.keep_item_ids or None,
-                        keep_autosell_ids=cfg.keep_autosell_ids or None,
-                        keep_title_re=cfg.keep_title_re,
-                        root=root,
-                    )
+                    continue
+                stats = purge_old_listings_on_page(
+                    page,
+                    store,
+                    account_id=account_id,
+                    max_days=cfg.max_days,
+                    dry_run=dry_run,
+                    max_deletes=cfg.max_deletes,
+                    delay_min_sec=cfg.delay_min_sec,
+                    delay_max_sec=cfg.delay_max_sec,
+                    keep_item_ids=cfg.keep_item_ids or None,
+                    keep_autosell_ids=cfg.keep_autosell_ids or None,
+                    keep_title_re=cfg.keep_title_re,
+                    root=root,
+                )
+        except PreflightPurgeAborted:
+            raise
         except Exception as exc:
             print(f"ERROR preflight {account_id}: {exc}", flush=True)
             result.failed += 1
+            if should_raise and not dry_run:
+                result.aborted = True
+                raise PreflightPurgeAborted(
+                    f"Preflight abort: {account_id} purge crashed ({exc}) — "
+                    f"refusing create/sync until 7-day hard-delete succeeds"
+                ) from exc
             continue
 
         result.by_account[account_id] = stats
@@ -268,13 +264,31 @@ def run_preflight_shelf_purge(
             f"  [{account_id}] preflight: found={stats.found} "
             f"deleted={stats.deleted} failed={stats.failed}"
             + (
+                f" ui_fallback={stats.ui_fallback_deletes}"
+                if stats.ui_fallback_deletes
+                else ""
+            )
+            + (
                 f" dry_candidates={stats.dry_run_candidates}"
                 if dry_run
                 else ""
-            ),
+            )
+            + (" INCOMPLETE" if stats.incomplete else ""),
             flush=True,
         )
         print("", flush=True)
+
+        if (
+            should_raise
+            and not dry_run
+            and (stats.failed > 0 or stats.incomplete)
+        ):
+            result.aborted = True
+            raise PreflightPurgeAborted(
+                f"Preflight abort: {account_id} left {stats.failed} "
+                f"unconfirmed/failed 7-day hard-delete(s) "
+                f"(deleted={stats.deleted}) — refusing create/sync"
+            )
 
     print(
         f"Preflight purge done: found={result.found} deleted={result.deleted} "
@@ -287,4 +301,11 @@ def run_preflight_shelf_purge(
         flush=True,
     )
     print("", flush=True)
+
+    if should_raise and not dry_run and result.failed > 0:
+        result.aborted = True
+        raise PreflightPurgeAborted(
+            f"Preflight abort: {result.failed} failed 7-day hard-delete(s) "
+            f"across accounts — refusing create/sync"
+        )
     return result

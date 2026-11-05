@@ -253,6 +253,7 @@ def remove_vehicle_listing(
     account_id: str | None = None,
     vehicle: Vehicle | None = None,
     title_needles: list[str] | None = None,
+    skip_graphql: bool = False,
 ) -> bool:
     """Remove a Marketplace listing.
 
@@ -309,10 +310,16 @@ def remove_vehicle_listing(
     )
 
     # Direct GraphQL hard-delete (skips fragile UI menus) when enabled.
-    if action == "delete" and graphql_enabled():
-        from src.facebook.graphql.errors import FacebookGraphqlFallback
+    # On failure / rate-limit / unconfirmed HTTP: always try Playwright shelf
+    # delete when FB_GQL_FALLBACK_UI=1 (default).
+    if action == "delete" and graphql_enabled() and not skip_graphql:
+        from src.facebook.graphql.errors import (
+            FacebookGraphqlFallback,
+            is_rate_limit_error,
+        )
         from src.facebook.graphql.remover import remove_vehicle_listing_graphql
 
+        allow_ui = graphql_ui_fallback()
         try:
             ok = remove_vehicle_listing_graphql(
                 page.context,
@@ -328,8 +335,25 @@ def remove_vehicle_listing(
             if ok:
                 print(f"  {autosell_id}: GraphQL hard-delete verified", flush=True)
                 return True
+            if allow_ui:
+                print(
+                    f"  {autosell_id}: GraphQL delete unconfirmed → Playwright UI",
+                    flush=True,
+                )
+            elif require_verified:
+                raise FacebookPostingError(
+                    f"GraphQL delete unconfirmed for {autosell_id} "
+                    f"and UI fallback disabled"
+                )
+            else:
+                print(
+                    f"  WARNING: {autosell_id}: GraphQL delete unconfirmed "
+                    f"(UI fallback disabled)",
+                    flush=True,
+                )
+                return False
         except FacebookGraphqlFallback as exc:
-            if not graphql_ui_fallback():
+            if not allow_ui:
                 if require_verified:
                     raise FacebookPostingError(
                         f"GraphQL delete unavailable and UI fallback disabled: {exc}"
@@ -343,13 +367,21 @@ def remove_vehicle_listing(
                 f"  {autosell_id}: GraphQL delete fallback → UI ({exc})",
                 flush=True,
             )
-        except FacebookPostingError:
-            raise
-        except Exception as exc:
-            if not graphql_ui_fallback():
+        except FacebookPostingError as exc:
+            # Unconfirmed HTTP / rate-limit → Playwright, never soft-skip.
+            if not allow_ui:
                 raise
+            why = "rate-limit" if is_rate_limit_error(exc) else "failed"
             print(
-                f"  {autosell_id}: GraphQL delete error → UI ({exc})",
+                f"  {autosell_id}: GraphQL delete {why} → Playwright UI ({exc})",
+                flush=True,
+            )
+        except Exception as exc:
+            if not allow_ui:
+                raise
+            why = "rate-limit" if is_rate_limit_error(exc) else "error"
+            print(
+                f"  {autosell_id}: GraphQL delete {why} → Playwright UI ({exc})",
                 flush=True,
             )
 

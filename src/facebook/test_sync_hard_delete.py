@@ -31,6 +31,39 @@ class SyncHardDeleteTests(unittest.TestCase):
         gql_remove.assert_called_once()
         self.assertEqual(gql_remove.call_args.kwargs["removal_action"], "delete")
 
+    def test_graphql_posting_error_falls_back_to_ui(self):
+        from src.facebook.errors import FacebookPostingError
+
+        page = MagicMock()
+        page.context = MagicMock()
+        page.goto = MagicMock()
+        page.wait_for_timeout = MagicMock()
+        # Force UI path after GraphQL fail: content unavailable → True.
+        with (
+            patch("src.facebook.graphql.mode.graphql_enabled", return_value=True),
+            patch("src.facebook.graphql.mode.graphql_ui_fallback", return_value=True),
+            patch(
+                "src.facebook.graphql.remover.remove_vehicle_listing_graphql",
+                side_effect=FacebookPostingError(
+                    "GraphQL delete returned OK but listing still reachable"
+                ),
+            ),
+            patch(
+                "src.facebook.remover._is_content_unavailable",
+                return_value=True,
+            ),
+            patch("src.facebook.remover._settle"),
+        ):
+            ok = remove_vehicle_listing(
+                page,
+                "https://www.facebook.com/marketplace/item/123456789012345/",
+                autosell_id="obj1",
+                removal_action="delete",
+                log_dir=Path("/tmp"),
+                require_verified=False,
+            )
+        self.assertTrue(ok)
+
     def test_executor_coerces_removal_action_under_graphql(self):
         from contextlib import contextmanager
 

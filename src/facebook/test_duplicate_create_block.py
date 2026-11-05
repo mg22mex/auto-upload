@@ -54,13 +54,37 @@ class TestDuplicateBlockedDb(unittest.TestCase):
             self.assertEqual(row["status"], "duplicate_blocked")
             self.assertIsNone(row["fb_listing_url"])
             self.assertTrue(store.is_duplicate_create_blocked("obj1", "account_1"))
+            self.assertTrue(store.is_create_blocked("obj1", "account_1"))
 
             actions = plan_sync_actions(
                 [_vehicle("obj1")],
                 ["account_1"],
                 live_listings=[],
                 max_creates_per_account=5,
-                is_create_blocked=store.is_duplicate_create_blocked,
+                is_create_blocked=store.is_create_blocked,
+            )
+            self.assertEqual(actions, [])
+            store.close()
+
+    def test_post_delete_cooldown_blocks_create(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SyncStore(Path(tmp) / "sync.db")
+            store.upsert_fb_listing(
+                "obj2",
+                "account_1",
+                fb_listing_url="https://www.facebook.com/marketplace/item/1/",
+                content_hash="x",
+                status="live",
+            )
+            store.mark_fb_listing_removed("obj2", "account_1", clear_url=True)
+            self.assertTrue(store.is_recently_removed_for_create("obj2", "account_1"))
+            self.assertTrue(store.is_create_blocked("obj2", "account_1"))
+            actions = plan_sync_actions(
+                [_vehicle("obj2")],
+                ["account_1"],
+                live_listings=[],
+                max_creates_per_account=5,
+                is_create_blocked=store.is_create_blocked,
             )
             self.assertEqual(actions, [])
             store.close()

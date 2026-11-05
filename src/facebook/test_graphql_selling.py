@@ -170,6 +170,59 @@ class GraphqlPurgeTests(unittest.TestCase):
         self.assertEqual(stats.found, 1)
         self.assertEqual(stats.deleted, 1)
         delete.assert_called_once()
+        self.assertTrue(delete.call_args.kwargs.get("verify", False))
+
+    def test_graphql_delete_fail_falls_back_to_playwright(self):
+        session = FbSessionContext(
+            c_user="42", xs="xs", fb_dtsg="dtsg", cookies={"c_user": "42", "xs": "xs"}
+        )
+        store = MagicMock()
+        store.get_live_listings.return_value = []
+        page = MagicMock()
+
+        old = MagicMock()
+        old.item_id = "1111222233334444"
+        old.title = "Old Car"
+        old.age_days = 10.0
+        old.age_text = "10d"
+        old.href = "https://www.facebook.com/marketplace/item/1111222233334444/"
+        old.source = "test"
+        old.card_text_like = lambda: "Old Car"
+
+        with (
+            patch(
+                "src.facebook.graphql.purge.fetch_active_selling_listings",
+                return_value=[old],
+            ),
+            patch(
+                "src.facebook.graphql.purge.delete_listing_graphql",
+                side_effect=RuntimeError("rate limit 429"),
+            ),
+            patch(
+                "src.facebook.graphql.purge.hard_delete_listing_via_playwright",
+                return_value=True,
+            ) as ui_delete,
+            patch("src.facebook.graphql.purge.random_delay"),
+            patch(
+                "src.facebook.graphql.purge._catalog_by_autosell_id",
+                return_value={},
+            ),
+            patch.dict("os.environ", {"FB_GQL_FALLBACK_UI": "1"}, clear=False),
+        ):
+            stats = purge_old_listings_graphql(
+                session,
+                store,
+                account_id="account_1",
+                max_days=7.0,
+                dry_run=False,
+                client=MagicMock(),
+                page=page,
+            )
+
+        self.assertEqual(stats.deleted, 1)
+        self.assertEqual(stats.failed, 0)
+        self.assertEqual(stats.ui_fallback_deletes, 1)
+        ui_delete.assert_called_once()
 
     def test_max_days_zero_purges_unknown_age(self):
         session = FbSessionContext(

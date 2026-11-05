@@ -77,11 +77,82 @@ class PurgeStats:
     deleted: int = 0
     failed: int = 0
     dry_run_candidates: int = 0
+    # True when max_deletes stopped before all age-eligible targets were cleared.
+    incomplete: bool = False
+    ui_fallback_deletes: int = 0
 
 
 def purge_unknown_age_when_total(max_days: float) -> bool:
     """True when ``max_days <= 0`` (total purge): delete items with unknown age too."""
     return float(max_days) <= 0.0
+
+
+def hard_delete_listing_via_playwright(
+    page: Page,
+    *,
+    item_id: str,
+    listing_url: str,
+    autosell_id: str,
+    store: SyncStore,
+    account_id: str,
+    log_dir: Path | None = None,
+) -> bool:
+    """Playwright hard-delete for one shelf item (GraphQL failure / rate-limit fallback)."""
+    from src.facebook.remover import remove_vehicle_listing
+
+    href = listing_url or ""
+    if href and not href.startswith("http"):
+        href = f"https://www.facebook.com{href}"
+    if not href and item_id:
+        href = f"https://www.facebook.com/marketplace/item/{item_id}/"
+
+    ok = False
+    try:
+        ok = _remove_from_selling_shelf(
+            page,
+            item_id,
+            action="delete",
+            confirm_gone=True,
+        )
+    except Exception as exc:
+        print(
+            f"  UI shelf delete miss item={item_id}: {exc}",
+            flush=True,
+        )
+
+    if not ok and href:
+        try:
+            purge_log = log_dir or Path("data/logs/facebook/purge")
+            purge_log.mkdir(parents=True, exist_ok=True)
+            ok = bool(
+                remove_vehicle_listing(
+                    page,
+                    href,
+                    autosell_id=autosell_id,
+                    removal_action="delete",
+                    log_dir=purge_log,
+                    require_verified=True,
+                    store=store,
+                    account_id=account_id,
+                    skip_graphql=True,  # already tried GraphQL; DOM only
+                )
+            )
+        except Exception as exc:
+            print(f"  UI detail delete fail item={item_id}: {exc}", flush=True)
+            ok = False
+
+    if not ok and item_id:
+        try:
+            page.goto(SELLING_URL, wait_until="domcontentloaded", timeout=90_000)
+            page.wait_for_timeout(2_000)
+            link = _find_item_link_scrolled(page, item_id)
+            if link is not None and _delete_shelf_link(page, link):
+                ok = _find_item_link_scrolled(page, item_id) is None
+        except Exception as exc:
+            print(f"  UI force shelf fail item={item_id}: {exc}", flush=True)
+            ok = False
+
+    return bool(ok)
 
 
 def parse_listing_age_days(text: str, *, now: datetime | None = None) -> float | None:
@@ -1257,7 +1328,7 @@ def purge_old_listings_on_page(
     store: SyncStore,
     *,
     account_id: str,
-    max_days: float = 3.0,
+    max_days: float = 7.0,
     dry_run: bool = False,
     max_deletes: int | None = None,
     delay_min_sec: float = 2.0,
@@ -1273,7 +1344,8 @@ def purge_old_listings_on_page(
     regex matches (e.g. today's Ford Mustang GT).
 
     When ``FB_USE_GRAPHQL=1``, discovers active item ids via GraphQL/HTTP and
-    deletes with ``data/graphql/delete_listing.json`` (no DOM scan).
+    deletes with ``data/graphql/delete_listing.json``. Per-item GraphQL failures
+    / rate-limits fall back to Playwright shelf delete when UI fallback is on.
     """
     from src.facebook.graphql.errors import FacebookGraphqlFallback
     from src.facebook.graphql.mode import graphql_enabled, graphql_ui_fallback
@@ -1304,6 +1376,7 @@ def purge_old_listings_on_page(
                 keep_autosell_ids=keep_autosell_ids,
                 keep_title_re=keep_title_re,
                 root=root,
+                page=page,
             )
         except FacebookGraphqlFallback as exc:
             if not graphql_ui_fallback():
@@ -1442,8 +1515,10 @@ def purge_old_listings_on_page(
 
     if used_db_fallback and not dry_run:
         _sort_selling_oldest_first(page)
-    for card in targets:
+    remaining_after_cap = 0
+    for idx, card in enumerate(targets):
         if max_deletes is not None and stats.deleted >= max_deletes:
+            remaining_after_cap = len(targets) - idx
             print(f"  hit --max-deletes={max_deletes}; stopping", flush=True)
             break
         age_label = (
@@ -1544,5 +1619,14 @@ def purge_old_listings_on_page(
             )
         stats.deleted += 1
         random_delay(delay_min_sec, delay_max_sec)
+
+    if remaining_after_cap > 0:
+        stats.incomplete = True
+        stats.failed += remaining_after_cap
+        print(
+            f"  [{account_id}] INCOMPLETE: {remaining_after_cap} age-eligible "
+            f"listing(s) left after max_deletes={max_deletes}",
+            flush=True,
+        )
 
     return stats

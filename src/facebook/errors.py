@@ -12,3 +12,7 @@ class FacebookPostingError(FacebookAutomationError):
 
 class FacebookDeferredError(FacebookPostingError):
     """Skip this listing and continue the batch (do not abort the run)."""
+
+
+class PreflightPurgeAborted(FacebookAutomationError):
+    """7-day hard-delete preflight incomplete — sync must not create/update."""

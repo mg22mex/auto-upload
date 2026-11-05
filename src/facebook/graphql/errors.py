@@ -150,6 +150,34 @@ def is_phantom_delete_error(exc: BaseException | str | None = None, payload: Any
     return False
 
 
+_RATE_LIMIT_MARKERS = (
+    "rate limit",
+    "rate_limit",
+    "ratelimit",
+    "too many requests",
+    "too many request",
+    "try again later",
+    "slow down",
+    "temporarily blocked",
+    "request limit",
+    "429",
+)
+
+
+def is_rate_limit_error(
+    exc: BaseException | str | None = None, payload: Any = None
+) -> bool:
+    """True when FB throttles GraphQL/HTTP (caller should fall back to Playwright)."""
+    if isinstance(exc, FacebookGraphqlError) and exc.status_code == 429:
+        return True
+    blob = ""
+    if payload is not None:
+        blob = payload_text_blob(payload).lower()
+    if exc is not None:
+        blob = f"{blob} {str(exc).lower()}"
+    return any(marker in blob for marker in _RATE_LIMIT_MARKERS)
+
+
 def skipped_duplicate_message(detail: str = "", *, action: str = "") -> str:
     """Canonical log/exception text for FB duplicate create rejects."""
     bits = ["SKIPPED_DUPLICATE"]

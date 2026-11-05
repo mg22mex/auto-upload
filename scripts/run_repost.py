@@ -162,7 +162,7 @@ def main() -> int:
             max_creates_per_account=max_creates,
             allocation=allocation,
             enforce_overflow_removals=alloc_cfg["enforce_overflow_removals"],
-            is_create_blocked=store.is_duplicate_create_blocked,
+            is_create_blocked=store.is_create_blocked,
         )
         executable_sync, deferred_creates = split_executable_actions(sync_planned)
         create_actions = [a for a in executable_sync if a.action == "create"]

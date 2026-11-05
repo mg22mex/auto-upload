@@ -9,15 +9,17 @@ sync:
   timezone: America/Chihuahua
   max_posts_per_account_per_run: 15
   max_listings_per_account: 40  # live Marketplace slots per FB profile
-  # Auto shelf/history purge at start of every run_sync (before slot allocation).
-  # max_days: 0 → total purge (incl. unknown age/creation_time); keep filters still apply.
+  # Absolute first step of every run_sync: hard-delete shelf cards older than
+  # max_days before slot allocation / creates. Failed deletes abort the cycle.
+  # max_days: 0 → total purge (incl. unknown age); 7 → 7-day rotation rule.
   preflight_purge:
     enabled: true
-    max_days: 0
+    max_days: 7
+    abort_on_failed_deletes: true
     # keep_autosell_ids:
-    # keep_title_re: 
+    # keep_title_re:
     # keep_item_ids: []
-    # max_deletes: null  # optional per-account safety cap
+    # max_deletes: null  # optional per-account safety cap (leaves incomplete → abort)
   slot_allocator:
     enabled: true
     # Remove duplicate / over-cap / FIFO-yielded live listings so waitlist can enter

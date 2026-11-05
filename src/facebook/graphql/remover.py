@@ -116,11 +116,12 @@ def delete_listing_graphql(
         payload = gql.post(doc_id, variables, friendly_name=friendly, check_errors=True)
         _ = extract_listing_id_from_payload(payload)  # best-effort log aid
         if verify and not listing_unavailable_http(session, listing_url):
-            # Some deletes succeed asynchronously; treat GraphQL OK as success
-            # unless FB still clearly shows an active listing chrome.
-            if env_bool("FB_GQL_DELETE_REQUIRE_HTTP_GONE", False):
+            # Aggressive anti-duplicate: require HTTP gone by default.
+            # Opt out with FB_GQL_DELETE_REQUIRE_HTTP_GONE=0 only if FB lags.
+            if env_bool("FB_GQL_DELETE_REQUIRE_HTTP_GONE", True):
                 raise FacebookPostingError(
-                    f"GraphQL delete returned OK but listing still reachable: {listing_url}"
+                    f"GraphQL delete returned OK but listing still reachable: "
+                    f"{listing_url} — SKIP_CREATE (unconfirmed hard-delete)"
                 )
             print(
                 f"  {autosell_id or item_id}: GraphQL delete OK "

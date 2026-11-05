@@ -183,6 +183,7 @@ class SyncStore:
         *,
         content_hash: str = "",
         reason: str = "fb_duplicate",
+        hold_days: float | None = None,
     ) -> None:
         """Record FB duplicate filter so sync does not retry create every run.
 
@@ -190,6 +191,8 @@ class SyncStore:
         Also places a time-limited repost/create hold (default 7 days).
         """
         from datetime import datetime, timedelta, timezone
+
+        from src.facebook.util import env_float
 
         now = utc_now()
         self._conn.execute(
@@ -208,8 +211,13 @@ class SyncStore:
             (autosell_id, account_id, content_hash or "", now, now),
         )
         self._conn.commit()
+        days = (
+            float(hold_days)
+            if hold_days is not None
+            else env_float("FB_DUPLICATE_BLOCK_DAYS", 7.0)
+        )
         hold_until = (
-            datetime.now(timezone.utc) + timedelta(days=7)
+            datetime.now(timezone.utc) + timedelta(days=max(0.0, days))
         ).isoformat()
         self.add_repost_hold(
             autosell_id,
@@ -223,9 +231,11 @@ class SyncStore:
         autosell_id: str,
         account_id: str,
         *,
-        max_age_days: float = 7.0,
+        max_age_days: float | None = None,
     ) -> bool:
         """True when a recent duplicate_blocked row should skip create planning."""
+        from src.facebook.util import env_float
+
         row = self.get_fb_listing(autosell_id, account_id)
         if row is None or str(row["status"] or "") != "duplicate_blocked":
             return False
@@ -236,8 +246,58 @@ class SyncStore:
             return True
         from datetime import datetime, timedelta, timezone
 
+        days = (
+            float(max_age_days)
+            if max_age_days is not None
+            else env_float("FB_DUPLICATE_BLOCK_DAYS", 7.0)
+        )
         age = datetime.now(timezone.utc) - updated
-        return age <= timedelta(days=float(max_age_days))
+        return age <= timedelta(days=max(0.0, days))
+
+    def is_recently_removed_for_create(
+        self,
+        autosell_id: str,
+        account_id: str,
+        *,
+        cooldown_hours: float | None = None,
+    ) -> bool:
+        """True when listing was hard-deleted within FB cache cooldown window.
+
+        Facebook still flags recreates for ~48–72h after delete. Default 72h
+        (``FB_CREATE_COOLDOWN_HOURS``).
+        """
+        from src.facebook.util import env_float
+
+        hours = (
+            float(cooldown_hours)
+            if cooldown_hours is not None
+            else env_float("FB_CREATE_COOLDOWN_HOURS", 72.0)
+        )
+        if hours <= 0:
+            return False
+        row = self.get_fb_listing(autosell_id, account_id)
+        if row is None:
+            return False
+        status = str(row["status"] or "")
+        if status not in {"removed", "duplicate_blocked"}:
+            return False
+        updated = self._parse_iso(row["updated_at"] if "updated_at" in row.keys() else None)
+        if updated is None:
+            return True
+        from datetime import datetime, timedelta, timezone
+
+        age = datetime.now(timezone.utc) - updated
+        return age <= timedelta(hours=hours)
+
+    def is_create_blocked(self, autosell_id: str, account_id: str) -> bool:
+        """Unified pre-create gate: hold, duplicate_blocked, or post-delete cooldown."""
+        if self.is_on_repost_hold(autosell_id, account_id):
+            return True
+        if self.is_duplicate_create_blocked(autosell_id, account_id):
+            return True
+        if self.is_recently_removed_for_create(autosell_id, account_id):
+            return True
+        return False
 
     def add_repost_hold(
         self,
@@ -315,8 +375,18 @@ class SyncStore:
         account_id: str,
         *,
         clear_url: bool = False,
+        create_cooldown_hours: float | None = None,
     ) -> None:
-        """Mark listing removed. Optionally null ``fb_listing_url`` (repost phase)."""
+        """Mark listing removed. Optionally null ``fb_listing_url`` (repost phase).
+
+        Always starts a post-delete create cooldown hold (default 72h via
+        ``FB_CREATE_COOLDOWN_HOURS``) so Facebook's duplicate cache can clear
+        before the same ``autosell_id`` is recreated.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        from src.facebook.util import env_float
+
         now = utc_now()
         if clear_url:
             self._conn.execute(
@@ -337,6 +407,21 @@ class SyncStore:
                 (now, autosell_id, account_id),
             )
         self._conn.commit()
+        hours = (
+            float(create_cooldown_hours)
+            if create_cooldown_hours is not None
+            else env_float("FB_CREATE_COOLDOWN_HOURS", 72.0)
+        )
+        if hours > 0:
+            hold_until = (
+                datetime.now(timezone.utc) + timedelta(hours=hours)
+            ).isoformat()
+            self.add_repost_hold(
+                autosell_id,
+                account_id,
+                reason="fb_post_delete_cooldown",
+                hold_until=hold_until,
+            )
 
     def record_repost(
         self,
@@ -364,6 +449,7 @@ class SyncStore:
             (autosell_id, account_id, fb_listing_url, content_hash, now, now),
         )
         self._conn.commit()
+        self.clear_repost_hold(autosell_id, account_id)
 
     def update_fb_listing_url(
         self,

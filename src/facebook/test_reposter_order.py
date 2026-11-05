@@ -108,6 +108,7 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
             patch("src.facebook.reposter.assert_hard_delete_verified", return_value=True),
             patch("src.facebook.reposter.random_delay"),
             patch("src.facebook.reposter.prefetch_photos", side_effect=lambda c, **_k: c),
+            patch.dict("os.environ", {"FB_REPOST_CREATE_SAME_RUN": "1"}, clear=False),
         ):
             _repost_one(
                 page,
@@ -168,6 +169,7 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
             patch("src.facebook.reposter.assert_hard_delete_verified", side_effect=hard_ok),
             patch("src.facebook.reposter.random_delay", side_effect=fake_delay),
             patch("src.facebook.reposter.prefetch_photos", side_effect=lambda c, **_k: c),
+            patch.dict("os.environ", {"FB_REPOST_CREATE_SAME_RUN": "1"}, clear=False),
         ):
             _repost_one(
                 page,
@@ -210,7 +212,14 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
             patch("src.facebook.reposter.assert_hard_delete_verified", return_value=True),
             patch("src.facebook.reposter.random_delay", side_effect=fake_delay),
             patch("src.facebook.reposter.prefetch_photos", side_effect=lambda c, **_k: c),
-            patch.dict("os.environ", {"REPOST_DELETE_COOLDOWN_SEC": "7"}, clear=False),
+            patch.dict(
+                "os.environ",
+                {
+                    "REPOST_DELETE_COOLDOWN_SEC": "7",
+                    "FB_REPOST_CREATE_SAME_RUN": "1",
+                },
+                clear=False,
+            ),
         ):
             _repost_one(
                 page,
@@ -261,6 +270,7 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
 
         remove.assert_not_called()
         store.mark_fb_listing_removed.assert_called()
+        # Orphan path: no old_url → create allowed even with cooldown holds.
         self.assertEqual(order, ["create"])
         self.assertEqual(result.reposts, 1)
 
@@ -284,6 +294,7 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
             patch("src.facebook.reposter.assert_hard_delete_verified", return_value=True),
             patch("src.facebook.reposter.random_delay"),
             patch("src.facebook.reposter.prefetch_photos", side_effect=lambda c, **_k: c),
+            patch.dict("os.environ", {"FB_REPOST_CREATE_SAME_RUN": "1"}, clear=False),
         ):
             _repost_one(
                 page,
@@ -379,6 +390,44 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
         store.record_repost.assert_not_called()
         self.assertEqual(result.reposts, 0)
 
+    def test_post_delete_cooldown_defers_same_run_create(self):
+        """After verified delete, default path defers create (FB cache lock)."""
+        page = MagicMock()
+        store = MagicMock()
+        store.is_create_blocked.return_value = True
+        from src.facebook.reposter import RepostResult
+
+        result = RepostResult()
+
+        with (
+            patch("src.facebook.reposter.remove_vehicle_listing", return_value=True),
+            patch("src.facebook.reposter.ensure_no_matching_shelf_listings", return_value=True),
+            patch("src.facebook.reposter.assert_hard_delete_verified", return_value=True),
+            patch("src.facebook.reposter.create_vehicle_listing") as create,
+            patch("src.facebook.reposter.random_delay"),
+            patch("src.facebook.reposter.prefetch_photos", side_effect=lambda c, **_k: c),
+            patch.dict(
+                "os.environ",
+                {"FB_REPOST_CREATE_SAME_RUN": "0", "FB_CREATE_COOLDOWN_HOURS": "72"},
+                clear=False,
+            ),
+        ):
+            _repost_one(
+                page,
+                _action(),
+                store,
+                fb_config={},
+                max_photos=5,
+                removal_action="delete",
+                log_dir=Path("/tmp"),
+                result=result,
+            )
+        create.assert_not_called()
+        store.record_repost.assert_not_called()
+        self.assertEqual(result.reposts, 0)
+        self.assertEqual(result.deletes_deferred_create, 1)
+        store.mark_fb_listing_removed.assert_called()
+
     def test_mark_fb_listing_removed_clears_url(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = SyncStore(Path(tmp) / "sync.db")
@@ -394,6 +443,8 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
             self.assertIsNotNone(row)
             self.assertEqual(row["status"], "removed")
             self.assertIsNone(row["fb_listing_url"])
+            self.assertTrue(store.is_create_blocked("obj1", "account_1"))
+            self.assertTrue(store.is_on_repost_hold("obj1", "account_1"))
 
             store.record_repost(
                 "obj1",
@@ -404,6 +455,7 @@ class TestRepostDeleteBeforeCreate(unittest.TestCase):
             row2 = store.get_fb_listing("obj1", "account_1")
             self.assertEqual(row2["status"], "live")
             self.assertIn("222", row2["fb_listing_url"])
+            self.assertFalse(store.is_on_repost_hold("obj1", "account_1"))
             store.close()
 
     def test_execute_reposts_passes_require_path_via_repost_one(self):

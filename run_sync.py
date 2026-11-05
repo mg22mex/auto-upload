@@ -135,19 +135,48 @@ def run_sync_from_catalog(
 
         purge_cfg = preflight_purge_config(config)
         # Live sync only (skip browser on --dry-run unless forced).
+        # 7-day hard-delete is absolute first step before creates.
         run_purge = purge_cfg.enabled and (
             not dry_run
             or env_bool("FB_PREFLIGHT_PURGE_ON_DRY_RUN", False)
         )
         if run_purge:
-            run_preflight_shelf_purge(
-                config,
-                store,
-                account_ids,
-                root=ROOT,
-                dry_run=dry_run,
-            )
+            from src.facebook.errors import PreflightPurgeAborted
+
+            try:
+                purge_result = run_preflight_shelf_purge(
+                    config,
+                    store,
+                    account_ids,
+                    root=ROOT,
+                    dry_run=dry_run,
+                )
+            except PreflightPurgeAborted as exc:
+                store.commit()
+                store.finish_sync_run(
+                    run_id,
+                    vehicles_found=len(vehicles),
+                    creates=0,
+                    updates=0,
+                    removals=0,
+                    notes=f"ABORTED_PREFLIGHT_PURGE: {exc}",
+                )
+                print(f"ABORT: {exc}", file=sys.stderr, flush=True)
+                print(
+                    "Sync cycle aborted — no creates/updates until every "
+                    f">{purge_cfg.max_days:g}+ day listing is hard-deleted.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return 2
             store.commit()
+            if purge_result.failed and not dry_run:
+                # Defense in depth if abort flag was disabled mid-run.
+                print(
+                    f"WARNING: preflight left failed={purge_result.failed} "
+                    f"(abort_on_fail={purge_cfg.abort_on_failed_deletes})",
+                    flush=True,
+                )
         elif purge_cfg.enabled and dry_run:
             print(
                 "Preflight purge: skipped on dry-run "
@@ -169,7 +198,7 @@ def run_sync_from_catalog(
             max_creates_per_account=max_posts,
             allocation=allocation,
             enforce_overflow_removals=alloc_cfg["enforce_overflow_removals"],
-            is_create_blocked=store.is_duplicate_create_blocked,
+            is_create_blocked=store.is_create_blocked,
         )
         executable, deferred = split_executable_actions(actions)
         print_report(vehicles, executable, deferred)

@@ -77,7 +77,7 @@ def plan_sync_actions(
                 if is_create_blocked and is_create_blocked(
                     vehicle.autosell_id, account_id
                 ):
-                    # Recent FB "duplicate listing" block — do not retry every run.
+                    # duplicate_blocked (~7d) or post-delete cooldown (~72h).
                     continue
                 if create_budget[account_id] <= 0:
                     actions.append(

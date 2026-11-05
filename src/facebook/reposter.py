@@ -8,7 +8,7 @@ from pathlib import Path
 
 from src.facebook.browser_health import is_browser_dead
 from src.facebook.errors import FacebookAutomationError, FacebookDeferredError, FacebookPostingError, FacebookSessionError
-from src.facebook.poster import create_vehicle_listing
+from src.facebook.poster import create_vehicle_listing, is_duplicate_listing_error
 from src.facebook.remover import (
     assert_hard_delete_verified,
     extract_item_id,
@@ -48,6 +48,7 @@ class RepostResult:
     session_expired_accounts: list[str] = None  # type: ignore[assignment]
     accounts_ok: list[str] = None  # type: ignore[assignment]
     skipped_already_bumped: int = 0
+    deletes_deferred_create: int = 0
 
     def __post_init__(self) -> None:
         if self.errors is None:
@@ -382,10 +383,12 @@ def _repost_one(
                 f"WARNING: {action.autosell_id}: no fb_listing_url — treating as "
                 f"already gone; clearing sync.db slot before create"
             )
+            # No prior FB URL → no delete footprint; do not start 72h cooldown.
             store.mark_fb_listing_removed(
                 action.autosell_id,
                 account_id,
                 clear_url=True,
+                create_cooldown_hours=0,
             )
             removed = True
             log_step(f"DELETE_OK {action.autosell_id} (no url / already gone) 0.0s")
@@ -494,7 +497,7 @@ def _repost_one(
         )
 
         # Organic settle after verified delete (jittered; keeps platform pacing).
-        cooldown = env_float("REPOST_DELETE_COOLDOWN_SEC", 2.0)
+        cooldown = env_float("REPOST_DELETE_COOLDOWN_SEC", 5.0)
         if cooldown > 0:
             low = max(0.8, cooldown * 0.85)
             high = max(low, cooldown * 1.15)
@@ -503,6 +506,32 @@ def _repost_one(
                 f"(REPOST_DELETE_COOLDOWN_SEC={cooldown:g})"
             )
             random_delay(low, high)
+
+        # FB cache lock: do NOT recreate in the same run after a fresh delete.
+        # mark_fb_listing_removed already set fb_post_delete_cooldown (~72h).
+        # Sync will create later once is_create_blocked clears.
+        create_cooldown_h = env_float("FB_CREATE_COOLDOWN_HOURS", 72.0)
+        allow_same_run = env_bool("FB_REPOST_CREATE_SAME_RUN", False)
+        # Only defer when we actually deleted a live listing this run (old_url).
+        if (
+            removed
+            and old_url
+            and create_cooldown_h > 0
+            and not allow_same_run
+            and store.is_create_blocked(action.autosell_id, account_id)
+        ):
+            log_step(
+                f"CREATE_DEFER {action.autosell_id} "
+                f"post_delete_cooldown={create_cooldown_h:g}h — SKIP_CREATE"
+            )
+            print(
+                f"SKIPPED_CREATE_COOLDOWN {action.autosell_id} on {account_id}: "
+                f"hard-delete verified; waiting {create_cooldown_h:g}h for FB "
+                f"duplicate cache before recreate (no same-run create)",
+                flush=True,
+            )
+            result.deletes_deferred_create += 1
+            return
 
         # --- Phase 2: create with prefetched photos; skip redundant shelf gate ---
         t_create = time.monotonic()
@@ -529,8 +558,19 @@ def _repost_one(
                 f"{time.monotonic() - t_create:.1f}s err={exc}"
             )
             if removed and not is_browser_dead(exc):
+                # Mark duplicate/cooldown so scheduler does not hammer FB.
+                try:
+                    if is_duplicate_listing_error(exc):
+                        store.mark_duplicate_blocked(
+                            action.autosell_id,
+                            account_id,
+                            content_hash=action.vehicle.content_hash(),
+                            reason="fb_duplicate_repost",
+                        )
+                except Exception:
+                    pass
                 raise FacebookPostingError(
-                    f"NEEDS_RECREATE: removed/sold old listing but create failed "
+                    f"NEEDS_RECREATE: removed old listing but create failed "
                     f"for {action.autosell_id}: {exc}"
                 ) from exc
             raise

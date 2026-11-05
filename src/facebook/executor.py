@@ -20,6 +20,7 @@ class ExecutionResult:
     updates: int = 0
     removals: int = 0
     skipped_duplicates: int = 0
+    skipped_create_blocked: int = 0
     errors: list[str] = None  # type: ignore[assignment]
     session_expired_accounts: list[str] = None  # type: ignore[assignment]
 
@@ -132,7 +133,8 @@ def execute_actions(
                             print(
                                 f"  sync.db: marked {action.autosell_id} on "
                                 f"{account_id} as duplicate_blocked "
-                                f"(no create retries ~7d)",
+                                f"(no create retries "
+                                f"~{env_float('FB_DUPLICATE_BLOCK_DAYS', 7.0):g}d)",
                                 flush=True,
                             )
                             # Do not append to result.errors — not a hard fail.
@@ -172,6 +174,17 @@ def _execute_one(
     if action.action == "create":
         if not action.vehicle:
             raise FacebookAutomationError("Create action missing vehicle payload")
+        account_id = action.account_id or ""
+        # Mandatory pre-create gate: hold / duplicate_blocked / post-delete cooldown.
+        if store.is_create_blocked(action.autosell_id, account_id):
+            result.skipped_create_blocked += 1
+            print(
+                f"SKIPPED_CREATE_BLOCKED {action.autosell_id} on {account_id}: "
+                f"duplicate_blocked or post-delete cooldown "
+                f"(FB_CREATE_COOLDOWN_HOURS / FB_DUPLICATE_BLOCK_DAYS)",
+                flush=True,
+            )
+            return
         url = create_vehicle_listing(
             page,
             action.vehicle,
@@ -181,11 +194,12 @@ def _execute_one(
         )
         store.upsert_fb_listing(
             action.autosell_id,
-            action.account_id or "",
+            account_id,
             fb_listing_url=url,
             content_hash=action.vehicle.content_hash(),
             status="live",
         )
+        store.clear_repost_hold(action.autosell_id, account_id)
         result.creates += 1
         print(f"Created {action.autosell_id} on {action.account_id}: {url}")
         return
