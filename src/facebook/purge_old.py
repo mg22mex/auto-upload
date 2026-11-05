@@ -383,6 +383,129 @@ def extract_listed_on_snip(text: str) -> str:
     return m.group(0).strip() if m else ""
 
 
+# Selling-hub card signals — wait for any of these after React hydrates.
+_SELLING_CARD_WAIT_SELECTORS = (
+    'a[href*="/marketplace/item/"]',
+    '[role="main"] a[href*="/marketplace/item/"]',
+    '[role="main"] [role="article"]',
+    '[role="main"] [role="listitem"]',
+    # Selling hub tiles often wrap the whole card as a link / aria label.
+    '[role="main"] a[aria-label]',
+    'div[role="main"] span:has-text("Listed on")',
+    'div[role="main"] span:has-text("Publicado")',
+)
+
+_ITEM_HREF_SELECTORS = (
+    'a[href*="/marketplace/item/"]',
+    '[role="link"][href*="/marketplace/item/"]',
+    'a[href*="marketplace/item/"]',
+)
+
+
+def _shelf_wait_timeout_ms() -> int:
+    from src.facebook.util import env_int
+
+    return max(5_000, env_int("FB_SHELF_WAIT_MS", 15_000))
+
+
+def _hydrate_scroll_count() -> int:
+    from src.facebook.util import env_int
+
+    return max(1, min(8, env_int("FB_SHELF_HYDRATE_SCROLLS", 3)))
+
+
+def wait_for_selling_shelf_cards(
+    page: Page,
+    *,
+    timeout_ms: int | None = None,
+) -> bool:
+    """Wait until Marketplace selling cards hydrate (React) — generous timeout."""
+    ms = int(timeout_ms if timeout_ms is not None else _shelf_wait_timeout_ms())
+    deadline_errors: list[str] = []
+    for sel in _SELLING_CARD_WAIT_SELECTORS:
+        try:
+            page.wait_for_selector(sel, state="visible", timeout=ms)
+            print(
+                f"  shelf wait OK selector={sel!r} timeout_ms={ms}",
+                flush=True,
+            )
+            return True
+        except Exception as exc:
+            deadline_errors.append(f"{sel}: {exc}")
+            # Try next selector with a shorter remaining budget.
+            ms = max(3_000, ms // 2)
+            continue
+    print(
+        "  WARNING: selling shelf cards did not appear within wait budget "
+        f"({'; '.join(deadline_errors[:2])})",
+        flush=True,
+    )
+    return False
+
+
+def hydrate_selling_shelf_scrolls(
+    page: Page,
+    *,
+    scrolls: int | None = None,
+) -> None:
+    """Smooth scroll loop so lazy-loaded late-October cards enter the DOM."""
+    n = int(scrolls if scrolls is not None else _hydrate_scroll_count())
+    print(f"  shelf hydrate scrolls={n}", flush=True)
+    try:
+        page.wait_for_timeout(600)
+    except Exception:
+        pass
+    for i in range(n):
+        try:
+            page.evaluate(
+                """(step) => {
+                  const main = document.querySelector('[role="main"]');
+                  const delta = Math.max(900, Math.floor(window.innerHeight * 0.85));
+                  const targets = [];
+                  if (main) {
+                    targets.push(main);
+                    main.querySelectorAll('div').forEach((el) => {
+                      const st = window.getComputedStyle(el);
+                      if ((st.overflowY === 'auto' || st.overflowY === 'scroll')
+                          && el.scrollHeight > el.clientHeight + 80) {
+                        targets.push(el);
+                      }
+                    });
+                  }
+                  let scrolled = false;
+                  for (const el of targets) {
+                    const before = el.scrollTop;
+                    el.scrollBy({ top: delta, left: 0, behavior: 'smooth' });
+                    if (el.scrollTop !== before) scrolled = true;
+                  }
+                  window.scrollBy({ top: delta, left: 0, behavior: 'smooth' });
+                  return { step, scrolled };
+                }""",
+                i + 1,
+            )
+        except Exception:
+            try:
+                page.mouse.wheel(0, 2200)
+            except Exception:
+                break
+        try:
+            page.wait_for_timeout(900)
+        except Exception:
+            pass
+    # Nudge back toward top so first-screen cards stay queryable.
+    try:
+        page.evaluate(
+            """() => {
+              const main = document.querySelector('[role="main"]');
+              if (main) main.scrollTo({ top: 0, behavior: 'instant' });
+              window.scrollTo({ top: 0, behavior: 'instant' });
+            }"""
+        )
+        page.wait_for_timeout(500)
+    except Exception:
+        pass
+
+
 def _card_blob_for_link(link) -> str:
     parts: list[str] = []
     try:
@@ -392,22 +515,95 @@ def _card_blob_for_link(link) -> str:
     except Exception:
         pass
     try:
-        parts.append(link.inner_text(timeout=1_000) or "")
+        aria = link.get_attribute("aria-label") or ""
+        if aria:
+            parts.append(aria)
+    except Exception:
+        pass
+    try:
+        parts.append(link.inner_text(timeout=1_500) or "")
     except Exception:
         pass
     for xpath in (
         "xpath=ancestor::div[@role='article'][1]",
+        "xpath=ancestor::div[@role='listitem'][1]",
+        "xpath=ancestor::div[.//span[contains(.,'Listed on') or contains(.,'Publicado')]][1]",
+        "xpath=ancestor::div[8]",
         "xpath=ancestor::div[6]",
         "xpath=ancestor::div[4]",
     ):
         try:
             node = link.locator(xpath).first
             if node.count() > 0:
-                parts.append(node.inner_text(timeout=1_000) or "")
+                parts.append(node.inner_text(timeout=1_500) or "")
                 break
         except Exception:
             continue
     return " ".join(p for p in parts if p)
+
+
+def _extract_selling_cards_via_js(page: Page) -> list[dict[str, str]]:
+    """One-shot DOM scrape of selling-hub cards + Listed-on text (current layout)."""
+    try:
+        raw = page.evaluate(
+            """() => {
+              const out = [];
+              const seen = new Set();
+              const main = document.querySelector('[role="main"]') || document.body;
+              const anchors = main.querySelectorAll(
+                'a[href*="/marketplace/item/"], [role="link"][href*="/marketplace/item/"]'
+              );
+              const cardRoot = (el) => {
+                let n = el;
+                for (let i = 0; i < 10 && n; i++) {
+                  if (n.getAttribute && (
+                      n.getAttribute('role') === 'article'
+                      || n.getAttribute('role') === 'listitem')) {
+                    return n;
+                  }
+                  const txt = (n.innerText || '');
+                  if (/Listed on|Publicado|days? ago|hace \\d+/i.test(txt)
+                      && txt.length < 1200) {
+                    return n;
+                  }
+                  n = n.parentElement;
+                }
+                return el.closest('div') || el;
+              };
+              for (const a of anchors) {
+                const href = a.href || a.getAttribute('href') || '';
+                const m = href.match(/\\/marketplace\\/item\\/(\\d{8,})/);
+                if (!m) continue;
+                const itemId = m[1];
+                if (seen.has(itemId)) continue;
+                seen.add(itemId);
+                const root = cardRoot(a);
+                const blob = [
+                  href,
+                  a.getAttribute('aria-label') || '',
+                  a.innerText || '',
+                  root ? (root.innerText || '') : '',
+                ].join(' ').replace(/\\s+/g, ' ').trim();
+                out.push({ item_id: itemId, href, blob: blob.slice(0, 800) });
+              }
+              return out;
+            }"""
+        )
+    except Exception as exc:
+        print(f"  WARNING: JS selling-card extract failed: {exc}", flush=True)
+        return []
+    if not isinstance(raw, list):
+        return []
+    cleaned: list[dict[str, str]] = []
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        item_id = str(row.get("item_id") or "").strip()
+        href = str(row.get("href") or "").strip()
+        blob = str(row.get("blob") or "").strip()
+        if item_id.isdigit() and len(item_id) >= 8:
+            cleaned.append({"item_id": item_id, "href": href, "blob": blob})
+    return cleaned
 
 
 def collect_selling_listings(
@@ -415,47 +611,70 @@ def collect_selling_listings(
     *,
     max_scrolls: int = 20,
 ) -> list[ShelfListing]:
-    """Scroll `/you/selling` (active shelves) and collect item ids + ages."""
+    """Load `/you/selling`, wait for React cards, hydrate-scroll, collect ages.
+
+    Uses generous ``wait_for_selector`` (default 15s via ``FB_SHELF_WAIT_MS``),
+    2–3 smooth hydrate scrolls (``FB_SHELF_HYDRATE_SCROLLS``), then extracts
+    item links + ``Listed on…`` / ``Publicado…`` text from the selling hub.
+    """
     found: dict[str, ShelfListing] = {}
     shelves = list(_ACTIVE_SELLING_SHELVES[:3]) or [SELLING_URL]
+
+    def _ingest(item_id: str, href: str, blob: str) -> None:
+        if not item_id or item_id in found:
+            return
+        age = parse_listing_age_days(blob)
+        age_snip = extract_listed_on_snip(blob)
+        found[item_id] = ShelfListing(
+            item_id=item_id,
+            href=href,
+            age_days=age,
+            age_text=age_snip,
+            card_text=blob[:500],
+        )
 
     for shelf in shelves:
         try:
             page.goto(shelf, wait_until="domcontentloaded", timeout=90_000)
-            page.wait_for_timeout(2_500)
         except Exception as exc:
             print(f"  WARNING: could not open {shelf}: {exc}", flush=True)
             continue
 
+        wait_for_selling_shelf_cards(page)
+        hydrate_selling_shelf_scrolls(page)
+
+        # Fast path: evaluate all hydrated cards at once (incl. Listed-on text).
+        for row in _extract_selling_cards_via_js(page):
+            _ingest(row["item_id"], row["href"], row["blob"])
+
         stagnant = 0
         for _ in range(max_scrolls):
             before = len(found)
-            links = page.locator('a[href*="/marketplace/item/"]')
-            try:
-                count = links.count()
-            except Exception:
-                count = 0
-            if not isinstance(count, int):
-                count = 0
-            for i in range(min(count, 120)):
-                loc = links.nth(i)
+            # Locator pass catches cards JS missed / newly virtualized in.
+            for sel in _ITEM_HREF_SELECTORS:
+                links = page.locator(sel)
                 try:
-                    href = loc.get_attribute("href") or ""
+                    count = links.count()
                 except Exception:
-                    continue
-                item_id = extract_item_id(href)
-                if not item_id or item_id in found:
-                    continue
-                blob = _card_blob_for_link(loc)
-                age = parse_listing_age_days(blob)
-                age_snip = extract_listed_on_snip(blob)
-                found[item_id] = ShelfListing(
-                    item_id=item_id,
-                    href=href,
-                    age_days=age,
-                    age_text=age_snip,
-                    card_text=blob[:500],
-                )
+                    count = 0
+                if not isinstance(count, int):
+                    count = 0
+                for i in range(min(count, 160)):
+                    loc = links.nth(i)
+                    try:
+                        href = loc.get_attribute("href") or ""
+                    except Exception:
+                        continue
+                    item_id = extract_item_id(href)
+                    if not item_id or item_id in found:
+                        continue
+                    blob = _card_blob_for_link(loc)
+                    _ingest(item_id, href, blob)
+
+            # Re-run JS extract after each scroll wave.
+            for row in _extract_selling_cards_via_js(page):
+                _ingest(row["item_id"], row["href"], row["blob"])
+
             if len(found) == before:
                 stagnant += 1
                 if stagnant >= 3:
@@ -463,10 +682,26 @@ def collect_selling_listings(
             else:
                 stagnant = 0
             try:
-                page.mouse.wheel(0, 2600)
-                page.wait_for_timeout(800)
+                page.evaluate(
+                    """() => {
+                      const main = document.querySelector('[role="main"]');
+                      const delta = Math.max(1200, Math.floor(window.innerHeight * 0.9));
+                      if (main) main.scrollBy(0, delta);
+                      window.scrollBy(0, delta);
+                    }"""
+                )
+                page.wait_for_timeout(850)
             except Exception:
-                break
+                try:
+                    page.mouse.wheel(0, 2600)
+                    page.wait_for_timeout(800)
+                except Exception:
+                    break
+
+        print(
+            f"  shelf scan {shelf}: {len(found)} unique item(s) so far",
+            flush=True,
+        )
 
     return list(found.values())
 
