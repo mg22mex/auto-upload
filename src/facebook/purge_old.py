@@ -608,12 +608,33 @@ def resolve_listing_age_for_purge(
                 flush=True,
             )
             source = f"{source} (db={db_age_days:.1f}d ignored)"
+        floored, oct_hit = apply_october_hard_purge_floor(cal, blob, when=when)
+        if oct_hit and floored is not None and floored > float(cal):
+            print(
+                f"  October hard-purge: DOM {cal:.1f}d → {floored:.1f}d "
+                f"(10/XX in November; queue UI delete)",
+                flush=True,
+            )
+            source = f"{source}+october_hard_purge"
+            return float(floored), source
+        if oct_hit:
+            source = f"{source}+october"
         return float(cal), source
 
     # 2) Relative / other live text (no explicit calendar).
     if blob:
         text_age = parse_listing_age_days(blob, now=when)
         if text_age is not None:
+            floored, oct_hit = apply_october_hard_purge_floor(
+                text_age, blob, when=when
+            )
+            if oct_hit and floored is not None and floored > float(text_age):
+                print(
+                    f"  October hard-purge: live_text {text_age:.1f}d → {floored:.1f}d "
+                    f"(10/XX in November; queue UI delete)",
+                    flush=True,
+                )
+                return float(floored), "live_text+october_hard_purge"
             if db_age_days is not None and abs(float(text_age) - float(db_age_days)) >= 0.5:
                 print(
                     f"  age conflict: live_text={text_age:.1f}d vs sync.db={db_age_days:.1f}d "
@@ -622,6 +643,16 @@ def resolve_listing_age_for_purge(
                 )
                 return float(text_age), f"live_text (db={db_age_days:.1f}d ignored)"
             return float(text_age), "live_text"
+
+    # 2b) October date present but calendar/relative parse missed — still floor to 7d.
+    floored_only, oct_only = apply_october_hard_purge_floor(None, blob, when=when)
+    if oct_only and floored_only is not None:
+        print(
+            f"  October hard-purge: no numeric age → {floored_only:.1f}d "
+            f"(10/XX in November; queue UI delete)",
+            flush=True,
+        )
+        return float(floored_only), "october_hard_purge"
 
     # 3) Numeric live age (GraphQL) when no DOM date/text age.
     if live_age_days is not None:
@@ -648,6 +679,52 @@ def is_purge_age_eligible(age_days: float, max_days: float) -> bool:
     if float(max_days) <= 0:
         return True
     return float(age_days) >= float(max_days)
+
+
+def dom_text_has_october_date(text: str) -> bool:
+    """True when DOM text shows an October shelf date (``10/XX``, ``XX/10``, Oct)."""
+    scrubbed = _CLICKS_META_RE.sub(" ", text or "")
+    blob = " ".join(scrubbed.lower().split())
+    if not blob:
+        return False
+    if re.search(r"\b(?:oct(?:ober)?|octubre)\b", blob):
+        return True
+    # US MM/DD: 10/24, 10/28, 10/31
+    for m in re.finditer(r"(?<!\d)10/(\d{1,2})(?:/\d{2,4})?(?!\d)", blob):
+        if 1 <= int(m.group(1)) <= 31:
+            return True
+    # ES DD/MM: 24/10, 28/10, 31/10
+    for m in re.finditer(r"(?<!\d)(\d{1,2})/10(?:/\d{2,4})?(?!\d)", blob):
+        day = int(m.group(1))
+        if day > 12:  # unambiguous day-first October
+            return True
+    return False
+
+
+def apply_october_hard_purge_floor(
+    age: float | None,
+    text: str,
+    *,
+    when: datetime,
+    min_days: float = 7.0,
+) -> tuple[float | None, bool]:
+    """In November, any October DOM date is treated as at least ``min_days`` old.
+
+    FB often refreshes the visible date to ``10/31`` on cards originally listed
+    Oct 24/28; raw math yields ~5d and would SKIP young. Floor to ≥7d so they
+    enter the UI title-match delete queue.
+    """
+    when_utc = when if when.tzinfo is not None else when.replace(tzinfo=timezone.utc)
+    if when_utc.astimezone(timezone.utc).month != 11:
+        return age, False
+    if not dom_text_has_october_date(text):
+        return age, False
+    floor = float(min_days)
+    if age is None:
+        return floor, True
+    if float(age) >= floor:
+        return float(age), True  # still flag as October rule context
+    return floor, True
 
 
 def extract_listed_on_snip(text: str) -> str:

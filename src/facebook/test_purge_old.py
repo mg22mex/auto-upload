@@ -144,6 +144,36 @@ class TestParseListingAgeDays(unittest.TestCase):
         self.assertTrue(is_purge_age_eligible(7.0, 7.0))
         self.assertFalse(is_purge_age_eligible(6.9, 7.0))
 
+    def test_october_hard_purge_floors_1031_in_november(self):
+        """FB may show 10/31 on Oct 24/28 cards — still ≥7d in November."""
+        from src.facebook.purge_old import (
+            apply_october_hard_purge_floor,
+            dom_text_has_october_date,
+        )
+
+        now = datetime(2026, 11, 5, tzinfo=timezone.utc)
+        self.assertTrue(dom_text_has_october_date("10/31"))
+        self.assertTrue(dom_text_has_october_date("Listed on 10/31"))
+        raw = parse_listing_age_days("10/31", now=now)
+        self.assertEqual(raw, 5.0)
+        age, src = resolve_listing_age_for_purge(
+            live_age_days=5.0,
+            live_age_text="10/31",
+            live_card_text="2022 Mercedes-Benz Listed on 10/31",
+            db_age_days=5.0,
+            now=now,
+        )
+        self.assertEqual(age, 7.0)
+        self.assertIn("october_hard_purge", src)
+        self.assertTrue(is_purge_age_eligible(age or 0, 7.0))
+        floored, hit = apply_october_hard_purge_floor(5.0, "10/28", when=now)
+        self.assertTrue(hit)
+        self.assertEqual(floored, 7.0)
+        # Rule only applies in November.
+        oct_now = datetime(2026, 10, 20, tzinfo=timezone.utc)
+        _, hit_oct = apply_october_hard_purge_floor(5.0, "10/31", when=oct_now)
+        self.assertFalse(hit_oct)
+
 
 class TestSellingShelfDiscoveryHydration(unittest.TestCase):
     def test_wait_for_selling_shelf_cards_uses_listed_on_text(self):
@@ -292,6 +322,67 @@ class TestSellingShelfDiscoveryHydration(unittest.TestCase):
             "src.facebook.purge_old", fromlist=["vehicle_title_from_card_text"]
         ).vehicle_title_from_card_text(blob)
         self.assertIn("2022 Mercedes-Benz", title)
+
+    def test_october_1031_card_queued_despite_5d_math(self):
+        """Visible 10/31 (5.0d raw) still purges via title-match in November."""
+        page = MagicMock()
+        store = MagicMock()
+        store.get_live_listings.return_value = []
+        cards = [
+            ShelfListing(
+                "dom-oct31",
+                "",
+                5.0,
+                "10/31",
+                "2018 Audi Q5 Listed on Marketplace · 8 clicks on listing 10/31",
+            ),
+        ]
+        with (
+            patch(
+                "src.facebook.purge_old.collect_selling_listings",
+                return_value=cards,
+            ),
+            patch(
+                "src.facebook.purge_old._remove_from_selling_shelf",
+                return_value=False,
+            ),
+            patch(
+                "src.facebook.purge_old.remove_from_selling_by_title",
+                return_value=True,
+            ) as title_rm,
+            patch("src.facebook.purge_old.random_delay"),
+            patch(
+                "src.facebook.purge_old._catalog_by_autosell_id",
+                return_value={},
+            ),
+            patch(
+                "src.facebook.purge_old._lookup_db_row",
+                return_value=None,
+            ),
+            patch(
+                "src.facebook.purge_old.resolve_listing_age_for_purge",
+                wraps=resolve_listing_age_for_purge,
+            ) as resolve,
+        ):
+            def _resolve(**kwargs):
+                return resolve_listing_age_for_purge(
+                    **{
+                        **kwargs,
+                        "now": datetime(2026, 11, 5, tzinfo=timezone.utc),
+                    }
+                )
+
+            resolve.side_effect = _resolve
+            stats = purge_old_listings_on_page(
+                page,
+                store,
+                account_id="account_2",
+                max_days=7,
+                dry_run=False,
+            )
+        self.assertEqual(stats.deleted, 1)
+        self.assertEqual(stats.skipped_young, 0)
+        title_rm.assert_called_once()
 
     def test_clicks_label_card_queued_for_ui_delete(self):
         """Title+date from clicks-label climb enters purge (≥7d → UI delete)."""
