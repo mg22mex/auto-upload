@@ -170,7 +170,8 @@ def run_preflight_shelf_purge(
     print("=== Preflight shelf/history purge (7-day hard-delete first) ===", flush=True)
     print(
         f"Accounts: {', '.join(account_ids)}  max_days={cfg.max_days} "
-        f"(delete age > {cfg.max_days}d)  dry_run={dry_run} "
+        f"(delete age ≥ {cfg.max_days}d from live shelf Listed-on text; "
+        f"sync.db is fallback only)  dry_run={dry_run} "
         f"abort_on_fail={should_raise and not dry_run}",
         flush=True,
     )

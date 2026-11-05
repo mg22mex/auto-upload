@@ -447,17 +447,32 @@ def _age_days_from_unix(ts: float) -> float:
 
 def _age_from_window(window: str) -> float | None:
     match = _CREATION_NEAR_ID_RE.search(window)
-    if not match:
-        return None
-    ts = _first_unix(match.group(1))
-    return _age_days_from_unix(ts) if ts else None
+    if match:
+        ts = _first_unix(match.group(1))
+        if ts:
+            return _age_days_from_unix(ts)
+    # Fall back to shelf labels: "Listed on 10/24", "hace 9 días", etc.
+    from src.facebook.purge_old import parse_listing_age_days
+
+    return parse_listing_age_days(window)
 
 
 def _age_text_from_window(window: str) -> str:
-    age = _age_from_window(window)
+    match = _CREATION_NEAR_ID_RE.search(window)
+    if match:
+        ts = _first_unix(match.group(1))
+        if ts:
+            age = _age_days_from_unix(ts)
+            return f"creation_time age={age:.1f}d"
+    from src.facebook.purge_old import extract_listed_on_snip, parse_listing_age_days
+
+    snip = extract_listed_on_snip(window)
+    if snip:
+        return snip
+    age = parse_listing_age_days(window)
     if age is None:
         return ""
-    return f"creation_time age={age:.1f}d"
+    return f"listed_text age={age:.1f}d"
 
 
 def _first_title(window: str) -> str:

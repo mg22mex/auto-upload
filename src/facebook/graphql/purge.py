@@ -25,7 +25,9 @@ from src.facebook.purge_old import (
     _posted_at_age_days,
     _should_keep_listing,
     hard_delete_listing_via_playwright,
+    is_purge_age_eligible,
     purge_unknown_age_when_total,
+    resolve_listing_age_for_purge,
 )
 from src.facebook.util import env_bool, random_delay
 from src.store.db import SyncStore
@@ -94,13 +96,23 @@ def purge_old_listings_graphql(
                 print(f"  KEEP item={item.item_id} ({keep_reason})", flush=True)
                 continue
 
-            age = item.age_days
-            source = item.source
-            if age is None:
-                row = _lookup_db_row(store, account_id, item.item_id)
-                age = _posted_at_age_days(row)
-                if age is not None:
-                    source = "sync.db posted_at"
+            row = _lookup_db_row(store, account_id, item.item_id)
+            db_age = _posted_at_age_days(row)
+            live_blob = " ".join(
+                part
+                for part in (
+                    item.age_text or "",
+                    item.title or "",
+                    item.card_text_like() if hasattr(item, "card_text_like") else "",
+                )
+                if part
+            )
+            age, source = resolve_listing_age_for_purge(
+                live_age_days=item.age_days,
+                live_age_text=item.age_text or "",
+                live_card_text=live_blob,
+                db_age_days=db_age,
+            )
             if age is None:
                 if purge_unknown_age_when_total(max_days):
                     print(
@@ -116,7 +128,7 @@ def purge_old_listings_graphql(
                             age_days=None,
                             age_text=item.age_text or "unknown age (total purge)",
                             href=item.href,
-                            source=source,
+                            source=item.source or source,
                         )
                     )
                     continue
@@ -127,11 +139,11 @@ def purge_old_listings_graphql(
                     flush=True,
                 )
                 continue
-            if age <= float(max_days):
+            if not is_purge_age_eligible(age, max_days):
                 stats.skipped_young += 1
                 print(
                     f"  SKIP young item={item.item_id} age={age:.1f}d "
-                    f"(≤{max_days}d, via {source})",
+                    f"(<{max_days}d, via {source})",
                     flush=True,
                 )
                 continue

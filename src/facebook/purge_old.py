@@ -56,6 +56,19 @@ _MONTHS_EN = {
     "october": 10,
     "november": 11,
     "december": 12,
+    # Shelf abbreviations (Listed on Oct 24)
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "sept": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
 }
 
 
@@ -155,8 +168,28 @@ def hard_delete_listing_via_playwright(
     return bool(ok)
 
 
+def _age_from_calendar_date(
+    year: int,
+    month: int,
+    day: int,
+    *,
+    when: datetime,
+    year_explicit: bool = False,
+) -> float | None:
+    try:
+        posted = datetime(year, month, day, tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    if posted > when and not year_explicit:
+        posted = posted.replace(year=year - 1)
+    return max(0.0, (when - posted).total_seconds() / 86400.0)
+
+
 def parse_listing_age_days(text: str, *, now: datetime | None = None) -> float | None:
     """Parse Marketplace age strings (EN/ES) into approximate age in days.
+
+    Handles relative phrases and absolute shelf labels such as
+    ``Listed on 10/24``, ``Listed on Oct 24``, ``Publicado el 24/10``.
 
     Returns ``None`` when no age phrase is recognized.
     """
@@ -210,6 +243,48 @@ def parse_listing_age_days(text: str, *, now: datetime | None = None) -> float |
     if m:
         return float(int(m.group(1) or m.group(2)) * 30)
 
+    # Absolute numeric: "Listed on 10/24" / "Listed on 10/24/2025" (US MM/DD).
+    m = re.search(
+        r"listed\s+on\s+(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?",
+        blob,
+    )
+    if m:
+        month, day = int(m.group(1)), int(m.group(2))
+        year_raw = m.group(3)
+        year_explicit = bool(year_raw)
+        if year_raw:
+            year = int(year_raw)
+            if year < 100:
+                year += 2000
+        else:
+            year = when.year
+        age = _age_from_calendar_date(
+            year, month, day, when=when, year_explicit=year_explicit
+        )
+        if age is not None:
+            return age
+
+    # Absolute numeric ES: "Publicado el 24/10" / "Publicado el 24/10/2025" (DD/MM).
+    m = re.search(
+        r"publicado\s+(?:el|en)\s+(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?",
+        blob,
+    )
+    if m:
+        day, month = int(m.group(1)), int(m.group(2))
+        year_raw = m.group(3)
+        year_explicit = bool(year_raw)
+        if year_raw:
+            year = int(year_raw)
+            if year < 100:
+                year += 2000
+        else:
+            year = when.year
+        age = _age_from_calendar_date(
+            year, month, day, when=when, year_explicit=year_explicit
+        )
+        if age is not None:
+            return age
+
     # Absolute: "Publicado el 20 de agosto" / "Listed on August 20"
     m = re.search(
         r"(?:publicado\s+el|listed\s+on)\s+(\d{1,2})\s+de\s+([a-záéíóúñ]+)",
@@ -219,14 +294,9 @@ def parse_listing_age_days(text: str, *, now: datetime | None = None) -> float |
         day = int(m.group(1))
         month = _MONTHS_ES.get(m.group(2))
         if month:
-            year = when.year
-            try:
-                posted = datetime(year, month, day, tzinfo=timezone.utc)
-            except ValueError:
-                return None
-            if posted > when:
-                posted = posted.replace(year=year - 1)
-            return max(0.0, (when - posted).total_seconds() / 86400.0)
+            age = _age_from_calendar_date(when.year, month, day, when=when)
+            if age is not None:
+                return age
 
     m = re.search(
         r"listed\s+on\s+([a-z]+)\s+(\d{1,2})(?:,\s*(\d{4}))?",
@@ -235,17 +305,82 @@ def parse_listing_age_days(text: str, *, now: datetime | None = None) -> float |
     if m:
         month = _MONTHS_EN.get(m.group(1))
         day = int(m.group(2))
-        year = int(m.group(3)) if m.group(3) else when.year
+        year_raw = m.group(3)
+        year = int(year_raw) if year_raw else when.year
         if month:
-            try:
-                posted = datetime(year, month, day, tzinfo=timezone.utc)
-            except ValueError:
-                return None
-            if posted > when and not m.group(3):
-                posted = posted.replace(year=year - 1)
-            return max(0.0, (when - posted).total_seconds() / 86400.0)
+            age = _age_from_calendar_date(
+                year, month, day, when=when, year_explicit=bool(year_raw)
+            )
+            if age is not None:
+                return age
 
     return None
+
+
+def resolve_listing_age_for_purge(
+    *,
+    live_age_days: float | None,
+    live_age_text: str = "",
+    live_card_text: str = "",
+    db_age_days: float | None = None,
+    now: datetime | None = None,
+) -> tuple[float | None, str]:
+    """Resolve purge age: live FB shelf/GraphQL wins over ``sync.db``.
+
+    Re-parses ``Listed on …`` / relative age text when ``live_age_days`` is
+    missing. Database ``posted_at`` is used only when the live platform gives
+    no age signal.
+    """
+    when = now or datetime.now(timezone.utc)
+    age = live_age_days
+    source = "live"
+    if age is None:
+        blob = f"{live_age_text} {live_card_text}".strip()
+        age = parse_listing_age_days(blob, now=when)
+        if age is not None:
+            source = "live_text"
+
+    if age is not None:
+        if db_age_days is not None and abs(float(age) - float(db_age_days)) >= 0.5:
+            print(
+                f"  age conflict: live={age:.1f}d vs sync.db={db_age_days:.1f}d "
+                f"— using live platform state",
+                flush=True,
+            )
+            return float(age), f"{source} (db={db_age_days:.1f}d ignored)"
+        return float(age), source
+
+    if db_age_days is not None:
+        return float(db_age_days), "sync.db posted_at"
+    return None, "unknown"
+
+
+def is_purge_age_eligible(age_days: float, max_days: float) -> bool:
+    """True when listing is ``max_days`` or older (strict 7-day rule).
+
+    ``max_days <= 0`` means total purge (every aged/unknown target).
+    """
+    if float(max_days) <= 0:
+        return True
+    return float(age_days) >= float(max_days)
+
+
+def extract_listed_on_snip(text: str) -> str:
+    """Best-effort snippet of FB shelf date/age label for logs."""
+    blob = text or ""
+    m = re.search(
+        r"(listed\s+on\s+\d{1,2}/\d{1,2}(?:/\d{2,4})?"
+        r"|listed\s+on\s+[A-Za-z]+\s+\d{1,2}(?:,\s*\d{4})?"
+        r"|publicado\s+(?:el|en)\s+\d{1,2}/\d{1,2}(?:/\d{2,4})?"
+        r"|publicado[^\n]{0,48}"
+        r"|listed[^\n]{0,48}"
+        r"|hace\s+\d+[^\n]{0,24}"
+        r"|\d+\s+days?\s+ago"
+        r"|\d+\s+d[ií]as?)",
+        blob,
+        re.I,
+    )
+    return m.group(0).strip() if m else ""
 
 
 def _card_blob_for_link(link) -> str:
@@ -313,21 +448,13 @@ def collect_selling_listings(
                     continue
                 blob = _card_blob_for_link(loc)
                 age = parse_listing_age_days(blob)
-                age_snip = ""
-                m = re.search(
-                    r"(publicado[^\n]{0,40}|listed[^\n]{0,40}|hace\s+\d+[^\n]{0,20}"
-                    r"|\d+\s+days?\s+ago|\d+\s+d[ií]as?)",
-                    blob,
-                    re.I,
-                )
-                if m:
-                    age_snip = m.group(0).strip()
+                age_snip = extract_listed_on_snip(blob)
                 found[item_id] = ShelfListing(
                     item_id=item_id,
                     href=href,
                     age_days=age,
                     age_text=age_snip,
-                    card_text=blob[:240],
+                    card_text=blob[:500],
                 )
             if len(found) == before:
                 stagnant += 1
@@ -1456,13 +1583,14 @@ def purge_old_listings_on_page(
                 flush=True,
             )
             continue
-        age = card.age_days
-        source = "ui" if "sync.db" not in (card.age_text or "") else "sync.db"
-        if age is None:
-            row = _lookup_db_row(store, account_id, card.item_id)
-            age = _posted_at_age_days(row)
-            if age is not None:
-                source = "sync.db posted_at"
+        row = _lookup_db_row(store, account_id, card.item_id)
+        db_age = _posted_at_age_days(row)
+        age, source = resolve_listing_age_for_purge(
+            live_age_days=card.age_days,
+            live_age_text=card.age_text or "",
+            live_card_text=card.card_text or "",
+            db_age_days=db_age,
+        )
         if age is None:
             if purge_unknown_age_when_total(max_days):
                 print(
@@ -1488,11 +1616,11 @@ def purge_old_listings_on_page(
                 flush=True,
             )
             continue
-        if age <= float(max_days):
+        if not is_purge_age_eligible(age, max_days):
             stats.skipped_young += 1
             print(
                 f"  SKIP young item={card.item_id} age={age:.1f}d "
-                f"(≤{max_days}d, via {source})",
+                f"(<{max_days}d, via {source})",
                 flush=True,
             )
             continue
