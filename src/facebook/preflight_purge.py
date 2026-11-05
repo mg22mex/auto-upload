@@ -195,12 +195,12 @@ def run_preflight_shelf_purge(
 
     result.ran = True
     use_graphql = graphql_enabled()
-    if use_graphql:
-        print(
-            "Preflight mode: GraphQL/HTTP + Playwright fallback on delete fail "
-            "(FB_USE_GRAPHQL=1)",
-            flush=True,
-        )
+    print(
+        "Preflight discovery: Playwright DOM on /marketplace/you/selling "
+        "(Listed-on text) — GraphQL HTTP shelf skipped when empty/400"
+        + (" ; deletes prefer GraphQL+UI fallback" if use_graphql else ""),
+        flush=True,
+    )
 
     for account_id in account_ids:
         session_dir = resolve_session_dir(config, account_id, root)
@@ -242,6 +242,8 @@ def run_preflight_shelf_purge(
                     keep_autosell_ids=cfg.keep_autosell_ids or None,
                     keep_title_re=cfg.keep_title_re,
                     root=root,
+                    # Never miss Oct 24/28 shelf cards when GraphQL returns 0.
+                    force_dom_discovery=True,
                 )
         except PreflightPurgeAborted:
             raise

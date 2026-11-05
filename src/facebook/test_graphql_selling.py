@@ -172,6 +172,120 @@ class GraphqlPurgeTests(unittest.TestCase):
         delete.assert_called_once()
         self.assertTrue(delete.call_args.kwargs.get("verify", False))
 
+    def test_empty_graphql_forces_playwright_dom_discovery(self):
+        """GraphQL shelf 0 → Playwright /you/selling + Listed-on purge."""
+        from src.facebook.graphql.selling import ActiveListing
+        from src.facebook.purge_old import ShelfListing
+
+        session = FbSessionContext(
+            c_user="42", xs="xs", fb_dtsg="dtsg", cookies={"c_user": "42", "xs": "xs"}
+        )
+        store = MagicMock()
+        store.get_live_listings.return_value = []
+        page = MagicMock()
+        dom_card = ShelfListing(
+            item_id="9999888877776666",
+            href="https://www.facebook.com/marketplace/item/9999888877776666/",
+            age_days=12.0,
+            age_text="Listed on 10/24",
+            card_text="2020 Audi Listed on 10/24",
+        )
+
+        with (
+            patch(
+                "src.facebook.graphql.purge.fetch_active_selling_listings",
+                return_value=[],
+            ),
+            patch(
+                "src.facebook.graphql.purge._active_from_dom_shelf",
+                return_value=[
+                    ActiveListing(
+                        item_id=dom_card.item_id,
+                        title=dom_card.card_text,
+                        age_days=dom_card.age_days,
+                        age_text=dom_card.age_text,
+                        href=dom_card.href,
+                        source="playwright_dom",
+                    )
+                ],
+            ) as dom,
+            patch(
+                "src.facebook.graphql.purge.delete_listing_graphql",
+                return_value=True,
+            ) as delete,
+            patch("src.facebook.graphql.purge.random_delay"),
+            patch(
+                "src.facebook.graphql.purge._catalog_by_autosell_id",
+                return_value={},
+            ),
+        ):
+            stats = purge_old_listings_graphql(
+                session,
+                store,
+                account_id="account_1",
+                max_days=7.0,
+                dry_run=False,
+                client=MagicMock(),
+                page=page,
+            )
+
+        self.assertEqual(stats.found, 1)
+        self.assertEqual(stats.deleted, 1)
+        dom.assert_called_once_with(page)
+        delete.assert_called_once()
+
+    def test_force_dom_discovery_skips_graphql_http(self):
+        from src.facebook.graphql.selling import ActiveListing
+
+        session = FbSessionContext(
+            c_user="42", xs="xs", fb_dtsg="dtsg", cookies={"c_user": "42", "xs": "xs"}
+        )
+        store = MagicMock()
+        store.get_live_listings.return_value = []
+        page = MagicMock()
+
+        with (
+            patch(
+                "src.facebook.graphql.purge.fetch_active_selling_listings",
+            ) as fetch,
+            patch(
+                "src.facebook.graphql.purge._active_from_dom_shelf",
+                return_value=[
+                    ActiveListing(
+                        item_id="1111222233334444",
+                        title="Listed on 10/28",
+                        age_days=8.0,
+                        age_text="Listed on 10/28",
+                        href="https://www.facebook.com/marketplace/item/1111222233334444/",
+                        source="playwright_dom",
+                    )
+                ],
+            ),
+            patch(
+                "src.facebook.graphql.purge.delete_listing_graphql",
+                return_value=True,
+            ),
+            patch("src.facebook.graphql.purge.random_delay"),
+            patch(
+                "src.facebook.graphql.purge._catalog_by_autosell_id",
+                return_value={},
+            ),
+        ):
+            stats = purge_old_listings_graphql(
+                session,
+                store,
+                account_id="account_1",
+                max_days=7.0,
+                dry_run=False,
+                client=MagicMock(),
+                page=page,
+                force_dom_discovery=True,
+            )
+
+        fetch.assert_not_called()
+        self.assertEqual(stats.found, 1)
+        self.assertEqual(stats.deleted, 1)
+
     def test_graphql_delete_fail_falls_back_to_playwright(self):
         session = FbSessionContext(
             c_user="42", xs="xs", fb_dtsg="dtsg", cookies={"c_user": "42", "xs": "xs"}

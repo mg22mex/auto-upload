@@ -1464,17 +1464,19 @@ def purge_old_listings_on_page(
     keep_autosell_ids: set[str] | None = None,
     keep_title_re: re.Pattern[str] | None = None,
     root: Path | None = None,
+    force_dom_discovery: bool = False,
 ) -> PurgeStats:
     """Delete selling-shelf cards older than ``max_days``; update sync.db.
 
     Optional keep filters preserve specific item ids, autosell ids, or title
     regex matches (e.g. today's Ford Mustang GT).
 
-    When ``FB_USE_GRAPHQL=1``, discovers active item ids via GraphQL/HTTP and
-    deletes with ``data/graphql/delete_listing.json``. Per-item GraphQL failures
-    / rate-limits fall back to Playwright shelf delete when UI fallback is on.
+    When ``FB_USE_GRAPHQL=1``, discovers via GraphQL/HTTP then deletes with
+    ``data/graphql/delete_listing.json``. If discovery returns 0 items / 400,
+    or ``force_dom_discovery=True`` (preflight), loads
+    ``/marketplace/you/selling`` in Playwright and parses ``Listed on…`` text.
     """
-    from src.facebook.graphql.errors import FacebookGraphqlFallback
+    from src.facebook.graphql.errors import FacebookGraphqlFallback, FacebookGraphqlError
     from src.facebook.graphql.mode import graphql_enabled, graphql_ui_fallback
     from src.facebook.remover import remove_vehicle_listing
 
@@ -1487,10 +1489,11 @@ def purge_old_listings_on_page(
                 page.context, page=page, account_id=account_id, fetch_tokens=True
             )
             print(
-                f"  [{account_id}] GraphQL purge session {session.redacted_summary()}",
+                f"  [{account_id}] GraphQL purge session {session.redacted_summary()}"
+                + (" (DOM discovery forced)" if force_dom_discovery else ""),
                 flush=True,
             )
-            return purge_old_listings_graphql(
+            stats_gql = purge_old_listings_graphql(
                 session,
                 store,
                 account_id=account_id,
@@ -1504,12 +1507,30 @@ def purge_old_listings_on_page(
                 keep_title_re=keep_title_re,
                 root=root,
                 page=page,
+                force_dom_discovery=force_dom_discovery,
+            )
+            # DOM-forced / non-empty discovery: done (deletes already ran).
+            if force_dom_discovery or stats_gql.found > 0:
+                return stats_gql
+            print(
+                f"  [{account_id}] GraphQL shelf still empty after DOM merge — "
+                f"running full Playwright purge path",
+                flush=True,
             )
         except FacebookGraphqlFallback as exc:
             if not graphql_ui_fallback():
                 raise
             print(
                 f"  [{account_id}] GraphQL purge fallback → DOM ({exc})",
+                flush=True,
+            )
+        except FacebookGraphqlError as exc:
+            status = getattr(exc, "status_code", None)
+            if not graphql_ui_fallback():
+                raise
+            print(
+                f"  [{account_id}] GraphQL purge HTTP "
+                f"{status or 'error'} → Playwright DOM ({exc})",
                 flush=True,
             )
         except Exception as exc:
@@ -1519,12 +1540,19 @@ def purge_old_listings_on_page(
                 f"  [{account_id}] GraphQL purge error → DOM ({exc})",
                 flush=True,
             )
+    elif force_dom_discovery:
+        print(
+            f"  [{account_id}] Playwright DOM shelf discovery "
+            f"(force_dom_discovery=1) — Listed-on text from /you/selling",
+            flush=True,
+        )
 
     stats = PurgeStats()
     listings = collect_selling_listings(page)
     stats.found = len(listings)
     print(
-        f"  [{account_id}] shelf scan: {stats.found} listing(s) with item links",
+        f"  [{account_id}] Playwright shelf scan: {stats.found} listing(s) "
+        f"with item links + Listed-on ages",
         flush=True,
     )
 

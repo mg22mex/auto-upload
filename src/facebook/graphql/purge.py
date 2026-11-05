@@ -33,6 +33,51 @@ from src.facebook.util import env_bool, random_delay
 from src.store.db import SyncStore
 
 
+def _active_from_dom_shelf(page: Page) -> list[ActiveListing]:
+    """Load /marketplace/you/selling in Playwright and parse Listed-on ages."""
+    from src.facebook.purge_old import collect_selling_listings
+
+    cards = collect_selling_listings(page)
+    out: list[ActiveListing] = []
+    for card in cards:
+        out.append(
+            ActiveListing(
+                item_id=card.item_id,
+                title=(card.card_text or "")[:120],
+                age_days=card.age_days,
+                age_text=card.age_text,
+                href=card.href,
+                source="playwright_dom",
+            )
+        )
+    return out
+
+
+def _merge_dom_discovery(
+    existing: list[ActiveListing],
+    dom_listings: list[ActiveListing],
+) -> list[ActiveListing]:
+    """Prefer Playwright DOM age/Listed-on text over GraphQL/HTTP rows."""
+    by_id: dict[str, ActiveListing] = {item.item_id: item for item in existing}
+    for item in dom_listings:
+        prev = by_id.get(item.item_id)
+        if prev is None:
+            by_id[item.item_id] = item
+            continue
+        # DOM wins for age signals (Listed on 10/24 etc.).
+        by_id[item.item_id] = ActiveListing(
+            item_id=item.item_id,
+            title=item.title or prev.title,
+            age_days=(
+                item.age_days if item.age_days is not None else prev.age_days
+            ),
+            age_text=item.age_text or prev.age_text,
+            href=item.href or prev.href,
+            source="playwright_dom",
+        )
+    return list(by_id.values())
+
+
 def purge_old_listings_graphql(
     session: FbSessionContext,
     store: SyncStore,
@@ -49,25 +94,74 @@ def purge_old_listings_graphql(
     root: Path | None = None,
     client: GraphQLClient | None = None,
     page: Page | None = None,
+    force_dom_discovery: bool = False,
 ) -> PurgeStats:
     """Discover active listings via GraphQL/HTTP and hard-delete old ones.
 
-    Uses ``data/graphql/delete_listing.json``. When GraphQL delete fails or is
-    rate-limited and ``page`` is provided, falls back to Playwright shelf delete
-    (``FB_GQL_FALLBACK_UI``, default on).
+    Uses ``data/graphql/delete_listing.json``. When GraphQL discovery returns 0
+    items / errors, or ``force_dom_discovery`` is set, loads the selling shelf
+    in Playwright and parses ``Listed on…`` DOM text. Delete failures /
+    rate-limits also fall back to Playwright when ``page`` is provided.
     """
     stats = PurgeStats()
     owns = client is None
     gql = client or GraphQLClient(session)
     try:
-        listings = fetch_active_selling_listings(
-            session, root=root, client=gql
-        )
+        listings: list[ActiveListing] = []
+        discovery_error: Exception | None = None
+        if not force_dom_discovery:
+            try:
+                listings = fetch_active_selling_listings(
+                    session, root=root, client=gql
+                )
+            except Exception as exc:
+                discovery_error = exc
+                status = getattr(exc, "status_code", None)
+                print(
+                    f"  [{account_id}] GraphQL/HTTP selling discovery failed"
+                    f"{f' HTTP {status}' if status else ''}: {exc}",
+                    flush=True,
+                )
+                listings = []
+
         # Enrich / fill from sync.db when discovery is thin or ages missing.
         listings = _merge_with_sync_db(listings, store, account_id)
+        print(
+            f"  [{account_id}] GraphQL shelf: {len(listings)} listing(s)",
+            flush=True,
+        )
+
+        need_dom = force_dom_discovery or len(listings) == 0 or discovery_error is not None
+        if need_dom and page is not None:
+            why = (
+                "forced"
+                if force_dom_discovery
+                else ("discovery error" if discovery_error else "0 GraphQL/HTTP items")
+            )
+            print(
+                f"  [{account_id}] Playwright DOM selling discovery "
+                f"({why}) → https://www.facebook.com/marketplace/you/selling",
+                flush=True,
+            )
+            try:
+                dom_listings = _active_from_dom_shelf(page)
+                listings = _merge_dom_discovery(listings, dom_listings)
+                print(
+                    f"  [{account_id}] Playwright shelf: {len(dom_listings)} "
+                    f"card(s); combined={len(listings)}",
+                    flush=True,
+                )
+            except Exception as exc:
+                print(
+                    f"  [{account_id}] Playwright DOM discovery failed: {exc}",
+                    flush=True,
+                )
+                if not listings and discovery_error is not None:
+                    raise discovery_error from exc
+
         stats.found = len(listings)
         print(
-            f"  [{account_id}] GraphQL shelf: {stats.found} listing(s)",
+            f"  [{account_id}] purge discovery total: {stats.found} listing(s)",
             flush=True,
         )
 

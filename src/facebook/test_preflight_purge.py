@@ -121,6 +121,7 @@ class TestRunPreflightShelfPurge(unittest.TestCase):
         kwargs = purge.call_args.kwargs
         self.assertEqual(kwargs["max_days"], 7.0)
         self.assertFalse(kwargs["dry_run"])
+        self.assertTrue(kwargs.get("force_dom_discovery"))
 
     def test_aborts_on_failed_deletes(self):
         store = MagicMock()
