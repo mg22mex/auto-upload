@@ -197,7 +197,8 @@ def run_preflight_shelf_purge(
     use_graphql = graphql_enabled()
     print(
         "Preflight discovery: Playwright DOM on /marketplace/you/selling "
-        "(Listed-on text) — GraphQL HTTP shelf skipped when empty/400"
+        "(Listed on / Publicado / bare 10/24|24/10 dates; title from card block) "
+        "— GraphQL HTTP shelf skipped when empty/400"
         + (" ; deletes prefer GraphQL+UI fallback" if use_graphql else ""),
         flush=True,
     )

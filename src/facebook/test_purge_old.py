@@ -94,7 +94,9 @@ class TestSellingShelfDiscoveryHydration(unittest.TestCase):
         ok = wait_for_selling_shelf_cards(page, timeout_ms=1000)
         self.assertTrue(ok)
         page.get_by_text.assert_called()
-        self.assertEqual(page.get_by_text.call_args.args[0], "Listed on")
+        # First wait uses combined EN/ES + bare-date regex.
+        first_arg = page.get_by_text.call_args.args[0]
+        self.assertTrue(hasattr(first_arg, "search") or first_arg == "Listed on")
 
     def test_hydrate_selling_shelf_scrolls_runs_loop(self):
         page = MagicMock()
@@ -147,10 +149,70 @@ class TestSellingShelfDiscoveryHydration(unittest.TestCase):
         from src.facebook import purge_old as mod
 
         src = inspect.getsource(mod._extract_selling_cards_via_js)
-        self.assertIn("Listed on", src)
+        self.assertIn("Listed", src)
         self.assertIn("Publicado", src)
         self.assertIn("climbCard", src)
         self.assertIn("date_text", src)
+        self.assertIn("RAW_DATE_RE", src)
+        self.assertIn("TITLE_RE", src)
+        self.assertIn("depth >= 2 && depth <= 4", src)
+        self.assertIn("failed", src)
+
+    def test_bare_slash_dates_es_and_en(self):
+        now = datetime(2026, 11, 5, tzinfo=timezone.utc)
+        self.assertGreaterEqual(parse_listing_age_days("10/24", now=now) or 0, 12.0)
+        self.assertGreaterEqual(parse_listing_age_days("24/10", now=now) or 0, 12.0)
+        self.assertGreaterEqual(parse_listing_age_days("10/28", now=now) or 0, 8.0)
+        self.assertGreaterEqual(parse_listing_age_days("28/10", now=now) or 0, 8.0)
+        self.assertGreaterEqual(
+            parse_listing_age_days("Publicado 24/10", now=now) or 0, 12.0
+        )
+
+    def test_vehicle_title_from_card_text(self):
+        from src.facebook.purge_old import vehicle_title_from_card_text
+
+        self.assertIn(
+            "2022 Mercedes-Benz",
+            vehicle_title_from_card_text(
+                "2022 Mercedes-Benz C300 Publicado el 24/10 $450000"
+            ),
+        )
+        self.assertIn(
+            "1957 Plymouth Savoy",
+            vehicle_title_from_card_text("1957 Plymouth Savoy Listed on 10/28"),
+        )
+
+    def test_title_only_dom_card_ingested(self):
+        page = MagicMock()
+        page.locator.return_value.count.return_value = 0
+        with (
+            patch(
+                "src.facebook.purge_old.wait_for_selling_shelf_cards",
+                return_value=True,
+            ),
+            patch("src.facebook.purge_old.hydrate_selling_shelf_scrolls"),
+            patch(
+                "src.facebook.purge_old._extract_selling_cards_via_js",
+                return_value=[
+                    {
+                        "item_id": "",
+                        "href": "",
+                        "date_text": "24/10",
+                        "title": "2022 Mercedes-Benz",
+                        "blob": "2022 Mercedes-Benz 24/10 $450000",
+                    }
+                ],
+            ),
+            patch(
+                "src.facebook.purge_old._extract_selling_cards_via_text_locators",
+                return_value=[],
+            ),
+        ):
+            cards = collect_selling_listings(page, max_scrolls=1)
+        self.assertEqual(len(cards), 1)
+        self.assertTrue(cards[0].item_id.startswith("dom-"))
+        self.assertIn("2022 Mercedes-Benz", cards[0].card_text)
+        self.assertGreaterEqual(cards[0].age_days or 0, 7.0)
 
 
 class TestPurgeOldListingsOnPage(unittest.TestCase):

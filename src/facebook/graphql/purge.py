@@ -37,16 +37,21 @@ def _active_from_dom_shelf(page: Page) -> list[ActiveListing]:
     """Load /marketplace/you/selling in Playwright and parse Listed-on ages."""
     from src.facebook.purge_old import collect_selling_listings
 
+    from src.facebook.purge_old import vehicle_title_from_card_text
+
     cards = collect_selling_listings(page)
     out: list[ActiveListing] = []
     for card in cards:
+        title = vehicle_title_from_card_text(card.card_text or "") or (
+            card.card_text or ""
+        )[:120]
         out.append(
             ActiveListing(
                 item_id=card.item_id,
-                title=(card.card_text or "")[:120],
+                title=title,
                 age_days=card.age_days,
                 age_text=card.age_text,
-                href=card.href,
+                href=card.href if str(card.item_id).isdigit() else (card.href or ""),
                 source="playwright_dom",
             )
         )
@@ -286,15 +291,23 @@ def purge_old_listings_graphql(
                 str(row["autosell_id"]) if row is not None else item.item_id
             )
             ok = False
+            # Title-only DOM cards (``dom-…``) skip GraphQL — Playwright title delete.
             try:
-                ok = delete_listing_graphql(
-                    session,
-                    item.href,
-                    autosell_id=autosell_id,
-                    root=root,
-                    client=gql,
-                    verify=True,
-                )
+                if str(item.item_id).isdigit() and item.href:
+                    ok = delete_listing_graphql(
+                        session,
+                        item.href,
+                        autosell_id=autosell_id,
+                        root=root,
+                        client=gql,
+                        verify=True,
+                    )
+                else:
+                    print(
+                        f"  SKIP GraphQL (no numeric item_id) item={item.item_id} "
+                        f"title={item.title[:60]!r} — UI title delete",
+                        flush=True,
+                    )
             except Exception as exc:
                 # Unknown-age ghosts: FB field_exception on delete — ignore, not FAIL.
                 if item.age_days is None and is_phantom_delete_error(exc):

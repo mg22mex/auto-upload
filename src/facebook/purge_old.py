@@ -1,6 +1,7 @@
 """Purge Marketplace selling-shelf listings older than a day threshold."""
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -409,6 +410,40 @@ def parse_listing_age_days(text: str, *, now: datetime | None = None) -> float |
             if age is not None:
                 return age
 
+    # Bare slash dates (ES UI often drops the "Publicado" prefix): 10/24, 24/10.
+    for m in re.finditer(
+        r"(?<!\d)(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?(?!\d)",
+        blob,
+    ):
+        a, b = int(m.group(1)), int(m.group(2))
+        year_raw = m.group(3)
+        year_explicit = bool(year_raw)
+        if year_raw:
+            year = int(year_raw)
+            if year < 100:
+                year += 2000
+        else:
+            year = when.year
+        candidates: list[tuple[int, int]] = []
+        if a > 12 and 1 <= b <= 12:
+            candidates.append((b, a))  # DD/MM → (month, day)
+        elif b > 12 and 1 <= a <= 12:
+            candidates.append((a, b))  # MM/DD
+        elif 1 <= a <= 12 and 1 <= b <= 12:
+            # Ambiguous: try MM/DD then DD/MM; prefer older (purge-safe).
+            candidates.extend([(a, b), (b, a)])
+        ages: list[float] = []
+        for month, day in candidates:
+            if not (1 <= month <= 12 and 1 <= day <= 31):
+                continue
+            age = _age_from_calendar_date(
+                year, month, day, when=when, year_explicit=year_explicit
+            )
+            if age is not None and age <= 400:
+                ages.append(age)
+        if ages:
+            return max(ages)
+
     return None
 
 
@@ -471,11 +506,36 @@ def extract_listed_on_snip(text: str) -> str:
         r"|listed[^\n]{0,48}"
         r"|hace\s+\d+[^\n]{0,24}"
         r"|\d+\s+days?\s+ago"
-        r"|\d+\s+d[ií]as?)",
+        r"|\d+\s+d[ií]as?"
+        r"|\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b)",
         blob,
         re.I,
     )
     return m.group(0).strip() if m else ""
+
+
+_VEHICLE_TITLE_RE = re.compile(
+    r"\b((?:19|20)\d{2}\s+[A-Za-zÁÉÍÓÚÑáéíóúñ]"
+    r"[A-Za-zÁÉÍÓÚÑáéíóúñ0-9\-\s]{2,60})"
+)
+
+
+def vehicle_title_from_card_text(text: str) -> str:
+    """Pull ``2022 Mercedes-Benz`` / ``1957 Plymouth Savoy``-style titles."""
+    blob = re.sub(r"\s+", " ", (text or "").strip())
+    if not blob:
+        return ""
+    # Prefer chunk before Listed on / Publicado / bare date.
+    head = re.split(
+        r"(?i)\b(?:listed\s+on|publicado)\b|\b\d{1,2}/\d{1,2}\b",
+        blob,
+        maxsplit=1,
+    )[0].strip()
+    for candidate in (head, blob):
+        m = _VEHICLE_TITLE_RE.search(candidate)
+        if m:
+            return m.group(1).strip()[:80]
+    return head[:80] if 5 <= len(head) <= 80 else ""
 
 
 # Prefer text content over fragile structural roles (Seller Hub DOM churns).
@@ -484,6 +544,12 @@ _LISTED_ON_TEXT_NEEDLES = (
     "Publicado el",
     "Publicado en",
     "Publicado",
+)
+
+# EN + ES labels and raw slash dates (10/24, 24/10, 10/28, 28/10).
+_LISTED_ON_WAIT_RE = re.compile(
+    r"Listed\s+on|Publicado(?:\s+el|\s+en)?|\b\d{1,2}/\d{1,2}\b",
+    re.I,
 )
 
 _ITEM_HREF_SELECTORS = (
@@ -510,15 +576,28 @@ def wait_for_selling_shelf_cards(
     *,
     timeout_ms: int | None = None,
 ) -> bool:
-    """Wait until Seller Hub shows ``Listed on`` / ``Publicado`` date labels."""
+    """Wait until Seller Hub shows EN/ES date labels or bare ``MM/DD``/``DD/MM``."""
     ms = int(timeout_ms if timeout_ms is not None else _shelf_wait_timeout_ms())
     deadline_errors: list[str] = []
 
-    # 1) Text-first wait (matches current Seller Hub; roles often missing).
+    # 1) Combined EN/ES + raw slash-date wait (Spanish accounts often omit labels).
+    try:
+        page.get_by_text(_LISTED_ON_WAIT_RE).first.wait_for(
+            state="visible", timeout=ms
+        )
+        print(
+            f"  shelf wait OK text=EN/ES|raw-date timeout_ms={ms}",
+            flush=True,
+        )
+        return True
+    except Exception as exc:
+        deadline_errors.append(f"text:combined: {exc}")
+
+    # 2) Explicit needle pass (Listed on / Publicado el / …).
     for needle in _LISTED_ON_TEXT_NEEDLES:
         try:
             page.get_by_text(needle, exact=False).first.wait_for(
-                state="visible", timeout=ms
+                state="visible", timeout=max(3_000, ms // 2)
             )
             print(
                 f"  shelf wait OK text={needle!r} timeout_ms={ms}",
@@ -527,16 +606,16 @@ def wait_for_selling_shelf_cards(
             return True
         except Exception as exc:
             deadline_errors.append(f"text:{needle}: {exc}")
-            ms = max(3_000, ms // 2)
             continue
 
-    # 2) Soft fallback: marketplace item anchors (older layouts).
+    # 3) Soft fallback: marketplace item anchors (older layouts).
     for sel in (
         'a[href*="/marketplace/item/"]',
-        'xpath=//*[contains(text(),"Listed on") or contains(text(),"Publicado")]',
+        'xpath=//*[contains(text(),"Listed on") or contains(text(),"Publicado") '
+        'or contains(text(),"/")]',
     ):
         try:
-            page.wait_for_selector(sel, state="visible", timeout=ms)
+            page.wait_for_selector(sel, state="visible", timeout=max(3_000, ms // 2))
             print(
                 f"  shelf wait OK selector={sel!r} timeout_ms={ms}",
                 flush=True,
@@ -544,7 +623,6 @@ def wait_for_selling_shelf_cards(
             return True
         except Exception as exc:
             deadline_errors.append(f"{sel}: {exc}")
-            ms = max(3_000, ms // 2)
             continue
 
     print(
@@ -655,21 +733,28 @@ def _card_blob_for_link(link) -> str:
 
 
 def _extract_selling_cards_via_js(page: Page) -> list[dict[str, str]]:
-    """Find Seller Hub cards by ``Listed on`` / ``Publicado`` text, then climb.
+    """Find Seller Hub cards by EN/ES date labels or bare slash dates, then climb.
 
-    Facebook's current Seller Hub often lacks ``role=listitem`` / item anchors
-    at the top level. Start from date-label text nodes, walk up to a card-sized
-    parent, then pull listing href/id + the exact date snippet.
+    Facebook's current Seller Hub (esp. Spanish UI) often lacks ``role=listitem``
+    / item anchors. Start from date text (``Listed on``, ``Publicado el``,
+    ``Publicado``, ``10/24``, ``24/10``…), walk up 2–4 parent nodes for the card
+    block, extract vehicle title + optional item href.
     """
     try:
         raw = page.evaluate(
             r"""() => {
-              const DATE_RE = /Listed on|Publicado(?:\s+el|\s+en)?/i;
+              const DATE_LABEL_RE = /Listed\s+on|Publicado(?:\s+el|\s+en)?/i;
+              const RAW_DATE_RE =
+                /\b(?:0?[1-9]|1[0-2])\/(?:0?[1-9]|[12]\d|3[01])(?:\/\d{2,4})?\b|\b(?:0?[1-9]|[12]\d|3[01])\/(?:0?[1-9]|1[0-2])(?:\/\d{2,4})?\b/;
               const DATE_SNIP_RE =
-                /Listed on\s+[^\n,]{0,40}|Publicado(?:\s+el|\s+en)?\s+[^\n,]{0,40}/i;
+                /Listed\s+on\s+[^\n,]{0,48}|Publicado(?:\s+el|\s+en)?\s+[^\n,]{0,48}|\b(?:0?[1-9]|1[0-2])\/(?:0?[1-9]|[12]\d|3[01])(?:\/\d{2,4})?\b|\b(?:0?[1-9]|[12]\d|3[01])\/(?:0?[1-9]|1[0-2])(?:\/\d{2,4})?\b/i;
+              const TITLE_RE =
+                /\b((?:19|20)\d{2}\s+[A-Za-zÁÉÍÓÚÑáéíóúñ][A-Za-zÁÉÍÓÚÑáéíóúñ0-9\-\s]{2,60})/;
               const ID_RE = /\/marketplace\/item\/(\d{8,})/;
-              const ANY_ID_RE = /(?:item_id|listing_id|for_sale_item_id|story_id)[=:\"'\s]+(\d{8,})/i;
+              const ANY_ID_RE =
+                /(?:item_id|listing_id|for_sale_item_id|story_id)[=:\"'\s]+(\d{8,})/i;
               const out = [];
+              const failed = [];
               const seen = new Set();
               const root = document.querySelector('[role="main"]') || document.body;
 
@@ -679,7 +764,16 @@ def _extract_selling_cards_via_js(page: Page) -> list[dict[str, str]]:
                 return r.width > 2 && r.height > 2;
               };
 
-              // Collect text-bearing elements that mention Listed on / Publicado.
+              const looksLikeDateLabel = (t) => {
+                if (!t) return false;
+                if (DATE_LABEL_RE.test(t)) return true;
+                // Short node that is mostly a slash date (Spanish UI variant).
+                if (t.length <= 48 && RAW_DATE_RE.test(t)) return true;
+                if (/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2}\b/i.test(t))
+                  return true;
+                return false;
+              };
+
               const candidates = [];
               const walk = document.createTreeWalker(
                 root,
@@ -690,7 +784,6 @@ def _extract_selling_cards_via_js(page: Page) -> list[dict[str, str]]:
               while (node) {
                 if (node.nodeType === 1) {
                   const el = node;
-                  // Prefer leaf-ish labels (span/div with short own text).
                   const own = (el.childNodes && el.childNodes.length)
                     ? Array.from(el.childNodes)
                         .filter((c) => c.nodeType === 3)
@@ -700,45 +793,49 @@ def _extract_selling_cards_via_js(page: Page) -> list[dict[str, str]]:
                   const direct = own || ((el.children && el.children.length === 0)
                     ? (el.textContent || '').trim()
                     : '');
-                  if (direct && DATE_RE.test(direct) && direct.length < 120) {
+                  if (direct && looksLikeDateLabel(direct) && direct.length < 140) {
                     candidates.push(el);
                   }
                 }
                 node = walk.nextNode();
               }
-              // Fallback: broader innerText match when leaf scan is empty.
               if (!candidates.length) {
                 root.querySelectorAll('span, div, a, p').forEach((el) => {
                   const t = (el.innerText || el.textContent || '').trim();
-                  if (t && DATE_RE.test(t) && t.length < 160 && isVisible(el)) {
+                  if (t && looksLikeDateLabel(t) && t.length < 180 && isVisible(el)) {
                     candidates.push(el);
                   }
                 });
               }
 
+              // Loose climb: prefer parents at depth 2–4 (full listing card block).
               const climbCard = (el) => {
                 let n = el;
+                let preferred = null;
                 let best = el;
-                for (let i = 0; i < 14 && n; i++) {
+                for (let depth = 1; depth <= 8 && n; depth++) {
+                  n = n.parentElement;
+                  if (!n) break;
                   const txt = (n.innerText || '').replace(/\s+/g, ' ').trim();
-                  const hasLink = !!(
-                    n.querySelector
-                    && (n.querySelector('a[href*="/marketplace/item/"]')
-                        || n.querySelector('a[href*="marketplace"]')
-                        || n.querySelector('[href*="/marketplace/item/"]'))
-                  );
                   const len = txt.length;
-                  // Card-sized wrapper: has date + (link or title-ish length).
-                  if (DATE_RE.test(txt) && len >= 20 && len <= 1800) {
-                    best = n;
-                    if (hasLink || (n.querySelector && n.querySelector('img'))) {
-                      // Prefer containers that look like a listing tile.
-                      if (len >= 40) return n;
+                  if (len < 12 || len > 2400) continue;
+                  best = n;
+                  const hasChrome = !!(
+                    n.querySelector
+                    && (n.querySelector('img')
+                        || n.querySelector('a[href*="marketplace"]')
+                        || n.querySelector('[aria-label*="Más"]')
+                        || n.querySelector('[aria-label*="More"]')
+                        || n.querySelector('[aria-haspopup="menu"]'))
+                  );
+                  if (depth >= 2 && depth <= 4) {
+                    preferred = n;
+                    if (TITLE_RE.test(txt) || hasChrome || len >= 40) {
+                      return n;
                     }
                   }
-                  n = n.parentElement;
                 }
-                return best;
+                return preferred || best;
               };
 
               const extractHrefId = (card) => {
@@ -750,7 +847,6 @@ def _extract_selling_cards_via_js(page: Page) -> list[dict[str, str]]:
                   let m = href.match(ID_RE);
                   if (m) return { item_id: m[1], href };
                 }
-                // Some Seller Hub tiles encode id only in nested data / aria.
                 const blob = (card.innerHTML || '') + ' ' + (card.getAttribute
                   ? (card.getAttribute('aria-label') || '')
                   : '');
@@ -765,6 +861,15 @@ def _extract_selling_cards_via_js(page: Page) -> list[dict[str, str]]:
                 return { item_id: '', href: '' };
               };
 
+              const extractTitle = (cardText) => {
+                const head = (cardText || '').split(
+                  /Listed\s+on|Publicado|\b\d{1,2}\/\d{1,2}\b/i
+                )[0].trim();
+                let m = head.match(TITLE_RE) || (cardText || '').match(TITLE_RE);
+                if (m) return m[1].replace(/\s+/g, ' ').trim().slice(0, 80);
+                return (head.length >= 5 && head.length <= 80) ? head.slice(0, 80) : '';
+              };
+
               for (const labelEl of candidates) {
                 if (!isVisible(labelEl)) continue;
                 const card = climbCard(labelEl);
@@ -775,36 +880,85 @@ def _extract_selling_cards_via_js(page: Page) -> list[dict[str, str]]:
                 const dateMatch = (labelText.match(DATE_SNIP_RE)
                   || cardText.match(DATE_SNIP_RE));
                 const date_text = dateMatch ? dateMatch[0].trim() : labelText;
+                const title = extractTitle(cardText);
                 const { item_id, href } = extractHrefId(card);
-                const key = item_id || (date_text + '|' + cardText.slice(0, 80));
+                const key = item_id
+                  || (title + '|' + date_text + '|' + cardText.slice(0, 60));
                 if (seen.has(key)) continue;
                 seen.add(key);
-                if (!item_id) continue;  // need an id for hard-delete queue
+
+                // Keep title-only cards (Spanish Seller Hub often has no item href).
+                if (!item_id && !title && !date_text) {
+                  failed.push({
+                    reason: 'no_id_title_date',
+                    raw: cardText.slice(0, 400),
+                  });
+                  continue;
+                }
+                if (!item_id && !title) {
+                  failed.push({
+                    reason: 'no_item_id_or_title',
+                    raw: cardText.slice(0, 400),
+                    date_text,
+                  });
+                  // Still emit so Python can log + age-parse when possible.
+                }
                 out.push({
-                  item_id,
-                  href: href || ('https://www.facebook.com/marketplace/item/' + item_id + '/'),
+                  item_id: item_id || '',
+                  href: href || (item_id
+                    ? ('https://www.facebook.com/marketplace/item/' + item_id + '/')
+                    : ''),
                   date_text,
-                  blob: (date_text + ' ' + cardText).slice(0, 900),
+                  title,
+                  blob: ((title ? title + ' ' : '') + date_text + ' ' + cardText)
+                    .replace(/\s+/g, ' ').trim().slice(0, 900),
+                  parse_ok: !!(item_id || title),
                 });
               }
-              return out;
+              return { cards: out, failed, candidate_count: candidates.length };
             }"""
         )
     except Exception as exc:
         print(f"  WARNING: JS Listed-on card extract failed: {exc}", flush=True)
         return []
-    if not isinstance(raw, list):
+
+    rows: list[Any]
+    failed_rows: list[Any] = []
+    candidate_count = 0
+    if isinstance(raw, dict):
+        rows = list(raw.get("cards") or [])
+        failed_rows = list(raw.get("failed") or [])
+        try:
+            candidate_count = int(raw.get("candidate_count") or 0)
+        except (TypeError, ValueError):
+            candidate_count = 0
+    elif isinstance(raw, list):
+        rows = raw
+    else:
         return []
+
     cleaned: list[dict[str, str]] = []
-    for row in raw:
+    for row in rows:
         if not isinstance(row, dict):
             continue
         item_id = str(row.get("item_id") or "").strip()
         href = str(row.get("href") or "").strip()
         blob = str(row.get("blob") or "").strip()
         date_text = str(row.get("date_text") or "").strip()
+        title = str(row.get("title") or "").strip() or vehicle_title_from_card_text(
+            blob
+        )
+        parse_ok = bool(row.get("parse_ok", True))
         if date_text and date_text not in blob:
             blob = f"{date_text} {blob}".strip()
+        if title and title not in blob:
+            blob = f"{title} {blob}".strip()
+        if not parse_ok or (not item_id and not title):
+            print(
+                f"  DOM card parse weak/fail date={date_text!r} "
+                f"raw={blob[:240]!r}",
+                flush=True,
+            )
         if item_id.isdigit() and len(item_id) >= 8:
             cleaned.append(
                 {
@@ -812,16 +966,52 @@ def _extract_selling_cards_via_js(page: Page) -> list[dict[str, str]]:
                     "href": href,
                     "blob": blob,
                     "date_text": date_text,
+                    "title": title,
                 }
             )
+        elif title or date_text:
+            # Title-only / date-only Spanish cards → synthetic id for purge queue.
+            cleaned.append(
+                {
+                    "item_id": "",
+                    "href": href,
+                    "blob": blob,
+                    "date_text": date_text,
+                    "title": title,
+                }
+            )
+
+    for fr in failed_rows[:12]:
+        if not isinstance(fr, dict):
+            continue
+        print(
+            f"  DOM card unparsed ({fr.get('reason', '?')}): "
+            f"{str(fr.get('raw') or '')[:240]!r}",
+            flush=True,
+        )
+    if candidate_count and not cleaned:
+        print(
+            f"  DOM date labels seen={candidate_count} but 0 cards parsed — "
+            f"check raw logs above for UI variant",
+            flush=True,
+        )
+    elif candidate_count:
+        print(
+            f"  DOM date-label candidates={candidate_count} "
+            f"parsed_cards={len(cleaned)}",
+            flush=True,
+        )
     return cleaned
 
 
 def _extract_selling_cards_via_text_locators(page: Page) -> list[dict[str, str]]:
-    """Playwright locator fallback: get_by_text → parent card → link + date."""
+    """Playwright locator fallback: get_by_text → parent 2–4 → title + link."""
     out: list[dict[str, str]] = []
     seen: set[str] = set()
-    for needle in _LISTED_ON_TEXT_NEEDLES:
+    needles: list[str | re.Pattern[str]] = list(_LISTED_ON_TEXT_NEEDLES) + [
+        _LISTED_ON_WAIT_RE
+    ]
+    for needle in needles:
         try:
             labels = page.get_by_text(needle, exact=False)
             count = labels.count()
@@ -834,24 +1024,43 @@ def _extract_selling_cards_via_text_locators(page: Page) -> list[dict[str, str]]
             try:
                 date_text = (label.inner_text(timeout=1_000) or "").strip()
             except Exception:
-                date_text = needle
-            # Climb to a card-sized ancestor that also holds a marketplace link.
+                date_text = needle if isinstance(needle, str) else ""
+            # Loose climb: prefer ancestors at depth 2–4.
             card = None
             for xpath in (
+                "xpath=ancestor::div[2]",
+                "xpath=ancestor::div[3]",
+                "xpath=ancestor::div[4]",
                 "xpath=ancestor::div[.//a[contains(@href,'/marketplace/item/')]][1]",
                 "xpath=ancestor::div[.//a[contains(@href,'marketplace')]][1]",
                 "xpath=ancestor::div[contains(.,'Listed on') or contains(.,'Publicado')][4]",
                 "xpath=ancestor::div[6]",
-                "xpath=ancestor::div[8]",
             ):
                 try:
                     cand = label.locator(xpath).first
-                    if cand.count() > 0:
+                    if cand.count() == 0:
+                        continue
+                    try:
+                        txt = (cand.inner_text(timeout=800) or "").strip()
+                    except Exception:
+                        txt = ""
+                    if 12 <= len(txt) <= 2400:
                         card = cand
-                        break
+                        if vehicle_title_from_card_text(txt) or "/marketplace/item/" in (
+                            cand.inner_html(timeout=500) or ""
+                        ):
+                            break
                 except Exception:
                     continue
             if card is None:
+                try:
+                    raw_fail = (label.inner_text(timeout=500) or "").strip()
+                except Exception:
+                    raw_fail = date_text
+                print(
+                    f"  DOM locator card climb miss raw={raw_fail[:200]!r}",
+                    flush=True,
+                )
                 continue
             href = ""
             item_id = ""
@@ -871,21 +1080,34 @@ def _extract_selling_cards_via_text_locators(page: Page) -> list[dict[str, str]]
                         href = f"https://www.facebook.com/marketplace/item/{item_id}/"
                 except Exception:
                     pass
-            if not item_id or item_id in seen:
-                continue
-            seen.add(item_id)
             try:
                 card_text = (card.inner_text(timeout=1_500) or "").strip()
             except Exception:
                 card_text = date_text
-            blob = f"{date_text} {card_text}".strip()
+            title = vehicle_title_from_card_text(card_text)
+            key = item_id or f"{title}|{date_text}|{card_text[:60]}"
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            if not item_id and not title:
+                print(
+                    f"  DOM locator parse fail date={date_text!r} "
+                    f"raw={card_text[:240]!r}",
+                    flush=True,
+                )
+            blob = f"{title} {date_text} {card_text}".strip()
             out.append(
                 {
                     "item_id": item_id,
                     "href": href
-                    or f"https://www.facebook.com/marketplace/item/{item_id}/",
+                    or (
+                        f"https://www.facebook.com/marketplace/item/{item_id}/"
+                        if item_id
+                        else ""
+                    ),
                     "blob": blob[:900],
                     "date_text": date_text,
+                    "title": title,
                 }
             )
     return out
@@ -906,20 +1128,46 @@ def collect_selling_listings(
     shelves = list(_ACTIVE_SELLING_SHELVES[:3]) or [SELLING_URL]
 
     def _ingest(row: dict[str, str]) -> None:
-        item_id = str(row.get("item_id") or "").strip()
-        if not item_id or item_id in found:
-            return
+        raw_id = str(row.get("item_id") or "").strip()
         href = str(row.get("href") or "").strip()
         blob = str(row.get("blob") or "").strip()
         date_text = str(row.get("date_text") or "").strip()
+        title = str(row.get("title") or "").strip() or vehicle_title_from_card_text(
+            blob
+        )
         if date_text and date_text not in blob:
             blob = f"{date_text} {blob}".strip()
+        if title and title not in blob:
+            blob = f"{title} {blob}".strip()
+        if raw_id.isdigit() and len(raw_id) >= 8:
+            item_id = raw_id
+            if not href:
+                href = f"https://www.facebook.com/marketplace/item/{item_id}/"
+        else:
+            # Spanish Seller Hub: date + title, often no /marketplace/item/ href.
+            if not (title or date_text or blob):
+                return
+            digest = hashlib.sha1(
+                f"{title}|{date_text}|{blob[:96]}".encode("utf-8", "replace")
+            ).hexdigest()[:16]
+            item_id = f"dom-{digest}"
+            # Drop synthetic if same title already ingested (numeric or prior).
+            if title:
+                for prev in found.values():
+                    if title in (prev.card_text or ""):
+                        return
+        if item_id in found:
+            return
         age = parse_listing_age_days(blob) or parse_listing_age_days(date_text)
         age_snip = extract_listed_on_snip(blob) or date_text
         found[item_id] = ShelfListing(
             item_id=item_id,
             href=href
-            or f"https://www.facebook.com/marketplace/item/{item_id}/",
+            or (
+                f"https://www.facebook.com/marketplace/item/{item_id}/"
+                if item_id.isdigit()
+                else ""
+            ),
             age_days=age,
             age_text=age_snip,
             card_text=blob[:500],

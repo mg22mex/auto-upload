@@ -73,7 +73,8 @@ class ActiveListing:
     source: str = "graphql"
 
     def __post_init__(self) -> None:
-        if not self.href:
+        # Synthetic DOM ids (``dom-…``) have no Marketplace item URL.
+        if not self.href and str(self.item_id).isdigit():
             self.href = f"https://www.facebook.com/marketplace/item/{self.item_id}/"
 
     def card_text_like(self) -> str:
