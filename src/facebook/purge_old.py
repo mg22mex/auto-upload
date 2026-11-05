@@ -383,16 +383,12 @@ def extract_listed_on_snip(text: str) -> str:
     return m.group(0).strip() if m else ""
 
 
-# Selling-hub card signals — wait for any of these after React hydrates.
-_SELLING_CARD_WAIT_SELECTORS = (
-    'a[href*="/marketplace/item/"]',
-    '[role="main"] a[href*="/marketplace/item/"]',
-    '[role="main"] [role="article"]',
-    '[role="main"] [role="listitem"]',
-    # Selling hub tiles often wrap the whole card as a link / aria label.
-    '[role="main"] a[aria-label]',
-    'div[role="main"] span:has-text("Listed on")',
-    'div[role="main"] span:has-text("Publicado")',
+# Prefer text content over fragile structural roles (Seller Hub DOM churns).
+_LISTED_ON_TEXT_NEEDLES = (
+    "Listed on",
+    "Publicado el",
+    "Publicado en",
+    "Publicado",
 )
 
 _ITEM_HREF_SELECTORS = (
@@ -419,10 +415,31 @@ def wait_for_selling_shelf_cards(
     *,
     timeout_ms: int | None = None,
 ) -> bool:
-    """Wait until Marketplace selling cards hydrate (React) — generous timeout."""
+    """Wait until Seller Hub shows ``Listed on`` / ``Publicado`` date labels."""
     ms = int(timeout_ms if timeout_ms is not None else _shelf_wait_timeout_ms())
     deadline_errors: list[str] = []
-    for sel in _SELLING_CARD_WAIT_SELECTORS:
+
+    # 1) Text-first wait (matches current Seller Hub; roles often missing).
+    for needle in _LISTED_ON_TEXT_NEEDLES:
+        try:
+            page.get_by_text(needle, exact=False).first.wait_for(
+                state="visible", timeout=ms
+            )
+            print(
+                f"  shelf wait OK text={needle!r} timeout_ms={ms}",
+                flush=True,
+            )
+            return True
+        except Exception as exc:
+            deadline_errors.append(f"text:{needle}: {exc}")
+            ms = max(3_000, ms // 2)
+            continue
+
+    # 2) Soft fallback: marketplace item anchors (older layouts).
+    for sel in (
+        'a[href*="/marketplace/item/"]',
+        'xpath=//*[contains(text(),"Listed on") or contains(text(),"Publicado")]',
+    ):
         try:
             page.wait_for_selector(sel, state="visible", timeout=ms)
             print(
@@ -432,11 +449,11 @@ def wait_for_selling_shelf_cards(
             return True
         except Exception as exc:
             deadline_errors.append(f"{sel}: {exc}")
-            # Try next selector with a shorter remaining budget.
             ms = max(3_000, ms // 2)
             continue
+
     print(
-        "  WARNING: selling shelf cards did not appear within wait budget "
+        "  WARNING: selling shelf Listed-on labels did not appear within wait budget "
         f"({'; '.join(deadline_errors[:2])})",
         flush=True,
     )
@@ -543,54 +560,143 @@ def _card_blob_for_link(link) -> str:
 
 
 def _extract_selling_cards_via_js(page: Page) -> list[dict[str, str]]:
-    """One-shot DOM scrape of selling-hub cards + Listed-on text (current layout)."""
+    """Find Seller Hub cards by ``Listed on`` / ``Publicado`` text, then climb.
+
+    Facebook's current Seller Hub often lacks ``role=listitem`` / item anchors
+    at the top level. Start from date-label text nodes, walk up to a card-sized
+    parent, then pull listing href/id + the exact date snippet.
+    """
     try:
         raw = page.evaluate(
-            """() => {
+            r"""() => {
+              const DATE_RE = /Listed on|Publicado(?:\s+el|\s+en)?/i;
+              const DATE_SNIP_RE =
+                /Listed on\s+[^\n,]{0,40}|Publicado(?:\s+el|\s+en)?\s+[^\n,]{0,40}/i;
+              const ID_RE = /\/marketplace\/item\/(\d{8,})/;
+              const ANY_ID_RE = /(?:item_id|listing_id|for_sale_item_id|story_id)[=:\"'\s]+(\d{8,})/i;
               const out = [];
               const seen = new Set();
-              const main = document.querySelector('[role="main"]') || document.body;
-              const anchors = main.querySelectorAll(
-                'a[href*="/marketplace/item/"], [role="link"][href*="/marketplace/item/"]'
+              const root = document.querySelector('[role="main"]') || document.body;
+
+              const isVisible = (el) => {
+                if (!el || !el.getBoundingClientRect) return false;
+                const r = el.getBoundingClientRect();
+                return r.width > 2 && r.height > 2;
+              };
+
+              // Collect text-bearing elements that mention Listed on / Publicado.
+              const candidates = [];
+              const walk = document.createTreeWalker(
+                root,
+                NodeFilter.SHOW_ELEMENT,
+                null
               );
-              const cardRoot = (el) => {
-                let n = el;
-                for (let i = 0; i < 10 && n; i++) {
-                  if (n.getAttribute && (
-                      n.getAttribute('role') === 'article'
-                      || n.getAttribute('role') === 'listitem')) {
-                    return n;
+              let node = walk.currentNode;
+              while (node) {
+                if (node.nodeType === 1) {
+                  const el = node;
+                  // Prefer leaf-ish labels (span/div with short own text).
+                  const own = (el.childNodes && el.childNodes.length)
+                    ? Array.from(el.childNodes)
+                        .filter((c) => c.nodeType === 3)
+                        .map((c) => (c.textContent || '').trim())
+                        .join(' ')
+                    : '';
+                  const direct = own || ((el.children && el.children.length === 0)
+                    ? (el.textContent || '').trim()
+                    : '');
+                  if (direct && DATE_RE.test(direct) && direct.length < 120) {
+                    candidates.push(el);
                   }
-                  const txt = (n.innerText || '');
-                  if (/Listed on|Publicado|days? ago|hace \\d+/i.test(txt)
-                      && txt.length < 1200) {
-                    return n;
+                }
+                node = walk.nextNode();
+              }
+              // Fallback: broader innerText match when leaf scan is empty.
+              if (!candidates.length) {
+                root.querySelectorAll('span, div, a, p').forEach((el) => {
+                  const t = (el.innerText || el.textContent || '').trim();
+                  if (t && DATE_RE.test(t) && t.length < 160 && isVisible(el)) {
+                    candidates.push(el);
+                  }
+                });
+              }
+
+              const climbCard = (el) => {
+                let n = el;
+                let best = el;
+                for (let i = 0; i < 14 && n; i++) {
+                  const txt = (n.innerText || '').replace(/\s+/g, ' ').trim();
+                  const hasLink = !!(
+                    n.querySelector
+                    && (n.querySelector('a[href*="/marketplace/item/"]')
+                        || n.querySelector('a[href*="marketplace"]')
+                        || n.querySelector('[href*="/marketplace/item/"]'))
+                  );
+                  const len = txt.length;
+                  // Card-sized wrapper: has date + (link or title-ish length).
+                  if (DATE_RE.test(txt) && len >= 20 && len <= 1800) {
+                    best = n;
+                    if (hasLink || (n.querySelector && n.querySelector('img'))) {
+                      // Prefer containers that look like a listing tile.
+                      if (len >= 40) return n;
+                    }
                   }
                   n = n.parentElement;
                 }
-                return el.closest('div') || el;
+                return best;
               };
-              for (const a of anchors) {
-                const href = a.href || a.getAttribute('href') || '';
-                const m = href.match(/\\/marketplace\\/item\\/(\\d{8,})/);
-                if (!m) continue;
-                const itemId = m[1];
-                if (seen.has(itemId)) continue;
-                seen.add(itemId);
-                const root = cardRoot(a);
-                const blob = [
-                  href,
-                  a.getAttribute('aria-label') || '',
-                  a.innerText || '',
-                  root ? (root.innerText || '') : '',
-                ].join(' ').replace(/\\s+/g, ' ').trim();
-                out.push({ item_id: itemId, href, blob: blob.slice(0, 800) });
+
+              const extractHrefId = (card) => {
+                const anchors = card.querySelectorAll
+                  ? card.querySelectorAll('a[href], [role="link"][href], [href]')
+                  : [];
+                for (const a of anchors) {
+                  const href = a.href || a.getAttribute('href') || '';
+                  let m = href.match(ID_RE);
+                  if (m) return { item_id: m[1], href };
+                }
+                // Some Seller Hub tiles encode id only in nested data / aria.
+                const blob = (card.innerHTML || '') + ' ' + (card.getAttribute
+                  ? (card.getAttribute('aria-label') || '')
+                  : '');
+                let m = blob.match(ID_RE) || blob.match(ANY_ID_RE);
+                if (m) {
+                  const id = m[1];
+                  return {
+                    item_id: id,
+                    href: 'https://www.facebook.com/marketplace/item/' + id + '/',
+                  };
+                }
+                return { item_id: '', href: '' };
+              };
+
+              for (const labelEl of candidates) {
+                if (!isVisible(labelEl)) continue;
+                const card = climbCard(labelEl);
+                if (!card) continue;
+                const labelText = (labelEl.innerText || labelEl.textContent || '')
+                  .replace(/\s+/g, ' ').trim();
+                const cardText = (card.innerText || '').replace(/\s+/g, ' ').trim();
+                const dateMatch = (labelText.match(DATE_SNIP_RE)
+                  || cardText.match(DATE_SNIP_RE));
+                const date_text = dateMatch ? dateMatch[0].trim() : labelText;
+                const { item_id, href } = extractHrefId(card);
+                const key = item_id || (date_text + '|' + cardText.slice(0, 80));
+                if (seen.has(key)) continue;
+                seen.add(key);
+                if (!item_id) continue;  // need an id for hard-delete queue
+                out.push({
+                  item_id,
+                  href: href || ('https://www.facebook.com/marketplace/item/' + item_id + '/'),
+                  date_text,
+                  blob: (date_text + ' ' + cardText).slice(0, 900),
+                });
               }
               return out;
             }"""
         )
     except Exception as exc:
-        print(f"  WARNING: JS selling-card extract failed: {exc}", flush=True)
+        print(f"  WARNING: JS Listed-on card extract failed: {exc}", flush=True)
         return []
     if not isinstance(raw, list):
         return []
@@ -601,9 +707,93 @@ def _extract_selling_cards_via_js(page: Page) -> list[dict[str, str]]:
         item_id = str(row.get("item_id") or "").strip()
         href = str(row.get("href") or "").strip()
         blob = str(row.get("blob") or "").strip()
+        date_text = str(row.get("date_text") or "").strip()
+        if date_text and date_text not in blob:
+            blob = f"{date_text} {blob}".strip()
         if item_id.isdigit() and len(item_id) >= 8:
-            cleaned.append({"item_id": item_id, "href": href, "blob": blob})
+            cleaned.append(
+                {
+                    "item_id": item_id,
+                    "href": href,
+                    "blob": blob,
+                    "date_text": date_text,
+                }
+            )
     return cleaned
+
+
+def _extract_selling_cards_via_text_locators(page: Page) -> list[dict[str, str]]:
+    """Playwright locator fallback: get_by_text → parent card → link + date."""
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for needle in _LISTED_ON_TEXT_NEEDLES:
+        try:
+            labels = page.get_by_text(needle, exact=False)
+            count = labels.count()
+        except Exception:
+            continue
+        if not isinstance(count, int):
+            continue
+        for i in range(min(count, 80)):
+            label = labels.nth(i)
+            try:
+                date_text = (label.inner_text(timeout=1_000) or "").strip()
+            except Exception:
+                date_text = needle
+            # Climb to a card-sized ancestor that also holds a marketplace link.
+            card = None
+            for xpath in (
+                "xpath=ancestor::div[.//a[contains(@href,'/marketplace/item/')]][1]",
+                "xpath=ancestor::div[.//a[contains(@href,'marketplace')]][1]",
+                "xpath=ancestor::div[contains(.,'Listed on') or contains(.,'Publicado')][4]",
+                "xpath=ancestor::div[6]",
+                "xpath=ancestor::div[8]",
+            ):
+                try:
+                    cand = label.locator(xpath).first
+                    if cand.count() > 0:
+                        card = cand
+                        break
+                except Exception:
+                    continue
+            if card is None:
+                continue
+            href = ""
+            item_id = ""
+            try:
+                link = card.locator('a[href*="/marketplace/item/"]').first
+                if link.count() > 0:
+                    href = link.get_attribute("href") or ""
+                    item_id = extract_item_id(href) or ""
+            except Exception:
+                pass
+            if not item_id:
+                try:
+                    html = card.inner_html(timeout=1_000) or ""
+                    m = re.search(r"/marketplace/item/(\d{8,})", html)
+                    if m:
+                        item_id = m.group(1)
+                        href = f"https://www.facebook.com/marketplace/item/{item_id}/"
+                except Exception:
+                    pass
+            if not item_id or item_id in seen:
+                continue
+            seen.add(item_id)
+            try:
+                card_text = (card.inner_text(timeout=1_500) or "").strip()
+            except Exception:
+                card_text = date_text
+            blob = f"{date_text} {card_text}".strip()
+            out.append(
+                {
+                    "item_id": item_id,
+                    "href": href
+                    or f"https://www.facebook.com/marketplace/item/{item_id}/",
+                    "blob": blob[:900],
+                    "date_text": date_text,
+                }
+            )
+    return out
 
 
 def collect_selling_listings(
@@ -611,23 +801,30 @@ def collect_selling_listings(
     *,
     max_scrolls: int = 20,
 ) -> list[ShelfListing]:
-    """Load `/you/selling`, wait for React cards, hydrate-scroll, collect ages.
+    """Load `/you/selling`, wait for Listed-on labels, hydrate-scroll, collect.
 
-    Uses generous ``wait_for_selector`` (default 15s via ``FB_SHELF_WAIT_MS``),
-    2–3 smooth hydrate scrolls (``FB_SHELF_HYDRATE_SCROLLS``), then extracts
-    item links + ``Listed on…`` / ``Publicado…`` text from the selling hub.
+    Discovery is **text-first**: find ``Listed on`` / ``Publicado el`` nodes,
+    climb to the parent card wrapper, then extract the date snippet + item link
+    for the hard-delete queue (does not rely on ``role=listitem``).
     """
     found: dict[str, ShelfListing] = {}
     shelves = list(_ACTIVE_SELLING_SHELVES[:3]) or [SELLING_URL]
 
-    def _ingest(item_id: str, href: str, blob: str) -> None:
+    def _ingest(row: dict[str, str]) -> None:
+        item_id = str(row.get("item_id") or "").strip()
         if not item_id or item_id in found:
             return
-        age = parse_listing_age_days(blob)
-        age_snip = extract_listed_on_snip(blob)
+        href = str(row.get("href") or "").strip()
+        blob = str(row.get("blob") or "").strip()
+        date_text = str(row.get("date_text") or "").strip()
+        if date_text and date_text not in blob:
+            blob = f"{date_text} {blob}".strip()
+        age = parse_listing_age_days(blob) or parse_listing_age_days(date_text)
+        age_snip = extract_listed_on_snip(blob) or date_text
         found[item_id] = ShelfListing(
             item_id=item_id,
-            href=href,
+            href=href
+            or f"https://www.facebook.com/marketplace/item/{item_id}/",
             age_days=age,
             age_text=age_snip,
             card_text=blob[:500],
@@ -643,14 +840,21 @@ def collect_selling_listings(
         wait_for_selling_shelf_cards(page)
         hydrate_selling_shelf_scrolls(page)
 
-        # Fast path: evaluate all hydrated cards at once (incl. Listed-on text).
+        # Primary: Listed-on / Publicado text → parent card → date + link.
         for row in _extract_selling_cards_via_js(page):
-            _ingest(row["item_id"], row["href"], row["blob"])
+            _ingest(row)
+        for row in _extract_selling_cards_via_text_locators(page):
+            _ingest(row)
 
         stagnant = 0
         for _ in range(max_scrolls):
             before = len(found)
-            # Locator pass catches cards JS missed / newly virtualized in.
+            for row in _extract_selling_cards_via_js(page):
+                _ingest(row)
+            for row in _extract_selling_cards_via_text_locators(page):
+                _ingest(row)
+
+            # Soft legacy pass: marketplace item anchors still help when present.
             for sel in _ITEM_HREF_SELECTORS:
                 links = page.locator(sel)
                 try:
@@ -669,11 +873,14 @@ def collect_selling_listings(
                     if not item_id or item_id in found:
                         continue
                     blob = _card_blob_for_link(loc)
-                    _ingest(item_id, href, blob)
-
-            # Re-run JS extract after each scroll wave.
-            for row in _extract_selling_cards_via_js(page):
-                _ingest(row["item_id"], row["href"], row["blob"])
+                    _ingest(
+                        {
+                            "item_id": item_id,
+                            "href": href,
+                            "blob": blob,
+                            "date_text": extract_listed_on_snip(blob),
+                        }
+                    )
 
             if len(found) == before:
                 stagnant += 1
@@ -698,8 +905,10 @@ def collect_selling_listings(
                 except Exception:
                     break
 
+        with_dates = sum(1 for c in found.values() if c.age_text)
         print(
-            f"  shelf scan {shelf}: {len(found)} unique item(s) so far",
+            f"  shelf scan {shelf}: {len(found)} unique item(s) so far "
+            f"({with_dates} with Listed-on/Publicado date text)",
             flush=True,
         )
 

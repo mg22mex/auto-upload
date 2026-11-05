@@ -86,12 +86,15 @@ class TestParseListingAgeDays(unittest.TestCase):
 
 
 class TestSellingShelfDiscoveryHydration(unittest.TestCase):
-    def test_wait_for_selling_shelf_cards_tries_selectors(self):
+    def test_wait_for_selling_shelf_cards_uses_listed_on_text(self):
         page = MagicMock()
-        page.wait_for_selector.side_effect = [TimeoutError("no"), None]
+        label = MagicMock()
+        label.wait_for.return_value = None
+        page.get_by_text.return_value.first = label
         ok = wait_for_selling_shelf_cards(page, timeout_ms=1000)
         self.assertTrue(ok)
-        self.assertGreaterEqual(page.wait_for_selector.call_count, 2)
+        page.get_by_text.assert_called()
+        self.assertEqual(page.get_by_text.call_args.args[0], "Listed on")
 
     def test_hydrate_selling_shelf_scrolls_runs_loop(self):
         page = MagicMock()
@@ -99,7 +102,7 @@ class TestSellingShelfDiscoveryHydration(unittest.TestCase):
         self.assertEqual(page.evaluate.call_count, 4)  # 3 scrolls + scroll-top
         self.assertGreaterEqual(page.wait_for_timeout.call_count, 3)
 
-    def test_collect_selling_listings_waits_and_extracts(self):
+    def test_collect_selling_listings_from_listed_on_cards(self):
         page = MagicMock()
         page.locator.return_value.count.return_value = 0
         with (
@@ -119,9 +122,14 @@ class TestSellingShelfDiscoveryHydration(unittest.TestCase):
                             "https://www.facebook.com/marketplace/item/"
                             "1111222233334444/"
                         ),
+                        "date_text": "Listed on 10/24",
                         "blob": "2020 Audi Listed on 10/24 $100000",
                     }
                 ],
+            ),
+            patch(
+                "src.facebook.purge_old._extract_selling_cards_via_text_locators",
+                return_value=[],
             ),
         ):
             cards = collect_selling_listings(page, max_scrolls=2)
@@ -130,6 +138,19 @@ class TestSellingShelfDiscoveryHydration(unittest.TestCase):
         self.assertEqual(len(cards), 1)
         self.assertEqual(cards[0].item_id, "1111222233334444")
         self.assertIn("Listed on 10/24", cards[0].age_text or cards[0].card_text)
+        self.assertGreaterEqual(cards[0].age_days or 0, 7.0)
+
+    def test_js_extract_script_targets_listed_on_text(self):
+        """Ensure the in-page script is text-first, not role=listitem."""
+        import inspect
+
+        from src.facebook import purge_old as mod
+
+        src = inspect.getsource(mod._extract_selling_cards_via_js)
+        self.assertIn("Listed on", src)
+        self.assertIn("Publicado", src)
+        self.assertIn("climbCard", src)
+        self.assertIn("date_text", src)
 
 
 class TestPurgeOldListingsOnPage(unittest.TestCase):
