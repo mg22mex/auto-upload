@@ -796,6 +796,32 @@ class TestExtractItemId(unittest.TestCase):
 
 
 class TestRemoveFromSellingByTitle(unittest.TestCase):
+    def test_partial_title_needles_expand_core_substrings(self):
+        from src.facebook.remover import (
+            _expand_partial_title_needles,
+            _strip_title_noise,
+            _title_label_matches,
+        )
+
+        noisy = "2018 Kia Forte EX Aut · Listed on Marketplace · 12 clicks on listing"
+        cleaned = _strip_title_noise(noisy)
+        self.assertIn("2018 Kia Forte", cleaned)
+        self.assertNotIn("Marketplace", cleaned)
+        cores = _expand_partial_title_needles([noisy])
+        self.assertTrue(any(c == "2018 Kia Forte EX" or "2018 Kia Forte" in c for c in cores))
+        self.assertTrue(
+            _title_label_matches(
+                "Más opciones para 2018 Kia Forte EX Aut $185,000",
+                "2018 Kia Forte EX Aut Listed on Marketplace",
+            )
+        )
+        self.assertTrue(
+            _title_label_matches(
+                "2018 Kia Forte EX · Active",
+                "2018 Kia Forte EX Aut",
+            )
+        )
+
     def test_visible_title_opens_menu_deletes_and_verifies_gone(self):
         from src.facebook.remover import remove_from_selling_by_title
 
@@ -857,6 +883,44 @@ class TestRemoveFromSellingByTitle(unittest.TestCase):
                 page, ["2018 Audi Q5"], action="delete"
             )
         self.assertFalse(ok)
+
+    def test_card_root_opens_more_when_first_click_misses(self):
+        from src.facebook.remover import remove_from_selling_by_title
+
+        page = MagicMock()
+        card = MagicMock()
+        more_btn = MagicMock()
+        with (
+            patch("src.facebook.remover._sort_selling_oldest_first"),
+            patch(
+                "src.facebook.remover._find_selling_title_more_button",
+                return_value=None,
+            ),
+            patch(
+                "src.facebook.remover._find_selling_card_anchor_by_title",
+                return_value=card,
+            ),
+            patch(
+                "src.facebook.remover._menu_open",
+                side_effect=[False, True],
+            ),
+            patch(
+                "src.facebook.remover._more_button_in_card",
+                return_value=more_btn,
+            ),
+            patch("src.facebook.remover._click_menu_action", return_value=True),
+            patch("src.facebook.remover._confirm_if_needed"),
+            patch("src.facebook.remover._dismiss_delete_survey_if_needed"),
+            patch(
+                "src.facebook.remover._title_still_on_selling_shelf",
+                return_value=False,
+            ),
+        ):
+            ok = remove_from_selling_by_title(
+                page, ["2018 Kia Forte EX"], action="delete"
+            )
+        self.assertTrue(ok)
+        more_btn.click.assert_called()
 
 
 if __name__ == "__main__":

@@ -1325,33 +1325,220 @@ def _sort_selling_oldest_first(page: Page) -> None:
         pass
 
 
+_TITLE_NOISE_RE = re.compile(
+    r"(?i)(?:\s*[·|]\s*)?\b(?:listed\s+on(?:\s+marketplace)?|publicado(?:\s+el|\s+en)?"
+    r"|clicks?\s+on\s+listing|clics?\s+en(?:\s+la)?\s+publicaci[oó]n"
+    r"|marketplace|visualizaciones)\b.*$"
+)
+_TITLE_PRICE_RE = re.compile(r"(?i)\$[\d,]+(?:\.\d+)?|\b\d{1,3}(?:,\d{3})+\s*(?:mxn|usd)?\b")
+_TITLE_STOP = frozenset(
+    {
+        "the",
+        "and",
+        "for",
+        "con",
+        "del",
+        "los",
+        "las",
+        "una",
+        "uno",
+        "de",
+        "en",
+        "el",
+        "la",
+        "km",
+        "mi",
+    }
+)
+
+
+def _strip_title_noise(value: str) -> str:
+    """Drop Listed-on / clicks / price tails so needles match the visible heading."""
+    text = re.sub(r"\s+", " ", (value or "").strip())
+    text = _TITLE_NOISE_RE.sub("", text)
+    text = _TITLE_PRICE_RE.sub("", text)
+    return re.sub(r"\s+", " ", text).strip(" ·|-–,")
+
+
 def _title_label_matches(label: str, needle: str) -> bool:
+    """True when ``needle`` is a substring of ``label``, or core tokens overlap."""
     lab = re.sub(r"\s+", " ", (label or "").lower()).strip()
-    ned = re.sub(r"\s+", " ", (needle or "").lower()).strip()
-    if len(ned) < 5:
+    ned = re.sub(r"\s+", " ", _strip_title_noise(needle).lower()).strip()
+    if len(ned) < 4:
         return False
     if ned in lab:
         return True
-    return ned.replace(" ", "") in lab.replace(" ", "")
+    if ned.replace(" ", "") in lab.replace(" ", ""):
+        return True
+    # Partial: year+brand+model tokens (e.g. needle "2018 Kia Forte EX Aut"
+    # vs label "…2018 Kia Forte EX…").
+    tokens = [
+        t
+        for t in re.findall(r"[a-z0-9áéíóúñ]{2,}", ned)
+        if t not in _TITLE_STOP
+    ]
+    if len(tokens) >= 2:
+        hit = sum(1 for t in tokens if t in lab)
+        # Require most distinctive tokens (year + brand/model).
+        need = min(len(tokens), 3)
+        if hit >= need:
+            return True
+        if hit >= 2 and any(t.isdigit() and len(t) == 4 for t in tokens if t in lab):
+            return True
+    return False
+
+
+def _expand_partial_title_needles(title_needles: list[str]) -> list[str]:
+    """Expand full titles into shorter cores for contains/partial matching.
+
+    ``2018 Kia Forte EX Aut · Listed on Marketplace`` →
+    ``2018 Kia Forte EX Aut``, ``2018 Kia Forte EX``, ``2018 Kia Forte``, …
+    """
+    out: list[str] = []
+
+    def add(value: str) -> None:
+        cleaned = _strip_title_noise(value)
+        if len(cleaned) < 4:
+            return
+        if cleaned not in out:
+            out.append(cleaned)
+
+    for raw in title_needles:
+        add(raw)
+        cleaned = _strip_title_noise(raw)
+        if not cleaned:
+            continue
+        words = cleaned.split()
+        # Year + next 2–4 words: "2018 Kia Forte EX"
+        if words and re.fullmatch(r"(?:19|20)\d{2}", words[0]):
+            for n in (5, 4, 3, 2):
+                if len(words) >= n:
+                    add(" ".join(words[:n]))
+            if len(words) >= 2:
+                add(" ".join(words[1:4]))  # brand + model without year
+        elif len(words) >= 2:
+            add(" ".join(words[:3]))
+            add(" ".join(words[:2]))
+        # Regex-friendly year+brand+model chunk from noisy blob.
+        m = re.search(
+            r"\b((?:19|20)\d{2}\s+[A-Za-zÁÉÍÓÚÑáéíóúñ]"
+            r"[A-Za-zÁÉÍÓÚÑáéíóúñ0-9\-]*(?:\s+[A-Za-zÁÉÍÓÚÑáéíóúñ0-9\-]{1,20}){0,3})",
+            cleaned,
+        )
+        if m:
+            add(m.group(1))
+    # Prefer longer cores first, then shorter partials (min 4 chars).
+    return sorted({n for n in out if len(n) >= 4}, key=len, reverse=True)
 
 
 def _normalize_title_needles(title_needles: list[str]) -> list[str]:
-    return sorted(
-        {n.strip() for n in title_needles if n and len(n.strip()) >= 5},
-        key=len,
-        reverse=True,
-    )
+    return _expand_partial_title_needles(title_needles)
+
+
+def _needle_text_regex(needle: str) -> re.Pattern[str]:
+    """Case-insensitive regex: needle words with flexible whitespace."""
+    parts = [re.escape(p) for p in needle.split() if p]
+    if not parts:
+        return re.compile(r"$a")  # never matches
+    return re.compile(r"\s+".join(parts), re.I)
+
+
+def _more_button_in_card(card: Locator) -> Locator | None:
+    """Find ⋮ / More options / Más opciones inside a specific card container."""
+    # Prefer titled more-buttons scoped to this card.
+    try:
+        titled = card.get_by_role(
+            "button",
+            name=re.compile(
+                r"Más opciones(?:\s+para)?|More options(?:\s+for)?|"
+                r"^Más$|^More$|Opciones|Options",
+                re.I,
+            ),
+        )
+        if titled.count() > 0:
+            for i in range(min(titled.count(), 6)):
+                btn = titled.nth(i)
+                try:
+                    if btn.is_visible():
+                        return btn
+                except Exception:
+                    return btn
+    except Exception:
+        pass
+    for selector in _MORE_ARIA_SELECTORS:
+        try:
+            btn = card.locator(selector)
+            if btn.count() == 0:
+                continue
+            for i in range(min(btn.count(), 4)):
+                target = btn.nth(i)
+                try:
+                    if target.is_visible():
+                        return target
+                except Exception:
+                    return target
+        except Exception:
+            continue
+    try:
+        popup = card.locator('[aria-haspopup="menu"], [data-visualcompletion] [role="button"]').first
+        if popup.count() > 0:
+            return popup
+    except Exception:
+        pass
+    try:
+        named = card.get_by_role("button", name=_MORE_MENU)
+        if named.count() > 0:
+            return named.first
+    except Exception:
+        pass
+    return None
+
+
+def _card_root_from_title_node(node: Locator) -> Locator | None:
+    """Climb from a title text node to the listing card that owns a ⋮ control."""
+    for xpath in (
+        "xpath=ancestor::div[.//*[@aria-label='Más opciones' or "
+        "@aria-label='More options' or contains(@aria-label,'Más opciones') or "
+        "contains(@aria-label,'More options') or contains(@aria-label,'Más opciones para') or "
+        "contains(@aria-label,'More options for') or "
+        "contains(@aria-label,'More') or contains(@aria-label,'Más')]][1]",
+        "xpath=ancestor::div[.//*[@aria-haspopup='menu']][1]",
+        "xpath=ancestor::div[.//div[@role='button']][2]",
+        "xpath=ancestor::div[8]",
+        "xpath=ancestor::div[6]",
+        "xpath=ancestor::div[4]",
+    ):
+        try:
+            card = node.locator(xpath).first
+            if card.count() == 0:
+                continue
+            if _more_button_in_card(card) is not None:
+                return card
+            # Accept sized card even if menu selector is delayed.
+            try:
+                txt = (card.inner_text(timeout=600) or "").strip()
+            except Exception:
+                txt = ""
+            if 20 <= len(txt) <= 2500:
+                return card
+        except Exception:
+            continue
+    return None
 
 
 def _find_selling_title_more_button(
     page: Page, needles: list[str]
 ) -> Locator | None:
     """Return the first visible ``Más opciones para`` / ``More options for`` match."""
+    needles = _normalize_title_needles(needles)
     if not needles:
         return None
     buttons = page.get_by_role(
         "button",
-        name=re.compile(r"Más opciones para |More options for ", re.I),
+        name=re.compile(
+            r"Más opciones(?:\s+para)?|More options(?:\s+for)?",
+            re.I,
+        ),
     )
     try:
         count = buttons.count()
@@ -1359,7 +1546,7 @@ def _find_selling_title_more_button(
         count = 0
     if not isinstance(count, int):
         count = 0
-    for i in range(min(count, 80)):
+    for i in range(min(count, 100)):
         btn = buttons.nth(i)
         try:
             label = (
@@ -1375,65 +1562,73 @@ def _find_selling_title_more_button(
     return None
 
 
+def _iter_title_hit_locators(page: Page, needle: str):
+    """Yield Playwright locators that may contain a partial title match."""
+    pattern = _needle_text_regex(needle)
+    # 1) Regex text match (flexible whitespace).
+    try:
+        yield page.get_by_text(pattern)
+    except Exception:
+        pass
+    # 2) Substring contains (exact=False).
+    try:
+        yield page.get_by_text(needle, exact=False)
+    except Exception:
+        pass
+    # 3) XPath contains() — last resort (skip needles with quotes).
+    if "'" not in needle and '"' not in needle:
+        try:
+            low = needle.lower()
+            yield page.locator(
+                "xpath=//*[contains(translate(normalize-space(.),"
+                "'ABCDEFGHIJKLMNOPQRSTUVWXYZÁÉÍÓÚÑ',"
+                f"'abcdefghijklmnopqrstuvwxyzáéíóúñ'), '{low}')]"
+            )
+        except Exception:
+            pass
+
+
 def _find_selling_card_anchor_by_title(
     page: Page, needles: list[str]
 ) -> Locator | None:
-    """Locate a selling-hub card via visible vehicle title text (no item_id href).
+    """Locate a selling-hub card via partial/core vehicle title (no item_id href).
 
-    Seller Hub often omits ``/marketplace/item/`` anchors; match the title string
-    (e.g. ``2018 Audi Q5``) then return a locator inside that card for the ⋮ menu.
+    Matches substrings such as ``2018 Kia Forte EX`` inside longer headings, climbs
+    to the card wrapper, then returns that card's ⋮ / Más opciones control.
     """
     needles = _normalize_title_needles(needles)
     if not needles:
         return None
     for needle in needles:
-        try:
-            hits = page.get_by_text(needle, exact=False)
-            count = hits.count()
-        except Exception:
-            continue
-        if not isinstance(count, int) or count == 0:
-            continue
-        for i in range(min(count, 40)):
-            node = hits.nth(i)
+        for hits in _iter_title_hit_locators(page, needle):
             try:
-                if not node.is_visible():
-                    continue
-                text = (node.inner_text(timeout=800) or "").strip()
+                count = hits.count()
             except Exception:
                 continue
-            # Prefer compact title nodes, not the whole page blob.
-            if len(text) > 240 and needle.lower() not in text.lower()[:240]:
+            if not isinstance(count, int) or count == 0:
                 continue
-            # Climb to card wrapper that also has a ⋮ / Más opciones control.
-            for xpath in (
-                "xpath=ancestor::div[.//*[@aria-label='Más opciones' or "
-                "@aria-label='More options' or contains(@aria-label,'Más opciones') or "
-                "contains(@aria-label,'More options') or "
-                "contains(@aria-label,'More') or contains(@aria-label,'Más')]][1]",
-                "xpath=ancestor::div[.//div[@aria-haspopup='menu']][1]",
-                "xpath=ancestor::div[8]",
-                "xpath=ancestor::div[6]",
-            ):
+            for i in range(min(count, 50)):
+                node = hits.nth(i)
                 try:
-                    card = node.locator(xpath).first
-                    if card.count() == 0:
+                    if not node.is_visible():
                         continue
-                    # Prefer returning the more-button inside the card when present.
-                    for selector in _MORE_ARIA_SELECTORS:
-                        btn = card.locator(selector)
-                        if btn.count() > 0:
-                            try:
-                                if btn.first.is_visible():
-                                    return btn.first
-                            except Exception:
-                                return btn.first
-                    named = card.get_by_role("button", name=_MORE_MENU)
-                    if named.count() > 0:
-                        return named.first
-                    return card
+                    text = (node.inner_text(timeout=800) or "").strip()
                 except Exception:
                     continue
+                if not _title_label_matches(text, needle) and needle.lower() not in text.lower():
+                    # XPath may return huge ancestors — require token overlap.
+                    if not _title_label_matches(text[:400], needle):
+                        continue
+                # Prefer compact title nodes, not the whole page blob.
+                if len(text) > 400 and not _title_label_matches(text[:300], needle):
+                    continue
+                card = _card_root_from_title_node(node)
+                if card is None:
+                    continue
+                more = _more_button_in_card(card)
+                if more is not None:
+                    return more
+                return card
     return None
 
 
@@ -1542,7 +1737,7 @@ def remove_from_selling_by_title(
             break
         matched = _find_selling_card_anchor_by_title(page, needles)
         if matched is not None:
-            match_via = "visible-title"
+            match_via = "partial-title-menu"
             break
         try:
             page.mouse.wheel(0, 2600)
@@ -1552,13 +1747,13 @@ def remove_from_selling_by_title(
 
     if matched is None:
         print(
-            f"  shelf title match not found for needles={needles[:3]!r}",
+            f"  shelf title match not found for needles={needles[:5]!r}",
             flush=True,
         )
         return False
 
     print(
-        f"  shelf title match via={match_via} needles={needles[:2]!r}",
+        f"  shelf title match via={match_via} needles={needles[:4]!r}",
         flush=True,
     )
     try:
@@ -1566,7 +1761,7 @@ def remove_from_selling_by_title(
     except Exception:
         pass
 
-    # Open ⋮ — matched may already be the more-button, or a card root.
+    # Open ⋮ — matched is preferably the more-button; else card root → find ⋮.
     menu_opened = False
     try:
         matched.click(timeout=8_000, force=True)
@@ -1576,16 +1771,24 @@ def remove_from_selling_by_title(
         print(f"  shelf title more-click failed: {exc}", flush=True)
 
     if not menu_opened:
-        # If we clicked a title/card node, open ⋮ near it.
-        if _click_more_near_locator(page, matched):
+        # Card container: locate ⋮ inside it, then near-locator fallback.
+        more = _more_button_in_card(matched)
+        if more is not None:
+            try:
+                more.click(timeout=8_000, force=True)
+                page.wait_for_timeout(1_200)
+                menu_opened = _menu_open(page)
+            except Exception as exc:
+                print(f"  shelf card ⋮ click failed: {exc}", flush=True)
+        if not menu_opened and _click_more_near_locator(page, matched):
             menu_opened = True
-        else:
+        if not menu_opened:
             try:
                 page.keyboard.press("Escape")
             except Exception:
                 pass
             print(
-                f"  shelf title ⋮ menu did not open for needles={needles[:2]!r}",
+                f"  shelf title ⋮ menu did not open for needles={needles[:4]!r}",
                 flush=True,
             )
             return False

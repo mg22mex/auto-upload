@@ -118,34 +118,39 @@ def _title_needles_for_purge(
     vehicle_title: str = "",
     card_text: str = "",
 ) -> list[str]:
-    """Build title needles for Seller Hub delete when item_id href is missing."""
+    """Build title needles for Seller Hub delete when item_id href is missing.
+
+    Returns full + partial cores (``2018 Kia Forte EX``); ``remover`` expands
+    further for contains/regex matching.
+    """
+    from src.facebook.remover import _expand_partial_title_needles, _strip_title_noise
+
     needles: list[str] = []
-    title = (vehicle_title or "").strip()
-    if len(title) >= 5:
+    title = _strip_title_noise(vehicle_title or "")
+    if len(title) >= 4:
         needles.append(title)
     # Card text often starts with "YYYY Brand Model … Listed on …"
     blob = (card_text or "").strip()
     if blob:
-        # Take first line / chunk before Listed on / Publicado.
         chunk = re.split(
-            r"(?i)\b(?:listed on|publicado)\b",
+            r"(?i)\b(?:listed on|publicado|clicks?\s+on|clics?\s+en)\b",
             blob,
             maxsplit=1,
         )[0].strip()
-        chunk = re.sub(r"\s+", " ", chunk)
-        if len(chunk) >= 5:
+        chunk = _strip_title_noise(re.sub(r"\s+", " ", chunk))
+        if len(chunk) >= 4:
             needles.append(chunk[:120])
-        # Year + brand + model style: "2018 Audi Q5"
         m = re.search(
-            r"\b(19|20)\d{2}\s+[A-Za-zÁÉÍÓÚÑáéíóúñ][A-Za-zÁÉÍÓÚÑáéíóúñ0-9\-\s]{2,60}",
+            r"\b((?:19|20)\d{2}\s+[A-Za-zÁÉÍÓÚÑáéíóúñ]"
+            r"[A-Za-zÁÉÍÓÚÑáéíóúñ0-9\-]*(?:\s+[A-Za-zÁÉÍÓÚÑáéíóúñ0-9\-]{1,24}){0,3})",
             blob,
         )
         if m:
-            needles.append(m.group(0).strip()[:80])
+            needles.append(m.group(1).strip()[:80])
 
     catalog = _catalog_by_autosell_id()
     aid = (autosell_id or "").strip()
-    if not aid or aid == item_id:
+    if not aid or aid == item_id or aid.startswith("dom-"):
         row = _lookup_db_row(store, account_id, item_id)
         if row is not None:
             aid = str(row["autosell_id"] or "")
@@ -155,16 +160,11 @@ def _title_needles_for_purge(
             needles.extend(_match_needles(vehicle))
         except Exception:
             pass
-        vt = str(getattr(vehicle, "title", "") or "").strip()
-        if len(vt) >= 5:
+        vt = _strip_title_noise(str(getattr(vehicle, "title", "") or ""))
+        if len(vt) >= 4:
             needles.append(vt)
 
-    # Dedupe longest-first (same as remover).
-    return sorted(
-        {n.strip() for n in needles if n and len(n.strip()) >= 5},
-        key=len,
-        reverse=True,
-    )
+    return _expand_partial_title_needles(needles)
 
 
 def hard_delete_listing_via_playwright(
