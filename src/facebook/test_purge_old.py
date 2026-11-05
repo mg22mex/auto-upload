@@ -112,19 +112,15 @@ class TestSellingShelfDiscoveryHydration(unittest.TestCase):
             ) as hydrate,
             patch(
                 "src.facebook.purge_old._extract_selling_cards_via_js",
-                side_effect=[
-                    [
-                        {
-                            "item_id": "1111222233334444",
-                            "href": (
-                                "https://www.facebook.com/marketplace/item/"
-                                "1111222233334444/"
-                            ),
-                            "blob": "2020 Audi Listed on 10/24 $100000",
-                        }
-                    ],
-                    [],
-                    [],
+                return_value=[
+                    {
+                        "item_id": "1111222233334444",
+                        "href": (
+                            "https://www.facebook.com/marketplace/item/"
+                            "1111222233334444/"
+                        ),
+                        "blob": "2020 Audi Listed on 10/24 $100000",
+                    }
                 ],
             ),
         ):
