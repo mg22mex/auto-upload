@@ -495,15 +495,25 @@ def is_purge_age_eligible(age_days: float, max_days: float) -> bool:
     return float(age_days) >= float(max_days)
 
 
+_CLICKS_META_RE = re.compile(
+    r"listed\s+on\s+marketplace|publicado\s+en\s+marketplace|"
+    r"clicks?\s+on\s+listing|clics?\s+en\s+la\s+publicaci[oó]n|"
+    r"visualizaciones",
+    re.I,
+)
+
+
 def extract_listed_on_snip(text: str) -> str:
-    """Best-effort snippet of FB shelf date/age label for logs."""
-    blob = text or ""
+    """Best-effort snippet of FB shelf date/age label for logs.
+
+    Ignores ``Listed on Marketplace · N clicks on listing`` meta lines.
+    """
+    blob = _CLICKS_META_RE.sub(" ", text or "")
     m = re.search(
-        r"(listed\s+on\s+\d{1,2}/\d{1,2}(?:/\d{2,4})?"
-        r"|listed\s+on\s+[A-Za-z]+\s+\d{1,2}(?:,\s*\d{4})?"
-        r"|publicado\s+(?:el|en)\s+\d{1,2}/\d{1,2}(?:/\d{2,4})?"
-        r"|publicado[^\n]{0,48}"
-        r"|listed[^\n]{0,48}"
+        r"(listed\s+on\s+(?!marketplace)\d{1,2}/\d{1,2}(?:/\d{2,4})?"
+        r"|listed\s+on\s+(?!marketplace)[A-Za-z]+\s+\d{1,2}(?:,\s*\d{4})?"
+        r"|publicado\s+(?:el|en)\s+(?!marketplace)\d{1,2}/\d{1,2}(?:/\d{2,4})?"
+        r"|publicado\s+(?:el|en)\s+(?!marketplace)[^\n]{0,40}"
         r"|hace\s+\d+[^\n]{0,24}"
         r"|\d+\s+days?\s+ago"
         r"|\d+\s+d[ií]as?"
@@ -525,9 +535,10 @@ def vehicle_title_from_card_text(text: str) -> str:
     blob = re.sub(r"\s+", " ", (text or "").strip())
     if not blob:
         return ""
-    # Prefer chunk before Listed on / Publicado / bare date.
+    # Prefer chunk before clicks meta / Listed on / Publicado / bare date.
     head = re.split(
-        r"(?i)\b(?:listed\s+on|publicado)\b|\b\d{1,2}/\d{1,2}\b",
+        r"(?i)\b(?:listed\s+on|publicado|clicks?\s+on|clics?\s+en)\b|"
+        r"\b\d{1,2}/\d{1,2}\b",
         blob,
         maxsplit=1,
     )[0].strip()
@@ -535,7 +546,9 @@ def vehicle_title_from_card_text(text: str) -> str:
         m = _VEHICLE_TITLE_RE.search(candidate)
         if m:
             return m.group(1).strip()[:80]
-    return head[:80] if 5 <= len(head) <= 80 else ""
+    if 5 <= len(head) <= 80 and not _CLICKS_META_RE.search(head):
+        return head[:80]
+    return ""
 
 
 # Prefer text content over fragile structural roles (Seller Hub DOM churns).
@@ -733,21 +746,26 @@ def _card_blob_for_link(link) -> str:
 
 
 def _extract_selling_cards_via_js(page: Page) -> list[dict[str, str]]:
-    """Find Seller Hub cards by EN/ES date labels or bare slash dates, then climb.
+    """Find Seller Hub cards by date / clicks labels, climb to titled wrapper.
 
-    Facebook's current Seller Hub (esp. Spanish UI) often lacks ``role=listitem``
-    / item anchors. Start from date text (``Listed on``, ``Publicado el``,
-    ``Publicado``, ``10/24``, ``24/10``…), walk up 2–4 parent nodes for the card
-    block, extract vehicle title + optional item href.
+    Seller Hub often shows ``Listed on Marketplace · N clicks on listing`` instead
+    of a direct item href. Treat that as a card anchor, walk up until the parent
+    contains a vehicle heading (``2022 Mercedes-Benz…``), then pull title + a
+    real date string (``10/24``, ``Listed on 10/24``, ``Publicado el 24/10``)
+    from inside that same container — never treat the clicks line as the date.
     """
     try:
         raw = page.evaluate(
             r"""() => {
               const DATE_LABEL_RE = /Listed\s+on|Publicado(?:\s+el|\s+en)?/i;
+              // Clicks / Marketplace meta line — useful as an anchor, NOT as a date.
+              const CLICKS_RE =
+                /Listed\s+on\s+Marketplace|Publicado\s+en\s+Marketplace|clicks?\s+on\s+listing|clics?\s+en\s+la\s+publicaci[oó]n|visualizaciones/i;
               const RAW_DATE_RE =
                 /\b(?:0?[1-9]|1[0-2])\/(?:0?[1-9]|[12]\d|3[01])(?:\/\d{2,4})?\b|\b(?:0?[1-9]|[12]\d|3[01])\/(?:0?[1-9]|1[0-2])(?:\/\d{2,4})?\b/;
+              // Real shelf dates only — exclude "Listed on Marketplace … clicks".
               const DATE_SNIP_RE =
-                /Listed\s+on\s+[^\n,]{0,48}|Publicado(?:\s+el|\s+en)?\s+[^\n,]{0,48}|\b(?:0?[1-9]|1[0-2])\/(?:0?[1-9]|[12]\d|3[01])(?:\/\d{2,4})?\b|\b(?:0?[1-9]|[12]\d|3[01])\/(?:0?[1-9]|1[0-2])(?:\/\d{2,4})?\b/i;
+                /Listed\s+on\s+(?!Marketplace)[A-Za-z]{3,9}\.?\s+\d{1,2}(?:,\s*\d{4})?|Listed\s+on\s+(?!Marketplace)\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|Publicado(?:\s+el|\s+en)?\s+(?!Marketplace)\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|Publicado(?:\s+el|\s+en)?\s+(?!Marketplace)\d{1,2}\s+de\s+[A-Za-záéíóúñ]+|\b(?:0?[1-9]|1[0-2])\/(?:0?[1-9]|[12]\d|3[01])(?:\/\d{2,4})?\b|\b(?:0?[1-9]|[12]\d|3[01])\/(?:0?[1-9]|1[0-2])(?:\/\d{2,4})?\b/i;
               const TITLE_RE =
                 /\b((?:19|20)\d{2}\s+[A-Za-zÁÉÍÓÚÑáéíóúñ][A-Za-zÁÉÍÓÚÑáéíóúñ0-9\-\s]{2,60})/;
               const ID_RE = /\/marketplace\/item\/(\d{8,})/;
@@ -764,10 +782,10 @@ def _extract_selling_cards_via_js(page: Page) -> list[dict[str, str]]:
                 return r.width > 2 && r.height > 2;
               };
 
-              const looksLikeDateLabel = (t) => {
+              const looksLikeAnchor = (t) => {
                 if (!t) return false;
-                if (DATE_LABEL_RE.test(t)) return true;
-                // Short node that is mostly a slash date (Spanish UI variant).
+                if (CLICKS_RE.test(t)) return true;
+                if (DATE_LABEL_RE.test(t) && !CLICKS_RE.test(t)) return true;
                 if (t.length <= 48 && RAW_DATE_RE.test(t)) return true;
                 if (/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2}\b/i.test(t))
                   return true;
@@ -793,7 +811,7 @@ def _extract_selling_cards_via_js(page: Page) -> list[dict[str, str]]:
                   const direct = own || ((el.children && el.children.length === 0)
                     ? (el.textContent || '').trim()
                     : '');
-                  if (direct && looksLikeDateLabel(direct) && direct.length < 140) {
+                  if (direct && looksLikeAnchor(direct) && direct.length < 160) {
                     candidates.push(el);
                   }
                 }
@@ -802,40 +820,48 @@ def _extract_selling_cards_via_js(page: Page) -> list[dict[str, str]]:
               if (!candidates.length) {
                 root.querySelectorAll('span, div, a, p').forEach((el) => {
                   const t = (el.innerText || el.textContent || '').trim();
-                  if (t && looksLikeDateLabel(t) && t.length < 180 && isVisible(el)) {
+                  if (t && looksLikeAnchor(t) && t.length < 200 && isVisible(el)) {
                     candidates.push(el);
                   }
                 });
               }
 
-              // Loose climb: prefer parents at depth 2–4 (full listing card block).
+              // Climb until the wrapper holds a YEAR + brand/model heading.
               const climbCard = (el) => {
                 let n = el;
+                let withTitle = null;
                 let preferred = null;
                 let best = el;
-                for (let depth = 1; depth <= 8 && n; depth++) {
+                for (let depth = 1; depth <= 14 && n; depth++) {
                   n = n.parentElement;
                   if (!n) break;
+                  // Stop before swallowing the whole Seller Hub main column.
+                  if (n === root || n.getAttribute('role') === 'main') break;
                   const txt = (n.innerText || '').replace(/\s+/g, ' ').trim();
                   const len = txt.length;
-                  if (len < 12 || len > 2400) continue;
+                  if (len < 12 || len > 3200) continue;
                   best = n;
+                  const hasTitle = TITLE_RE.test(txt);
                   const hasChrome = !!(
                     n.querySelector
                     && (n.querySelector('img')
                         || n.querySelector('a[href*="marketplace"]')
                         || n.querySelector('[aria-label*="Más"]')
                         || n.querySelector('[aria-label*="More"]')
-                        || n.querySelector('[aria-haspopup="menu"]'))
+                        || n.querySelector('[aria-haspopup="menu"]')
+                        || n.querySelector('h1, h2, h3, [role="heading"]'))
                   );
-                  if (depth >= 2 && depth <= 4) {
+                  if (hasTitle) {
+                    withTitle = n;
+                    // Prefer the smallest titled wrapper that also has chrome.
+                    if (hasChrome || depth >= 2) return n;
+                  }
+                  if (depth >= 2 && depth <= 6) {
                     preferred = n;
-                    if (TITLE_RE.test(txt) || hasChrome || len >= 40) {
-                      return n;
-                    }
+                    if (hasTitle && (hasChrome || len >= 40)) return n;
                   }
                 }
-                return preferred || best;
+                return withTitle || preferred || best;
               };
 
               const extractHrefId = (card) => {
@@ -862,12 +888,41 @@ def _extract_selling_cards_via_js(page: Page) -> list[dict[str, str]]:
               };
 
               const extractTitle = (cardText) => {
+                // Header / first text block before clicks / date meta.
                 const head = (cardText || '').split(
-                  /Listed\s+on|Publicado|\b\d{1,2}\/\d{1,2}\b/i
+                  /Listed\s+on|Publicado|clicks?\s+on|clics?\s+en|\b\d{1,2}\/\d{1,2}\b/i
                 )[0].trim();
                 let m = head.match(TITLE_RE) || (cardText || '').match(TITLE_RE);
                 if (m) return m[1].replace(/\s+/g, ' ').trim().slice(0, 80);
-                return (head.length >= 5 && head.length <= 80) ? head.slice(0, 80) : '';
+                // Heading-like first line.
+                const firstLine = head.split(/\n|·|\|/)[0].trim();
+                if (firstLine.length >= 5 && firstLine.length <= 80
+                    && !CLICKS_RE.test(firstLine)) {
+                  return firstLine.slice(0, 80);
+                }
+                return '';
+              };
+
+              const extractDateText = (labelText, cardText) => {
+                // Never treat clicks / Marketplace meta as the listing date.
+                const cleanedLabel = CLICKS_RE.test(labelText) ? '' : labelText;
+                const sources = [cleanedLabel, cardText];
+                for (const src of sources) {
+                  if (!src) continue;
+                  // Strip clicks segments before matching dates.
+                  const scrubbed = src
+                    .replace(CLICKS_RE, ' ')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+                  const m = scrubbed.match(DATE_SNIP_RE);
+                  if (m) {
+                    const snip = m[0].trim();
+                    if (!CLICKS_RE.test(snip)) return snip;
+                  }
+                }
+                // Bare slash date anywhere in the card.
+                const bare = (cardText || '').match(RAW_DATE_RE);
+                return bare ? bare[0] : '';
               };
 
               for (const labelEl of candidates) {
@@ -877,31 +932,31 @@ def _extract_selling_cards_via_js(page: Page) -> list[dict[str, str]]:
                 const labelText = (labelEl.innerText || labelEl.textContent || '')
                   .replace(/\s+/g, ' ').trim();
                 const cardText = (card.innerText || '').replace(/\s+/g, ' ').trim();
-                const dateMatch = (labelText.match(DATE_SNIP_RE)
-                  || cardText.match(DATE_SNIP_RE));
-                const date_text = dateMatch ? dateMatch[0].trim() : labelText;
                 const title = extractTitle(cardText);
+                const date_text = extractDateText(labelText, cardText);
                 const { item_id, href } = extractHrefId(card);
                 const key = item_id
                   || (title + '|' + date_text + '|' + cardText.slice(0, 60));
                 if (seen.has(key)) continue;
                 seen.add(key);
 
-                // Keep title-only cards (Spanish Seller Hub often has no item href).
-                if (!item_id && !title && !date_text) {
-                  failed.push({
-                    reason: 'no_id_title_date',
-                    raw: cardText.slice(0, 400),
-                  });
-                  continue;
-                }
                 if (!item_id && !title) {
                   failed.push({
                     reason: 'no_item_id_or_title',
                     raw: cardText.slice(0, 400),
                     date_text,
+                    label: labelText.slice(0, 120),
                   });
-                  // Still emit so Python can log + age-parse when possible.
+                  continue;
+                }
+                if (!date_text) {
+                  failed.push({
+                    reason: 'title_ok_but_no_date',
+                    raw: cardText.slice(0, 400),
+                    title,
+                    label: labelText.slice(0, 120),
+                  });
+                  // Still emit — Python may age via relative phrases elsewhere.
                 }
                 out.push({
                   item_id: item_id || '',
@@ -910,9 +965,9 @@ def _extract_selling_cards_via_js(page: Page) -> list[dict[str, str]]:
                     : ''),
                   date_text,
                   title,
-                  blob: ((title ? title + ' ' : '') + date_text + ' ' + cardText)
-                    .replace(/\s+/g, ' ').trim().slice(0, 900),
-                  parse_ok: !!(item_id || title),
+                  blob: ((title ? title + ' ' : '') + (date_text ? date_text + ' ' : '')
+                    + cardText).replace(/\s+/g, ' ').trim().slice(0, 900),
+                  parse_ok: !!(title && (item_id || date_text)),
                 });
               }
               return { cards: out, failed, candidate_count: candidates.length };
@@ -948,17 +1003,24 @@ def _extract_selling_cards_via_js(page: Page) -> list[dict[str, str]]:
         title = str(row.get("title") or "").strip() or vehicle_title_from_card_text(
             blob
         )
-        parse_ok = bool(row.get("parse_ok", True))
+        # Never keep clicks meta as the listing date.
+        if date_text and _CLICKS_META_RE.search(date_text):
+            date_text = ""
+        if not date_text:
+            date_text = extract_listed_on_snip(blob)
         if date_text and date_text not in blob:
             blob = f"{date_text} {blob}".strip()
         if title and title not in blob:
             blob = f"{title} {blob}".strip()
-        if not parse_ok or (not item_id and not title):
+        parse_ok = bool(title) and bool(item_id or date_text)
+        if not parse_ok:
             print(
                 f"  DOM card parse weak/fail date={date_text!r} "
-                f"raw={blob[:240]!r}",
+                f"title={title!r} raw={blob[:240]!r}",
                 flush=True,
             )
+            if not title:
+                continue
         if item_id.isdigit() and len(item_id) >= 8:
             cleaned.append(
                 {
@@ -969,8 +1031,8 @@ def _extract_selling_cards_via_js(page: Page) -> list[dict[str, str]]:
                     "title": title,
                 }
             )
-        elif title or date_text:
-            # Title-only / date-only Spanish cards → synthetic id for purge queue.
+        elif title:
+            # Title cards (often from clicks-label climb) → UI delete queue.
             cleaned.append(
                 {
                     "item_id": "",
@@ -1005,11 +1067,15 @@ def _extract_selling_cards_via_js(page: Page) -> list[dict[str, str]]:
 
 
 def _extract_selling_cards_via_text_locators(page: Page) -> list[dict[str, str]]:
-    """Playwright locator fallback: get_by_text → parent 2–4 → title + link."""
+    """Playwright locator fallback: get_by_text → titled parent → date + link."""
     out: list[dict[str, str]] = []
     seen: set[str] = set()
     needles: list[str | re.Pattern[str]] = list(_LISTED_ON_TEXT_NEEDLES) + [
-        _LISTED_ON_WAIT_RE
+        "Listed on Marketplace",
+        "Publicado en Marketplace",
+        "clicks on listing",
+        "clics en la publicación",
+        _LISTED_ON_WAIT_RE,
     ]
     for needle in needles:
         try:
@@ -1025,16 +1091,17 @@ def _extract_selling_cards_via_text_locators(page: Page) -> list[dict[str, str]]
                 date_text = (label.inner_text(timeout=1_000) or "").strip()
             except Exception:
                 date_text = needle if isinstance(needle, str) else ""
-            # Loose climb: prefer ancestors at depth 2–4.
+            # Climb to wrapper that contains a vehicle title heading.
             card = None
             for xpath in (
                 "xpath=ancestor::div[2]",
                 "xpath=ancestor::div[3]",
                 "xpath=ancestor::div[4]",
-                "xpath=ancestor::div[.//a[contains(@href,'/marketplace/item/')]][1]",
-                "xpath=ancestor::div[.//a[contains(@href,'marketplace')]][1]",
-                "xpath=ancestor::div[contains(.,'Listed on') or contains(.,'Publicado')][4]",
+                "xpath=ancestor::div[5]",
                 "xpath=ancestor::div[6]",
+                "xpath=ancestor::div[8]",
+                "xpath=ancestor::div[.//a[contains(@href,'/marketplace/item/')]][1]",
+                "xpath=ancestor::div[.//h2 or .//*[@role='heading']][1]",
             ):
                 try:
                     cand = label.locator(xpath).first
@@ -1044,19 +1111,18 @@ def _extract_selling_cards_via_text_locators(page: Page) -> list[dict[str, str]]
                         txt = (cand.inner_text(timeout=800) or "").strip()
                     except Exception:
                         txt = ""
-                    if 12 <= len(txt) <= 2400:
-                        card = cand
-                        if vehicle_title_from_card_text(txt) or "/marketplace/item/" in (
-                            cand.inner_html(timeout=500) or ""
-                        ):
-                            break
+                    if not (12 <= len(txt) <= 3200):
+                        continue
+                    card = cand
+                    if vehicle_title_from_card_text(txt):
+                        break
                 except Exception:
                     continue
             if card is None:
                 try:
                     raw_fail = (label.inner_text(timeout=500) or "").strip()
                 except Exception:
-                    raw_fail = date_text
+                    raw_fail = str(date_text)
                 print(
                     f"  DOM locator card climb miss raw={raw_fail[:200]!r}",
                     flush=True,
@@ -1083,18 +1149,24 @@ def _extract_selling_cards_via_text_locators(page: Page) -> list[dict[str, str]]
             try:
                 card_text = (card.inner_text(timeout=1_500) or "").strip()
             except Exception:
-                card_text = date_text
+                card_text = str(date_text)
             title = vehicle_title_from_card_text(card_text)
+            real_date = extract_listed_on_snip(card_text)
+            if real_date and not _CLICKS_META_RE.search(real_date):
+                date_text = real_date
+            elif isinstance(date_text, str) and _CLICKS_META_RE.search(date_text):
+                date_text = ""
             key = item_id or f"{title}|{date_text}|{card_text[:60]}"
             if not key or key in seen:
                 continue
             seen.add(key)
-            if not item_id and not title:
+            if not title:
                 print(
-                    f"  DOM locator parse fail date={date_text!r} "
-                    f"raw={card_text[:240]!r}",
+                    f"  DOM locator parse fail (no title) "
+                    f"label={date_text!r} raw={card_text[:240]!r}",
                     flush=True,
                 )
+                continue
             blob = f"{title} {date_text} {card_text}".strip()
             out.append(
                 {
@@ -1106,7 +1178,7 @@ def _extract_selling_cards_via_text_locators(page: Page) -> list[dict[str, str]]
                         else ""
                     ),
                     "blob": blob[:900],
-                    "date_text": date_text,
+                    "date_text": str(date_text or ""),
                     "title": title,
                 }
             )
@@ -2484,12 +2556,15 @@ def purge_old_listings_on_page(
         autosell_id = str(row["autosell_id"]) if row is not None else card.item_id
 
         ok = False
+        title_hint = vehicle_title_from_card_text(
+            card.card_text or card.age_text or ""
+        )
         needles = _title_needles_for_purge(
             store=store,
             account_id=account_id,
             item_id=card.item_id,
             autosell_id=autosell_id,
-            vehicle_title="",
+            vehicle_title=title_hint,
             card_text=card.card_text or card.age_text or "",
         )
         # Catalog needles only (no detail-page navigation mid-shelf purge).
@@ -2504,8 +2579,13 @@ def purge_old_listings_on_page(
             except Exception:
                 pass
 
-        # Empty shelf DOM / DB fallback: delete via titled Más opciones menu.
-        if used_db_fallback:
+        # Synthetic DOM ids (title cards from clicks-label climb) → UI title delete.
+        title_only = str(card.item_id).startswith("dom-") or not str(
+            card.item_id
+        ).isdigit()
+
+        # Empty shelf DOM / DB fallback / title-only: Más opciones by title.
+        if used_db_fallback or title_only:
             if not needles:
                 # Last resort for DB-only rows: may open detail once for title.
                 needles = _title_needles_for_row(
@@ -2513,7 +2593,7 @@ def purge_old_listings_on_page(
                 )
             print(
                 f"  title-menu delete needles={needles[:3]!r} "
-                f"autosell_id={autosell_id}",
+                f"autosell_id={autosell_id} title_only={title_only}",
                 flush=True,
             )
             if needles:

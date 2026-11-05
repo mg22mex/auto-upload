@@ -155,7 +155,10 @@ class TestSellingShelfDiscoveryHydration(unittest.TestCase):
         self.assertIn("date_text", src)
         self.assertIn("RAW_DATE_RE", src)
         self.assertIn("TITLE_RE", src)
-        self.assertIn("depth >= 2 && depth <= 4", src)
+        self.assertIn("CLICKS_RE", src)
+        self.assertIn("Listed on Marketplace", src)
+        self.assertIn("extractDateText", src)
+        self.assertIn("withTitle", src)
         self.assertIn("failed", src)
 
     def test_bare_slash_dates_es_and_en(self):
@@ -213,6 +216,73 @@ class TestSellingShelfDiscoveryHydration(unittest.TestCase):
         self.assertTrue(cards[0].item_id.startswith("dom-"))
         self.assertIn("2022 Mercedes-Benz", cards[0].card_text)
         self.assertGreaterEqual(cards[0].age_days or 0, 7.0)
+
+    def test_clicks_label_not_used_as_date_snip(self):
+        from src.facebook.purge_old import extract_listed_on_snip
+
+        blob = (
+            "2022 Mercedes-Benz C300 Listed on Marketplace · 12 clicks on listing "
+            "10/24 $450000"
+        )
+        snip = extract_listed_on_snip(blob)
+        self.assertNotIn("Marketplace", snip)
+        self.assertNotIn("clicks", snip.lower())
+        self.assertIn("10/24", snip)
+        title = __import__(
+            "src.facebook.purge_old", fromlist=["vehicle_title_from_card_text"]
+        ).vehicle_title_from_card_text(blob)
+        self.assertIn("2022 Mercedes-Benz", title)
+
+    def test_clicks_label_card_queued_for_ui_delete(self):
+        """Title+date from clicks-label climb enters purge (≥7d → UI delete)."""
+        page = MagicMock()
+        store = MagicMock()
+        store.get_live_listings.return_value = []
+        cards = [
+            ShelfListing(
+                "dom-abc123",
+                "",
+                12.0,
+                "10/24",
+                "1957 Plymouth Savoy Listed on Marketplace · 3 clicks on listing 10/24",
+            ),
+        ]
+        with (
+            patch(
+                "src.facebook.purge_old.collect_selling_listings",
+                return_value=cards,
+            ),
+            patch(
+                "src.facebook.purge_old._remove_from_selling_shelf",
+                return_value=False,
+            ),
+            patch(
+                "src.facebook.purge_old.remove_from_selling_by_title",
+                return_value=True,
+            ) as title_rm,
+            patch("src.facebook.purge_old.random_delay"),
+            patch(
+                "src.facebook.purge_old._catalog_by_autosell_id",
+                return_value={},
+            ),
+            patch(
+                "src.facebook.purge_old._lookup_db_row",
+                return_value=None,
+            ),
+        ):
+            stats = purge_old_listings_on_page(
+                page,
+                store,
+                account_id="account_2",
+                max_days=7,
+                dry_run=False,
+            )
+        self.assertEqual(stats.deleted, 1)
+        title_rm.assert_called_once()
+        needles = title_rm.call_args.args[1]
+        self.assertTrue(
+            any("1957 Plymouth Savoy" in n or "Plymouth" in n for n in needles)
+        )
 
 
 class TestPurgeOldListingsOnPage(unittest.TestCase):
