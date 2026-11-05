@@ -92,10 +92,7 @@ class TestParseListingAgeDays(unittest.TestCase):
             db_age_days=4.9,
             now=now,
         )
-        self.assertIsNotNone(age24)
-        assert age24 is not None
-        self.assertGreaterEqual(age24, 12.0)
-        self.assertLess(age24, 13.0)
+        self.assertEqual(age24, 12.0)
         self.assertIn("dom_calendar", src24)
         self.assertTrue(is_purge_age_eligible(age24, 7.0))
 
@@ -106,10 +103,7 @@ class TestParseListingAgeDays(unittest.TestCase):
             db_age_days=2.0,
             now=now,
         )
-        self.assertIsNotNone(age28)
-        assert age28 is not None
-        self.assertGreaterEqual(age28, 8.0)
-        self.assertLess(age28, 9.0)
+        self.assertEqual(age28, 8.0)
         self.assertIn("dom_calendar", src28)
         self.assertTrue(is_purge_age_eligible(age28, 7.0))
 
@@ -119,11 +113,30 @@ class TestParseListingAgeDays(unittest.TestCase):
         now = datetime(2026, 11, 5, tzinfo=timezone.utc)
         age24 = parse_explicit_dom_calendar_age("10/24", now=now)
         age28 = parse_explicit_dom_calendar_age("10/28", now=now)
-        self.assertAlmostEqual(age24 or -1, 12.0)
-        self.assertAlmostEqual(age28 or -1, 8.0)
+        self.assertEqual(age24, 12.0)
+        self.assertEqual(age28, 8.0)
         assert age24 is not None and age28 is not None
         self.assertTrue(is_purge_age_eligible(age24, 7.0))
         self.assertTrue(is_purge_age_eligible(age28, 7.0))
+
+    def test_newer_meta_date_does_not_beat_october_listing(self):
+        """Card blob with 11/1 meta before 10/24 must still yield 12.0d."""
+        from src.facebook.purge_old import parse_explicit_dom_calendar_age
+
+        now = datetime(2026, 11, 5, tzinfo=timezone.utc)
+        blob = "Boosted 11/1 · 2022 Mercedes-Benz 10/24 $450000"
+        age = parse_explicit_dom_calendar_age(blob, now=now)
+        self.assertEqual(age, 12.0)
+        age_r, src = resolve_listing_age_for_purge(
+            live_age_days=4.9,
+            live_age_text="",
+            live_card_text=blob,
+            db_age_days=5.9,
+            now=now,
+        )
+        self.assertEqual(age_r, 12.0)
+        self.assertIn("dom_calendar", src)
+        self.assertTrue(is_purge_age_eligible(age_r or 0, 7.0))
 
     def test_exactly_max_days_is_eligible(self):
         self.assertTrue(is_purge_age_eligible(7.0, 7.0))

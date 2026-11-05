@@ -280,13 +280,45 @@ def _age_from_calendar_date(
     when: datetime,
     year_explicit: bool = False,
 ) -> float | None:
+    """Elapsed whole calendar days from ``YYYY-MM-DD`` to ``when``'s date (UTC).
+
+    ``10/24`` vs ``2026-11-05`` → ``12.0`` (not a month-offset approximation).
+    October→November transitions are plain date subtraction — no month rollover hacks.
+    """
+    from datetime import date as date_cls
+
     try:
-        posted = datetime(year, month, day, tzinfo=timezone.utc)
+        posted_d = date_cls(year, month, day)
     except ValueError:
         return None
-    if posted > when and not year_explicit:
-        posted = posted.replace(year=year - 1)
-    return max(0.0, (when - posted).total_seconds() / 86400.0)
+    when_utc = when if when.tzinfo is not None else when.replace(tzinfo=timezone.utc)
+    when_d = when_utc.astimezone(timezone.utc).date()
+    if posted_d > when_d and not year_explicit:
+        try:
+            posted_d = date_cls(year - 1, month, day)
+        except ValueError:
+            return None
+    return float((when_d - posted_d).days)
+
+
+def _parse_slash_md(
+    a: int,
+    b: int,
+    *,
+    prefer_md: bool = True,
+) -> tuple[int, int] | None:
+    """Map slash pair ``a/b`` → ``(month, day)``. ``10/24`` → ``(10, 24)``."""
+    candidates: list[tuple[int, int]] = []
+    if a > 12 and 1 <= b <= 12:
+        candidates.append((b, a))  # DD/MM
+    elif b > 12 and 1 <= a <= 12:
+        candidates.append((a, b))  # MM/DD
+    elif 1 <= a <= 12 and 1 <= b <= 12:
+        candidates = [(a, b), (b, a)] if prefer_md else [(b, a), (a, b)]
+    for month, day in candidates:
+        if 1 <= month <= 12 and 1 <= day <= 31:
+            return month, day
+    return None
 
 
 def _parse_slash_date_age(
@@ -299,27 +331,29 @@ def _parse_slash_date_age(
     prefer_md: bool = True,
 ) -> float | None:
     """Age from ``a/b`` slash date. ``10/24`` → Oct 24 (US MM/DD) when unambiguous."""
-    candidates: list[tuple[int, int]] = []
-    if a > 12 and 1 <= b <= 12:
-        candidates.append((b, a))  # DD/MM → (month, day)
-    elif b > 12 and 1 <= a <= 12:
-        candidates.append((a, b))  # MM/DD
-    elif 1 <= a <= 12 and 1 <= b <= 12:
-        # Ambiguous: Seller Hub US labels are MM/DD (10/24 = Oct 24).
-        candidates = [(a, b), (b, a)] if prefer_md else [(b, a), (a, b)]
+    md = _parse_slash_md(a, b, prefer_md=prefer_md)
+    if md is None:
+        return None
+    month, day = md
+    # Also try alternate orientation when ambiguous so caller can take max.
     ages: list[float] = []
-    for month, day in candidates:
-        if not (1 <= month <= 12 and 1 <= day <= 31):
-            continue
-        age = _age_from_calendar_date(
-            year, month, day, when=when, year_explicit=year_explicit
-        )
-        if age is not None and age <= 400:
-            ages.append(age)
+    age = _age_from_calendar_date(
+        year, month, day, when=when, year_explicit=year_explicit
+    )
+    if age is not None and 0 <= age <= 400:
+        ages.append(age)
+    if prefer_md and 1 <= a <= 12 and 1 <= b <= 12 and a != b:
+        alt = _parse_slash_md(a, b, prefer_md=False)
+        if alt is not None and alt != (month, day):
+            age_alt = _age_from_calendar_date(
+                year, alt[0], alt[1], when=when, year_explicit=year_explicit
+            )
+            if age_alt is not None and 0 <= age_alt <= 400:
+                ages.append(age_alt)
     if not ages:
         return None
-    # Prefer first candidate (MM/DD when prefer_md); else oldest (purge-safe).
-    return ages[0] if prefer_md else max(ages)
+    # Seller Hub US: prefer MM/DD (first). Purge-safe callers may max() across matches.
+    return ages[0]
 
 
 def parse_explicit_dom_calendar_age(
@@ -328,8 +362,10 @@ def parse_explicit_dom_calendar_age(
     """Strict calendar-date age from DOM labels (overrides GraphQL/DB).
 
     Recognizes ``Listed on 10/24``, ``Publicado el 24/10``, ``Oct 24``, and bare
-    ``10/24`` / ``10/28``. Ignores relative phrases and clicks meta so a wrong
-    ``live_age_days`` (~4.9d) cannot beat an explicit shelf date.
+    ``10/24`` / ``10/28``. When a card blob contains multiple slash dates (e.g. a
+    newer boost/meta ``11/1`` before the real ``10/24``), prefers labeled shelf
+    dates, then the **oldest** plausible bare date so October listings are not
+    collapsed to ~4.9d.
     """
     raw = text or ""
     # Drop clicks / Marketplace meta so they cannot confuse slash matching.
@@ -347,31 +383,33 @@ def parse_explicit_dom_calendar_age(
             return year, True
         return when.year, False
 
+    labeled_ages: list[tuple[float, str]] = []
+
     # "Listed on 10/24" / "Listed on 10/24/2025" (US MM/DD) — not Marketplace.
-    m = re.search(
+    for m in re.finditer(
         r"listed\s+on\s+(?!marketplace)(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?",
         blob,
-    )
-    if m:
+    ):
         year, explicit = _year_from(m.group(3))
+        month, day = int(m.group(1)), int(m.group(2))
         age = _age_from_calendar_date(
-            year, int(m.group(1)), int(m.group(2)), when=when, year_explicit=explicit
+            year, month, day, when=when, year_explicit=explicit
         )
-        if age is not None:
-            return age
+        if age is not None and 0 <= age <= 400:
+            labeled_ages.append((age, f"listed_on {month:02d}/{day:02d}"))
 
     # "Publicado el/en 24/10" (ES DD/MM).
-    m = re.search(
+    for m in re.finditer(
         r"publicado\s+(?:el|en)\s+(?!marketplace)(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?",
         blob,
-    )
-    if m:
+    ):
         year, explicit = _year_from(m.group(3))
+        day, month = int(m.group(1)), int(m.group(2))
         age = _age_from_calendar_date(
-            year, int(m.group(2)), int(m.group(1)), when=when, year_explicit=explicit
+            year, month, day, when=when, year_explicit=explicit
         )
-        if age is not None:
-            return age
+        if age is not None and 0 <= age <= 400:
+            labeled_ages.append((age, f"publicado {day:02d}/{month:02d}"))
 
     # "Publicado el 20 de agosto"
     m = re.search(
@@ -382,8 +420,8 @@ def parse_explicit_dom_calendar_age(
         month = _MONTHS_ES.get(m.group(2))
         if month:
             age = _age_from_calendar_date(when.year, month, int(m.group(1)), when=when)
-            if age is not None:
-                return age
+            if age is not None and 0 <= age <= 400:
+                labeled_ages.append((age, f"publicado_es {month:02d}/{int(m.group(1)):02d}"))
 
     # "Listed on Oct 24" / "Listed on October 24, 2025"
     m = re.search(
@@ -397,25 +435,59 @@ def parse_explicit_dom_calendar_age(
             age = _age_from_calendar_date(
                 year, month, int(m.group(2)), when=when, year_explicit=explicit
             )
-            if age is not None:
-                return age
+            if age is not None and 0 <= age <= 400:
+                labeled_ages.append(
+                    (age, f"listed_on_mon {month:02d}/{int(m.group(2)):02d}")
+                )
 
-    # Bare slash dates: 10/24, 10/28, 24/10, 28/10 (after scrubbing clicks meta).
+    if labeled_ages:
+        # Oldest labeled shelf date wins (purge-safe across multi-date cards).
+        labeled_ages.sort(key=lambda t: t[0], reverse=True)
+        age, how = labeled_ages[0]
+        print(
+            f"  DOM calendar parse: {how} → {age:.1f}d "
+            f"(vs {when.astimezone(timezone.utc).date().isoformat()})",
+            flush=True,
+        )
+        return age
+
+    # Bare slash dates: collect ALL, pick oldest plausible (10/24 over newer 11/1).
+    bare_ages: list[tuple[float, str]] = []
     for m in re.finditer(
         r"(?<!\d)(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?(?!\d)",
         blob,
     ):
         year, explicit = _year_from(m.group(3))
-        age = _parse_slash_date_age(
-            int(m.group(1)),
-            int(m.group(2)),
-            year=year,
-            when=when,
-            year_explicit=explicit,
-            prefer_md=True,
+        a, b = int(m.group(1)), int(m.group(2))
+        md = _parse_slash_md(a, b, prefer_md=True)
+        if md is None:
+            continue
+        month, day = md
+        age = _age_from_calendar_date(
+            year, month, day, when=when, year_explicit=explicit
         )
-        if age is not None:
-            return age
+        if age is not None and 0 <= age <= 400:
+            bare_ages.append((age, f"bare {month:02d}/{day:02d}"))
+        # Ambiguous pair: also consider DD/MM so Oct 24 as 24/10 isn't lost.
+        if 1 <= a <= 12 and 1 <= b <= 12 and a != b:
+            alt = _parse_slash_md(a, b, prefer_md=False)
+            if alt is not None and alt != (month, day):
+                age_alt = _age_from_calendar_date(
+                    year, alt[0], alt[1], when=when, year_explicit=explicit
+                )
+                if age_alt is not None and 0 <= age_alt <= 400:
+                    bare_ages.append((age_alt, f"bare_alt {alt[0]:02d}/{alt[1]:02d}"))
+
+    if bare_ages:
+        bare_ages.sort(key=lambda t: t[0], reverse=True)
+        age, how = bare_ages[0]
+        print(
+            f"  DOM calendar parse: {how} → {age:.1f}d "
+            f"(vs {when.astimezone(timezone.utc).date().isoformat()}; "
+            f"{len(bare_ages)} slash candidate(s))",
+            flush=True,
+        )
+        return age
 
     return None
 
@@ -501,19 +573,36 @@ def resolve_listing_age_for_purge(
       4. ``sync.db`` ``posted_at`` (last resort only)
     """
     when = now or datetime.now(timezone.utc)
-    blob = f"{live_age_text} {live_card_text}".strip()
+    age_snip = (live_age_text or "").strip()
+    card_blob = (live_card_text or "").strip()
+    blob = f"{age_snip} {card_blob}".strip()
 
     # 1) Strict DOM calendar date — source of truth for 7-day hard purge.
-    cal = parse_explicit_dom_calendar_age(blob, now=when)
+    # Prefer the isolated date snip (``10/24``) before scanning the full card
+    # blob, which may contain newer meta dates (``11/1`` → false ~4.9d).
+    cal = None
+    cal_src = ""
+    if age_snip:
+        cal = parse_explicit_dom_calendar_age(age_snip, now=when)
+        if cal is not None:
+            cal_src = "dom_calendar(age_text)"
+    if cal is None and card_blob:
+        cal = parse_explicit_dom_calendar_age(card_blob, now=when)
+        if cal is not None:
+            cal_src = "dom_calendar(card)"
+    if cal is None and blob and blob not in (age_snip, card_blob):
+        cal = parse_explicit_dom_calendar_age(blob, now=when)
+        if cal is not None:
+            cal_src = "dom_calendar(blob)"
     if cal is not None:
-        source = "dom_calendar"
+        source = cal_src or "dom_calendar"
         if live_age_days is not None and abs(float(cal) - float(live_age_days)) >= 0.5:
             print(
                 f"  age override: DOM calendar={cal:.1f}d "
                 f"overrides live_age_days={float(live_age_days):.1f}d",
                 flush=True,
             )
-            source = "dom_calendar (live_age ignored)"
+            source = f"{source} (live_age ignored)"
         if db_age_days is not None and abs(float(cal) - float(db_age_days)) >= 0.5:
             print(
                 f"  age conflict: DOM calendar={cal:.1f}d vs sync.db={db_age_days:.1f}d "
