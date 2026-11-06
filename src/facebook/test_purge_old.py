@@ -674,6 +674,44 @@ class TestPurgeOldListingsOnPage(unittest.TestCase):
             )
         self.assertIn("2018 Audi Q5", needles)
 
+    def test_db_fallback_needles_require_year_no_yearless_cores(self):
+        """obj1025 (2019) must not expand to yearless 'Porsche Cayenne'."""
+        from src.facebook.purge_old import _title_needles_for_purge
+
+        vehicle = MagicMock()
+        vehicle.title = "Porsche Cayenne s +"
+        vehicle.year = "2019"
+        vehicle.brand = "Porsche"
+        vehicle.marketplace_title = "2019 Porsche Cayenne s +"
+
+        store = MagicMock()
+        with patch(
+            "src.facebook.purge_old._catalog_by_autosell_id",
+            return_value={"obj1025": vehicle},
+        ), patch(
+            "src.facebook.purge_old._lookup_db_row",
+            return_value=None,
+        ), patch(
+            "src.facebook.purge_old._match_needles",
+            return_value=[
+                "2019 Porsche Cayenne s +",
+                "Porsche Cayenne s +",
+                "Porsche",
+            ],
+        ):
+            needles = _title_needles_for_purge(
+                store=store,
+                account_id="account_1",
+                item_id="999",
+                autosell_id="obj1025",
+                vehicle_title="",
+                card_text="obj1025 https://www.facebook.com/marketplace/item/999/",
+                require_year=True,
+            )
+        self.assertTrue(needles)
+        self.assertTrue(all("2019" in n for n in needles))
+        self.assertFalse(any(n.lower() == "porsche cayenne" for n in needles))
+
     def test_hard_delete_title_fallback_when_item_href_misses(self):
         from src.facebook.purge_old import hard_delete_listing_via_playwright
 
@@ -688,6 +726,10 @@ class TestPurgeOldListingsOnPage(unittest.TestCase):
                 "src.facebook.purge_old.remove_from_selling_by_title",
                 return_value=True,
             ) as title_rm,
+            patch(
+                "src.facebook.purge_old._title_needles_for_purge",
+                return_value=["2018 Audi Q5"],
+            ),
         ):
             ok = hard_delete_listing_via_playwright(
                 page,
@@ -702,6 +744,115 @@ class TestPurgeOldListingsOnPage(unittest.TestCase):
         self.assertTrue(ok)
         title_rm.assert_called_once()
         self.assertEqual(title_rm.call_args.kwargs.get("action"), "delete")
+        self.assertTrue(title_rm.call_args.kwargs.get("require_year"))
+
+    def test_hard_delete_already_removed_clears_dead_sync_db(self):
+        """404 + year-title absent → ALREADY_REMOVED, not FAIL."""
+        from src.facebook.purge_old import hard_delete_listing_via_playwright
+
+        page = MagicMock()
+        store = MagicMock()
+        with (
+            patch(
+                "src.facebook.purge_old._remove_from_selling_shelf",
+                return_value=False,
+            ),
+            patch(
+                "src.facebook.purge_old.remove_from_selling_by_title",
+                return_value=False,
+            ),
+            patch(
+                "src.facebook.purge_old._title_needles_for_purge",
+                return_value=["2019 Porsche Cayenne"],
+            ),
+            patch(
+                "src.facebook.remover.remove_vehicle_listing",
+                return_value=False,
+            ),
+            patch(
+                "src.facebook.purge_old._db_listing_already_gone_on_facebook",
+                return_value=True,
+            ) as gone,
+            patch(
+                "src.facebook.purge_old._mark_db_row_already_removed",
+            ) as clear,
+        ):
+            ok = hard_delete_listing_via_playwright(
+                page,
+                item_id="555",
+                listing_url="https://www.facebook.com/marketplace/item/555/",
+                autosell_id="obj1025",
+                store=store,
+                account_id="account_1",
+                vehicle_title="2019 Porsche Cayenne s +",
+            )
+        self.assertTrue(ok)
+        gone.assert_called_once()
+        clear.assert_called_once()
+        self.assertEqual(clear.call_args.kwargs.get("autosell_id"), "obj1025")
+
+    def test_db_fallback_purge_clears_already_removed_without_fail(self):
+        """Empty DOM shelf + dead sync.db row → deleted, not failed."""
+
+        class FakeRow(dict):
+            def keys(self):
+                return dict.keys(self)
+
+        page = MagicMock()
+        store = MagicMock()
+        live = FakeRow(
+            {
+                "account_id": "account_1",
+                "fb_listing_url": "https://www.facebook.com/marketplace/item/555/",
+                "autosell_id": "obj1025",
+                "posted_at": "2026-10-01T00:00:00+00:00",
+            }
+        )
+        store.get_live_listings.return_value = [live]
+        store.mark_fb_listing_removed = MagicMock()
+
+        with (
+            patch(
+                "src.facebook.purge_old.collect_selling_listings",
+                return_value=[],
+            ),
+            patch(
+                "src.facebook.purge_old._catalog_by_autosell_id",
+                return_value={},
+            ),
+            patch(
+                "src.facebook.purge_old._sort_selling_oldest_first",
+            ),
+            patch(
+                "src.facebook.purge_old.remove_from_selling_by_title",
+                return_value=False,
+            ) as title_rm,
+            patch(
+                "src.facebook.purge_old._title_needles_for_purge",
+                return_value=["2019 Porsche Cayenne"],
+            ),
+            patch(
+                "src.facebook.purge_old._title_needles_for_row",
+                return_value=["2019 Porsche Cayenne"],
+            ),
+            patch(
+                "src.facebook.purge_old._db_listing_already_gone_on_facebook",
+                return_value=True,
+            ),
+            patch("src.facebook.purge_old.random_delay"),
+        ):
+            stats = purge_old_listings_on_page(
+                page,
+                store,
+                account_id="account_1",
+                max_days=7,
+                dry_run=False,
+            )
+        self.assertEqual(stats.failed, 0)
+        self.assertEqual(stats.deleted, 1)
+        title_rm.assert_called()
+        self.assertTrue(title_rm.call_args.kwargs.get("require_year"))
+        store.mark_fb_listing_removed.assert_called()
 
 
 if __name__ == "__main__":

@@ -424,7 +424,10 @@ def remove_vehicle_listing(
             f"needles={needles[:3]!r}",
             flush=True,
         )
-        if remove_from_selling_by_title(page, needles, action=action):
+        # Year-lock title match (2019 Porsche must not hit 2023 Porsche Cayenne).
+        if remove_from_selling_by_title(
+            page, needles, action=action, require_year=True
+        ):
             return True
         # Never fall back to Mark as sold on delete/bump — sold ghosts cause
         # FB "This looks like a duplicate" when recreating.
@@ -450,7 +453,10 @@ def remove_vehicle_listing(
             return False
 
         needles = _needles() or _scrape_detail_title_needles()
-        if needles and selling_title_present(page, needles, max_scrolls=20):
+        # Year-locked presence check — 2019 must not see 2023 Porsche as "still live".
+        if needles and selling_title_present(
+            page, needles, max_scrolls=20, require_year=True
+        ):
             print(
                 f"  {autosell_id}: not ALREADY_REMOVED — title still on selling shelf",
                 flush=True,
@@ -1360,11 +1366,23 @@ def _strip_title_noise(value: str) -> str:
     return re.sub(r"\s+", " ", text).strip(" ·|-–,")
 
 
+def _extract_model_year(text: str) -> str | None:
+    m = re.search(r"\b((?:19|20)\d{2})\b", text or "")
+    return m.group(1) if m else None
+
+
 def _title_label_matches(label: str, needle: str) -> bool:
-    """True when ``needle`` is a substring of ``label``, or core tokens overlap."""
+    """True when ``needle`` is a substring of ``label``, or core tokens overlap.
+
+    When ``needle`` includes a model year (``2019``), the label **must** contain
+    that same year — prevents ``2019 Porsche Cayenne`` matching ``2023 Porsche Cayenne``.
+    """
     lab = re.sub(r"\s+", " ", (label or "").lower()).strip()
     ned = re.sub(r"\s+", " ", _strip_title_noise(needle).lower()).strip()
     if len(ned) < 4:
+        return False
+    year = _extract_model_year(ned)
+    if year and year not in lab:
         return False
     if ned in lab:
         return True
@@ -1383,42 +1401,57 @@ def _title_label_matches(label: str, needle: str) -> bool:
         need = min(len(tokens), 3)
         if hit >= need:
             return True
-        if hit >= 2 and any(t.isdigit() and len(t) == 4 for t in tokens if t in lab):
+        if hit >= 2 and year and year in lab:
             return True
     return False
 
 
-def _expand_partial_title_needles(title_needles: list[str]) -> list[str]:
+def _expand_partial_title_needles(
+    title_needles: list[str],
+    *,
+    require_year: bool = False,
+) -> list[str]:
     """Expand full titles into shorter cores for contains/partial matching.
 
-    ``2018 Kia Forte EX Aut · Listed on Marketplace`` →
-    ``2018 Kia Forte EX Aut``, ``2018 Kia Forte EX``, ``2018 Kia Forte``, …
+    ``2019 Porsche Cayenne s + · Listed on Marketplace`` →
+    ``2019 Porsche Cayenne s +``, ``2019 Porsche Cayenne s``, ``2019 Porsche Cayenne``.
+
+    When ``require_year`` (sync.db fallbacks) or the source title has a year, never
+    emit yearless ``Porsche Cayenne`` cores that would hit other model years.
     """
     out: list[str] = []
 
-    def add(value: str) -> None:
+    def add(value: str, *, year_lock: str | None) -> None:
         cleaned = _strip_title_noise(value)
         if len(cleaned) < 4:
+            return
+        if year_lock and year_lock not in cleaned:
             return
         if cleaned not in out:
             out.append(cleaned)
 
     for raw in title_needles:
-        add(raw)
         cleaned = _strip_title_noise(raw)
         if not cleaned:
             continue
+        year = _extract_model_year(cleaned)
+        if require_year and not year:
+            continue
+        # Always keep year in cores when the source title had one.
+        lock = year
+        add(cleaned, year_lock=lock)
         words = cleaned.split()
-        # Year + next 2–4 words: "2018 Kia Forte EX"
+        # Year + next 2–4 words: "2019 Porsche Cayenne s"
         if words and re.fullmatch(r"(?:19|20)\d{2}", words[0]):
             for n in (5, 4, 3, 2):
                 if len(words) >= n:
-                    add(" ".join(words[:n]))
-            if len(words) >= 2:
-                add(" ".join(words[1:4]))  # brand + model without year
-        elif len(words) >= 2:
-            add(" ".join(words[:3]))
-            add(" ".join(words[:2]))
+                    add(" ".join(words[:n]), year_lock=lock)
+            # Yearless brand+model ONLY when no year was present in source.
+            if not year and not require_year and len(words) >= 2:
+                add(" ".join(words[1:4]), year_lock=None)
+        elif len(words) >= 2 and not require_year and not year:
+            add(" ".join(words[:3]), year_lock=None)
+            add(" ".join(words[:2]), year_lock=None)
         # Regex-friendly year+brand+model chunk from noisy blob.
         m = re.search(
             r"\b((?:19|20)\d{2}\s+[A-Za-zÁÉÍÓÚÑáéíóúñ]"
@@ -1426,13 +1459,19 @@ def _expand_partial_title_needles(title_needles: list[str]) -> list[str]:
             cleaned,
         )
         if m:
-            add(m.group(1))
+            add(m.group(1), year_lock=lock)
     # Prefer longer cores first, then shorter partials (min 4 chars).
     return sorted({n for n in out if len(n) >= 4}, key=len, reverse=True)
 
 
-def _normalize_title_needles(title_needles: list[str]) -> list[str]:
-    return _expand_partial_title_needles(title_needles)
+def _normalize_title_needles(
+    title_needles: list[str],
+    *,
+    require_year: bool = False,
+) -> list[str]:
+    return _expand_partial_title_needles(
+        title_needles, require_year=require_year
+    )
 
 
 def _needle_text_regex(needle: str) -> re.Pattern[str]:
@@ -1527,10 +1566,13 @@ def _card_root_from_title_node(node: Locator) -> Locator | None:
 
 
 def _find_selling_title_more_button(
-    page: Page, needles: list[str]
+    page: Page,
+    needles: list[str],
+    *,
+    require_year: bool = False,
 ) -> Locator | None:
     """Return the first visible ``Más opciones para`` / ``More options for`` match."""
-    needles = _normalize_title_needles(needles)
+    needles = _normalize_title_needles(needles, require_year=require_year)
     if not needles:
         return None
     buttons = page.get_by_role(
@@ -1589,14 +1631,18 @@ def _iter_title_hit_locators(page: Page, needle: str):
 
 
 def _find_selling_card_anchor_by_title(
-    page: Page, needles: list[str]
+    page: Page,
+    needles: list[str],
+    *,
+    require_year: bool = False,
 ) -> Locator | None:
     """Locate a selling-hub card via partial/core vehicle title (no item_id href).
 
     Matches substrings such as ``2018 Kia Forte EX`` inside longer headings, climbs
     to the card wrapper, then returns that card's ⋮ / Más opciones control.
+    When ``require_year``, needles must include a model year and labels must match it.
     """
-    needles = _normalize_title_needles(needles)
+    needles = _normalize_title_needles(needles, require_year=require_year)
     if not needles:
         return None
     for needle in needles:
@@ -1638,9 +1684,10 @@ def selling_title_present(
     *,
     max_scrolls: int = 24,
     navigate: bool = True,
+    require_year: bool = False,
 ) -> bool:
     """True when a titled more-menu for this vehicle is on the selling shelf."""
-    needles = _normalize_title_needles(title_needles)
+    needles = _normalize_title_needles(title_needles, require_year=require_year)
     if not needles:
         return False
     if navigate:
@@ -1651,7 +1698,19 @@ def selling_title_present(
             return False
         _sort_selling_oldest_first(page)
     for _ in range(max_scrolls):
-        if _find_selling_title_more_button(page, needles) is not None:
+        if (
+            _find_selling_title_more_button(
+                page, needles, require_year=require_year
+            )
+            is not None
+        ):
+            return True
+        if (
+            _find_selling_card_anchor_by_title(
+                page, needles, require_year=require_year
+            )
+            is not None
+        ):
             return True
         try:
             page.mouse.wheel(0, 2600)
@@ -1686,12 +1745,23 @@ def _title_still_on_selling_shelf(
     needles: list[str],
     *,
     max_scrolls: int = 12,
+    require_year: bool = False,
 ) -> bool:
     """True when titled more-menu or visible title text is still on the shelf."""
     for _ in range(max_scrolls):
-        if _find_selling_title_more_button(page, needles) is not None:
+        if (
+            _find_selling_title_more_button(
+                page, needles, require_year=require_year
+            )
+            is not None
+        ):
             return True
-        if _find_selling_card_anchor_by_title(page, needles) is not None:
+        if (
+            _find_selling_card_anchor_by_title(
+                page, needles, require_year=require_year
+            )
+            is not None
+        ):
             return True
         try:
             page.mouse.wheel(0, 2600)
@@ -1707,6 +1777,7 @@ def remove_from_selling_by_title(
     *,
     action: str = "delete",
     max_scrolls: int = 24,
+    require_year: bool = False,
 ) -> bool:
     """Hard-delete via selling shelf matched by vehicle title.
 
@@ -1715,8 +1786,13 @@ def remove_from_selling_by_title(
       2. Visible title text on the card (e.g. ``2018 Audi Q5``) → ⋮ on that card
       3. Click Delete listing / Eliminar publicación → confirm dialog
       4. Verify the titled card vanished from ``/you/selling``
+
+    ``require_year`` (sync.db fallbacks): only match cards that share the needle's
+    model year so ``2019 Porsche Cayenne`` cannot hit ``2023 Porsche Cayenne``.
     """
-    needles = _normalize_title_needles(title_needles)
+    needles = _normalize_title_needles(
+        title_needles, require_year=require_year
+    )
     if not needles:
         return False
 
@@ -1731,11 +1807,15 @@ def remove_from_selling_by_title(
     matched = None
     match_via = ""
     for _ in range(max_scrolls):
-        matched = _find_selling_title_more_button(page, needles)
+        matched = _find_selling_title_more_button(
+            page, needles, require_year=require_year
+        )
         if matched is not None:
             match_via = "aria-title-menu"
             break
-        matched = _find_selling_card_anchor_by_title(page, needles)
+        matched = _find_selling_card_anchor_by_title(
+            page, needles, require_year=require_year
+        )
         if matched is not None:
             match_via = "partial-title-menu"
             break
@@ -1816,7 +1896,10 @@ def remove_from_selling_by_title(
     except Exception:
         pass
     if not _title_still_on_selling_shelf(
-        page, needles, max_scrolls=min(max_scrolls, 12)
+        page,
+        needles,
+        max_scrolls=min(max_scrolls, 12),
+        require_year=require_year,
     ):
         print(
             f"  shelf title delete verified — card gone "

@@ -822,6 +822,30 @@ class TestRemoveFromSellingByTitle(unittest.TestCase):
             )
         )
 
+    def test_year_lock_rejects_other_model_year(self):
+        from src.facebook.remover import (
+            _expand_partial_title_needles,
+            _title_label_matches,
+        )
+
+        cores = _expand_partial_title_needles(
+            ["2019 Porsche Cayenne s +"], require_year=True
+        )
+        self.assertTrue(all("2019" in c for c in cores))
+        self.assertFalse(any(c.lower() == "porsche cayenne" for c in cores))
+        self.assertTrue(
+            _title_label_matches(
+                "Más opciones para 2019 Porsche Cayenne s + $890000",
+                "2019 Porsche Cayenne",
+            )
+        )
+        self.assertFalse(
+            _title_label_matches(
+                "Más opciones para 2023 Porsche Cayenne $1200000",
+                "2019 Porsche Cayenne",
+            )
+        )
+
     def test_visible_title_opens_menu_deletes_and_verifies_gone(self):
         from src.facebook.remover import remove_from_selling_by_title
 

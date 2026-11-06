@@ -117,11 +117,13 @@ def _title_needles_for_purge(
     autosell_id: str,
     vehicle_title: str = "",
     card_text: str = "",
+    require_year: bool = False,
 ) -> list[str]:
     """Build title needles for Seller Hub delete when item_id href is missing.
 
-    Returns full + partial cores (``2018 Kia Forte EX``); ``remover`` expands
-    further for contains/regex matching.
+    Returns full + partial cores (``2019 Porsche Cayenne``). When
+    ``require_year`` (sync.db fallbacks), every needle keeps the model year so
+    ``2019`` cannot match a ``2023 Porsche Cayenne`` card.
     """
     from src.facebook.remover import _expand_partial_title_needles, _strip_title_noise
 
@@ -161,10 +163,87 @@ def _title_needles_for_purge(
         except Exception:
             pass
         vt = _strip_title_noise(str(getattr(vehicle, "title", "") or ""))
+        year = str(getattr(vehicle, "year", "") or "").strip()
+        brand = str(getattr(vehicle, "brand", "") or "").strip()
+        if year and brand and vt:
+            needles.append(f"{year} {brand} {vt}")
+        elif year and vt and year not in vt:
+            needles.append(f"{year} {vt}")
         if len(vt) >= 4:
             needles.append(vt)
 
-    return _expand_partial_title_needles(needles)
+    return _expand_partial_title_needles(needles, require_year=require_year)
+
+
+def _mark_db_row_already_removed(
+    store: SyncStore,
+    account_id: str,
+    *,
+    autosell_id: str,
+    item_id: str,
+    reason: str,
+) -> None:
+    """Clear a dead sync.db mapping so preflight can proceed (ALREADY_REMOVED)."""
+    aid = (autosell_id or "").strip() or item_id
+    try:
+        store.mark_fb_listing_removed(aid, account_id, clear_url=True)
+        print(
+            f"  ALREADY_REMOVED autosell_id={aid} item={item_id} "
+            f"— sync.db cleared ({reason})",
+            flush=True,
+        )
+    except Exception as exc:
+        print(
+            f"  WARNING: ALREADY_REMOVED clear failed autosell_id={aid}: {exc}",
+            flush=True,
+        )
+
+
+def _db_listing_already_gone_on_facebook(
+    page: Page,
+    *,
+    listing_url: str,
+    needles: list[str],
+) -> bool:
+    """True when detail is 404/unavailable and year-locked title is absent on shelf."""
+    from src.facebook.remover import (
+        _detail_looks_manually_gone,
+        _is_content_unavailable,
+        _listing_already_gone,
+        extract_item_id,
+        selling_title_present,
+    )
+
+    href = listing_url or ""
+    if href and not href.startswith("http"):
+        href = f"https://www.facebook.com{href}"
+    if not href:
+        # No URL — rely on year-strict shelf absence only.
+        if not needles:
+            return False
+        return not selling_title_present(
+            page, needles, max_scrolls=16, require_year=True
+        )
+
+    try:
+        page.goto(href, wait_until="domcontentloaded", timeout=60_000)
+        page.wait_for_timeout(1_200)
+    except Exception as exc:
+        print(f"  ALREADY_REMOVED check nav failed: {exc}", flush=True)
+
+    item_id = extract_item_id(href) or ""
+    detail_gone = (
+        _is_content_unavailable(page)
+        or _listing_already_gone(page, listing_url=href, item_id=item_id)
+        or _detail_looks_manually_gone(page)
+    )
+    if not detail_gone:
+        return False
+    if needles and selling_title_present(
+        page, needles, max_scrolls=16, require_year=True
+    ):
+        return False
+    return True
 
 
 def hard_delete_listing_via_playwright(
@@ -193,6 +272,11 @@ def hard_delete_listing_via_playwright(
     if not href and item_id:
         href = f"https://www.facebook.com/marketplace/item/{item_id}/"
 
+    # Catalog / sync.db rows always year-lock title match (avoid 2019→2023).
+    strict_year = bool(
+        (autosell_id or "").startswith("obj")
+        or bool(re.search(r"\b(?:19|20)\d{2}\b", vehicle_title or card_text or ""))
+    )
     needles = list(title_needles or [])
     if not needles:
         needles = _title_needles_for_purge(
@@ -202,10 +286,11 @@ def hard_delete_listing_via_playwright(
             autosell_id=autosell_id,
             vehicle_title=vehicle_title,
             card_text=card_text,
+            require_year=strict_year,
         )
 
     ok = False
-    if item_id:
+    if item_id and str(item_id).isdigit():
         try:
             ok = _remove_from_selling_shelf(
                 page,
@@ -223,7 +308,7 @@ def hard_delete_listing_via_playwright(
     if not ok and needles:
         print(
             f"  UI title-match delete needles={needles[:3]!r} "
-            f"item={item_id or '?'}",
+            f"item={item_id or '?'} require_year={strict_year}",
             flush=True,
         )
         try:
@@ -231,6 +316,7 @@ def hard_delete_listing_via_playwright(
                 page,
                 needles,
                 action="delete",
+                require_year=strict_year,
             )
         except Exception as exc:
             print(f"  UI title-match delete fail item={item_id}: {exc}", flush=True)
@@ -258,7 +344,20 @@ def hard_delete_listing_via_playwright(
             print(f"  UI detail delete fail item={item_id}: {exc}", flush=True)
             ok = False
 
-    if not ok and item_id:
+    # Dead sync.db row: detail 404 + year-specific title absent → clear mapping.
+    if not ok and _db_listing_already_gone_on_facebook(
+        page, listing_url=href, needles=needles
+    ):
+        _mark_db_row_already_removed(
+            store,
+            account_id,
+            autosell_id=autosell_id,
+            item_id=item_id,
+            reason="detail 404/gone and year-title absent on shelf",
+        )
+        return True
+
+    if not ok and item_id and str(item_id).isdigit():
         try:
             page.goto(SELLING_URL, wait_until="domcontentloaded", timeout=90_000)
             page.wait_for_timeout(2_000)
@@ -2783,6 +2882,11 @@ def purge_old_listings_on_page(
         title_hint = vehicle_title_from_card_text(
             card.card_text or card.age_text or ""
         )
+        # sync.db fallbacks: year-lock so 2019 Porsche ≠ 2023 Porsche Cayenne.
+        strict_year = used_db_fallback or bool(
+            (autosell_id or "").startswith("obj")
+            or bool(re.search(r"\b(?:19|20)\d{2}\b", title_hint or card.card_text or ""))
+        )
         needles = _title_needles_for_purge(
             store=store,
             account_id=account_id,
@@ -2790,15 +2894,17 @@ def purge_old_listings_on_page(
             autosell_id=autosell_id,
             vehicle_title=title_hint,
             card_text=card.card_text or card.age_text or "",
+            require_year=strict_year,
         )
         # Catalog needles only (no detail-page navigation mid-shelf purge).
         vehicle = catalog.get(autosell_id) if autosell_id else None
         if vehicle is not None:
             try:
-                needles = sorted(
-                    set(needles) | set(_match_needles(vehicle)),
-                    key=len,
-                    reverse=True,
+                from src.facebook.remover import _expand_partial_title_needles
+
+                merged = list(needles) + list(_match_needles(vehicle))
+                needles = _expand_partial_title_needles(
+                    merged, require_year=strict_year
                 )
             except Exception:
                 pass
@@ -2812,17 +2918,26 @@ def purge_old_listings_on_page(
         if used_db_fallback or title_only:
             if not needles:
                 # Last resort for DB-only rows: may open detail once for title.
-                needles = _title_needles_for_row(
+                raw = _title_needles_for_row(
                     store, account_id, card, catalog, page
+                )
+                from src.facebook.remover import _expand_partial_title_needles
+
+                needles = _expand_partial_title_needles(
+                    raw, require_year=strict_year
                 )
             print(
                 f"  title-menu delete needles={needles[:3]!r} "
-                f"autosell_id={autosell_id} title_only={title_only}",
+                f"autosell_id={autosell_id} title_only={title_only} "
+                f"require_year={strict_year}",
                 flush=True,
             )
             if needles:
                 ok = remove_from_selling_by_title(
-                    page, needles, action="delete"
+                    page,
+                    needles,
+                    action="delete",
+                    require_year=strict_year,
                 )
         else:
             ok = _remove_from_selling_shelf(
@@ -2834,11 +2949,14 @@ def purge_old_listings_on_page(
             if not ok and needles:
                 print(
                     f"  item_id href miss — title-match delete "
-                    f"needles={needles[:3]!r}",
+                    f"needles={needles[:3]!r} require_year={strict_year}",
                     flush=True,
                 )
                 ok = remove_from_selling_by_title(
-                    page, needles, action="delete"
+                    page,
+                    needles,
+                    action="delete",
+                    require_year=strict_year,
                 )
 
         if not ok and listing_url and not used_db_fallback:
@@ -2871,6 +2989,23 @@ def purge_old_listings_on_page(
             except Exception as exc:
                 print(f"  FAIL item={card.item_id}: {exc}", flush=True)
                 ok = False
+
+        # Dead sync.db row (esp. DB fallback): 404 + year-title absent → clear, no FAIL.
+        if not ok and (
+            used_db_fallback
+            or (autosell_id or "").startswith("obj")
+        ):
+            if _db_listing_already_gone_on_facebook(
+                page, listing_url=listing_url, needles=needles
+            ):
+                _mark_db_row_already_removed(
+                    store,
+                    account_id,
+                    autosell_id=autosell_id,
+                    item_id=card.item_id,
+                    reason="404/gone + year-title absent on shelf",
+                )
+                ok = True
 
         if not ok:
             stats.failed += 1
