@@ -14,7 +14,13 @@ from pathlib import Path
 from typing import Any
 
 from src.facebook.errors import PreflightPurgeAborted
-from src.facebook.purge_old import PurgeStats, purge_old_listings_on_page
+from src.facebook.purge_old import (
+    PurgeStats,
+    collect_selling_listings,
+    purge_old_listings_on_page,
+    purge_requieren_atencion_matches,
+    vehicle_title_from_card_text,
+)
 from src.facebook.session import (
     format_session_login_error,
     get_page,
@@ -63,6 +69,128 @@ def _csv_set(raw: str | list[Any] | None) -> set[str]:
     if isinstance(raw, list):
         return {str(part).strip() for part in raw if str(part).strip()}
     return {part.strip() for part in str(raw).split(",") if part.strip()}
+
+
+def _preflight_queue_titles(
+    page,
+    store: SyncStore,
+    *,
+    account_id: str,
+    max_days: float,
+    keep_item_ids: set[str] | None = None,
+    keep_autosell_ids: set[str] | None = None,
+    keep_title_re: re.Pattern[str] | None = None,
+) -> list[str]:
+    """Age-eligible + live shelf titles for the Requieren atención force-delete pass."""
+    from src.facebook.purge_old import (
+        _catalog_by_autosell_id,
+        _lookup_db_row,
+        _posted_at_age_days,
+        _should_keep_listing,
+        is_purge_age_eligible,
+        purge_unknown_age_when_total,
+        resolve_listing_age_for_purge,
+    )
+    from src.facebook.remover import extract_item_id
+
+    titles: list[str] = []
+    seen: set[str] = set()
+
+    def _add(raw: str) -> None:
+        t = re.sub(r"\s+", " ", (raw or "").strip())
+        if len(t) < 4:
+            return
+        key = t.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        titles.append(t)
+
+    catalog = _catalog_by_autosell_id()
+    try:
+        listings = collect_selling_listings(page)
+    except Exception as exc:
+        print(
+            f"  [{account_id}] preflight queue titles: shelf scan failed ({exc})",
+            flush=True,
+        )
+        listings = []
+
+    for card in listings:
+        keep_reason = _should_keep_listing(
+            card,
+            keep_item_ids=keep_item_ids,
+            keep_autosell_ids=keep_autosell_ids,
+            keep_title_re=keep_title_re,
+            store=store,
+            account_id=account_id,
+            catalog=catalog,
+        )
+        if keep_reason:
+            continue
+        row = _lookup_db_row(store, account_id, card.item_id)
+        db_age = _posted_at_age_days(row)
+        age, _source = resolve_listing_age_for_purge(
+            live_age_days=card.age_days,
+            live_age_text=card.age_text or "",
+            live_card_text=card.card_text or "",
+            db_age_days=db_age,
+        )
+        # Attention/duplicate cards often lack Listed-on — still queue the title.
+        in_attention = "requieren" in (card.card_text or "").lower() or (
+            "duplicate" in (card.card_text or "").lower()
+            or "duplicado" in (card.card_text or "").lower()
+        )
+        eligible = (
+            age is not None and is_purge_age_eligible(age, max_days)
+        ) or (age is None and (purge_unknown_age_when_total(max_days) or in_attention))
+        if not eligible:
+            continue
+        title = vehicle_title_from_card_text(card.card_text or "") or (
+            card.card_text or ""
+        )[:80]
+        _add(title)
+        if row is not None:
+            autosell_id = str(row.get("autosell_id") or "")
+            vehicle = catalog.get(autosell_id) if autosell_id else None
+            if vehicle is not None:
+                _add(getattr(vehicle, "marketplace_title", "") or "")
+                _add(getattr(vehicle, "title", "") or "")
+                _add(
+                    f"{getattr(vehicle, 'year', '')} "
+                    f"{getattr(vehicle, 'brand', '')} "
+                    f"{getattr(vehicle, 'title', '')}".strip()
+                )
+
+    # sync.db live rows (covers GraphQL-only ids before DOM attention merge).
+    for row in store.get_live_listings():
+        if row["account_id"] != account_id:
+            continue
+        age = _posted_at_age_days(row)
+        if age is None or not is_purge_age_eligible(age, max_days):
+            if not purge_unknown_age_when_total(max_days):
+                continue
+        autosell_id = str(row.get("autosell_id") or "")
+        if keep_autosell_ids and autosell_id in keep_autosell_ids:
+            continue
+        item_id = extract_item_id(row.get("fb_listing_url") or "") or ""
+        if keep_item_ids and item_id and item_id in keep_item_ids:
+            continue
+        vehicle = catalog.get(autosell_id) if autosell_id else None
+        if vehicle is not None:
+            _add(getattr(vehicle, "marketplace_title", "") or "")
+            _add(getattr(vehicle, "title", "") or "")
+            _add(
+                f"{getattr(vehicle, 'year', '')} "
+                f"{getattr(vehicle, 'brand', '')} "
+                f"{getattr(vehicle, 'title', '')}".strip()
+            )
+
+    print(
+        f"  [{account_id}] preflight attention queue titles: {len(titles)}",
+        flush=True,
+    )
+    return titles
 
 
 def preflight_purge_config(config: dict[str, Any] | None = None) -> PreflightPurgeConfig:
@@ -142,8 +270,11 @@ def run_preflight_shelf_purge(
     the cleaned shelf. When ``dry_run`` is True, scans/report only (no deletes).
 
     GraphQL deletes fall back to Playwright automatically on failure / rate-limit
-    (``FB_GQL_FALLBACK_UI``, default on). Any remaining failed delete aborts the
-    sync cycle when ``abort_on_failed_deletes`` is True (default).
+    (``FB_GQL_FALLBACK_UI``, default on). After the age purge, a dedicated
+    ``Requieren atención`` pass force-deletes duplicate-blocked cards via
+    ⋯ → Eliminar publicación (GraphQL OK often leaves them stuck on account_2).
+    Any remaining failed delete aborts the sync cycle when
+    ``abort_on_failed_deletes`` is True (default).
     """
     cfg = preflight_purge_config(config)
     result = PreflightPurgeResult(accounts=list(account_ids))
@@ -230,6 +361,17 @@ def run_preflight_shelf_purge(
                             f"cannot enforce 7-day hard-delete before sync"
                         )
                     continue
+                # Capture age-eligible titles BEFORE GraphQL deletes so we can
+                # still match Requieren atención cards after a fake GraphQL OK.
+                queue_titles = _preflight_queue_titles(
+                    page,
+                    store,
+                    account_id=account_id,
+                    max_days=cfg.max_days,
+                    keep_item_ids=cfg.keep_item_ids or None,
+                    keep_autosell_ids=cfg.keep_autosell_ids or None,
+                    keep_title_re=cfg.keep_title_re,
+                )
                 stats = purge_old_listings_on_page(
                     page,
                     store,
@@ -246,6 +388,31 @@ def run_preflight_shelf_purge(
                     # Never miss Oct 24/28 shelf cards when GraphQL returns 0.
                     force_dom_discovery=True,
                 )
+                # account_2: GraphQL delete returns OK but cards stay under
+                # ``Requieren atención`` — force ⋯ → Eliminar publicación.
+                attn = purge_requieren_atencion_matches(
+                    page,
+                    account_id=account_id,
+                    queue_titles=queue_titles,
+                    dry_run=dry_run,
+                    delay_min_sec=cfg.delay_min_sec,
+                    delay_max_sec=cfg.delay_max_sec,
+                    also_purge_duplicate_banners=True,
+                )
+                if attn.found or attn.deleted or attn.failed:
+                    stats.found += attn.found
+                    stats.deleted += attn.deleted
+                    stats.failed += attn.failed
+                    stats.dry_run_candidates += attn.dry_run_candidates
+                    stats.ui_fallback_deletes += attn.ui_fallback_deletes
+                    if attn.failed and not dry_run:
+                        stats.incomplete = True
+                    print(
+                        f"  [{account_id}] Requieren atención pass: "
+                        f"found={attn.found} deleted={attn.deleted} "
+                        f"failed={attn.failed}",
+                        flush=True,
+                    )
         except PreflightPurgeAborted:
             raise
         except Exception as exc:

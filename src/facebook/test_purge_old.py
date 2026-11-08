@@ -184,9 +184,9 @@ class TestSellingShelfDiscoveryHydration(unittest.TestCase):
         ok = wait_for_selling_shelf_cards(page, timeout_ms=1000)
         self.assertTrue(ok)
         page.get_by_text.assert_called()
-        # First wait uses combined EN/ES + bare-date regex.
-        first_arg = page.get_by_text.call_args.args[0]
-        self.assertTrue(hasattr(first_arg, "search") or first_arg == "Listed on")
+        # First probe is Requieren atención / Requires attention; then Listed-on.
+        first_arg = page.get_by_text.call_args_list[0].args[0]
+        self.assertTrue(hasattr(first_arg, "search"))
 
     def test_hydrate_selling_shelf_scrolls_runs_loop(self):
         page = MagicMock()
@@ -853,6 +853,125 @@ class TestPurgeOldListingsOnPage(unittest.TestCase):
         title_rm.assert_called()
         self.assertTrue(title_rm.call_args.kwargs.get("require_year"))
         store.mark_fb_listing_removed.assert_called()
+
+
+class TestRequierenAtencion(unittest.TestCase):
+    def test_extract_requieren_atencion_cards_parses_js_payload(self):
+        from src.facebook.purge_old import extract_requieren_atencion_cards
+
+        page = MagicMock()
+        page.evaluate.return_value = {
+            "section_found": True,
+            "heading": "Requieren atención",
+            "cards": [
+                {
+                    "item_id": "",
+                    "href": "",
+                    "title": "2019 Porsche Cayenne",
+                    "blob": (
+                        "2019 Porsche Cayenne No se publicó porque parece un "
+                        "duplicado. Elimínala y vuelve a intentarlo"
+                    ),
+                    "has_duplicate_banner": "1",
+                    "in_attention_section": "1",
+                }
+            ],
+        }
+        cards = extract_requieren_atencion_cards(page)
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(cards[0]["title"], "2019 Porsche Cayenne")
+        self.assertEqual(cards[0]["has_duplicate_banner"], "1")
+        self.assertIn("Requieren atención", page.evaluate.call_args[0][0])
+
+    def test_title_matches_needles(self):
+        from src.facebook.purge_old import _title_matches_needles
+
+        self.assertTrue(
+            _title_matches_needles(
+                "2019 Porsche Cayenne",
+                ["2019 Porsche Cayenne S"],
+            )
+        )
+        self.assertFalse(
+            _title_matches_needles(
+                "2023 Porsche Cayenne",
+                ["2019 Porsche Cayenne"],
+                require_year=True,
+            )
+        )
+
+    def test_purge_requieren_atencion_matches_force_deletes(self):
+        from src.facebook.purge_old import purge_requieren_atencion_matches
+
+        page = MagicMock()
+        with (
+            patch(
+                "src.facebook.purge_old.extract_requieren_atencion_cards",
+                return_value=[
+                    {
+                        "title": "2019 Porsche Cayenne",
+                        "has_duplicate_banner": "1",
+                        "blob": "2019 Porsche Cayenne parece un duplicado",
+                    }
+                ],
+            ),
+            patch(
+                "src.facebook.purge_old.force_delete_requieren_atencion_card",
+                return_value=True,
+            ) as force,
+            patch("src.facebook.purge_old.wait_for_selling_shelf_cards"),
+            patch("src.facebook.purge_old.hydrate_selling_shelf_scrolls"),
+            patch("src.facebook.purge_old.random_delay"),
+        ):
+            stats = purge_requieren_atencion_matches(
+                page,
+                account_id="account_2",
+                queue_titles=["2019 Porsche Cayenne"],
+                dry_run=False,
+            )
+        self.assertEqual(stats.found, 1)
+        self.assertEqual(stats.deleted, 1)
+        self.assertEqual(stats.ui_fallback_deletes, 1)
+        force.assert_called_once()
+        self.assertEqual(force.call_args.args[1], "2019 Porsche Cayenne")
+
+    def test_collect_selling_includes_attention_extract(self):
+        page = MagicMock()
+        page.locator.return_value.count.return_value = 0
+        with (
+            patch(
+                "src.facebook.purge_old.wait_for_selling_shelf_cards",
+                return_value=True,
+            ),
+            patch("src.facebook.purge_old.hydrate_selling_shelf_scrolls"),
+            patch(
+                "src.facebook.purge_old._extract_selling_cards_via_js",
+                return_value=[],
+            ),
+            patch(
+                "src.facebook.purge_old._extract_selling_cards_via_text_locators",
+                return_value=[],
+            ),
+            patch(
+                "src.facebook.purge_old.extract_requieren_atencion_cards",
+                return_value=[
+                    {
+                        "item_id": "",
+                        "href": "",
+                        "date_text": "",
+                        "title": "2020 BMW X5",
+                        "blob": (
+                            "2020 BMW X5 No se publicó porque parece un duplicado"
+                        ),
+                        "has_duplicate_banner": "1",
+                        "in_attention_section": "1",
+                    }
+                ],
+            ),
+        ):
+            cards = collect_selling_listings(page, max_scrolls=1)
+        self.assertEqual(len(cards), 1)
+        self.assertIn("2020 BMW X5", cards[0].card_text)
 
 
 if __name__ == "__main__":

@@ -888,6 +888,24 @@ _LISTED_ON_WAIT_RE = re.compile(
     re.I,
 )
 
+# Seller Hub section for blocked / duplicate publishes (account_2 ES + EN).
+# Defined early so shelf wait / discovery can see attention cards.
+_REQUIEREN_ATENCION_SECTION_RE = re.compile(
+    r"requieren\s+atenci[oó]n|requires?\s+attention|needs?\s+attention|"
+    r"necesitan\s+atenci[oó]n",
+    re.I,
+)
+_REQUIEREN_ATENCION_BANNER_RE = re.compile(
+    r"no\s+se\s+public[oó]\s+porque\s+parece\s+un\s+duplicado|"
+    r"parece\s+un\s+duplicado|"
+    r"elim[ií]nala\s+y\s+vuelve\s+a\s+intentarlo|"
+    r"this\s+looks\s+like\s+a\s+duplicate|"
+    r"we\s+didn'?t\s+post\s+it|"
+    r"delete\s+it\s+and\s+try\s+again|"
+    r"delete\s+and\s+try\s+again",
+    re.I,
+)
+
 _ITEM_HREF_SELECTORS = (
     'a[href*="/marketplace/item/"]',
     '[role="link"][href*="/marketplace/item/"]',
@@ -915,6 +933,31 @@ def wait_for_selling_shelf_cards(
     """Wait until Seller Hub shows EN/ES date labels or bare ``MM/DD``/``DD/MM``."""
     ms = int(timeout_ms if timeout_ms is not None else _shelf_wait_timeout_ms())
     deadline_errors: list[str] = []
+
+    # 0) Requieren atención / Requires attention (duplicate-blocked cards).
+    # Short probe — do not burn the full shelf timeout when the section is absent.
+    try:
+        page.get_by_text(_REQUIEREN_ATENCION_SECTION_RE).first.wait_for(
+            state="visible", timeout=min(ms, 1_500)
+        )
+        print(
+            "  shelf wait OK text=Requieren atención|Requires attention",
+            flush=True,
+        )
+        return True
+    except Exception as exc:
+        deadline_errors.append(f"attention-section:{exc}")
+    try:
+        page.get_by_text(_REQUIEREN_ATENCION_BANNER_RE).first.wait_for(
+            state="visible", timeout=min(ms, 1_200)
+        )
+        print(
+            "  shelf wait OK text=duplicate-banner (attention cards)",
+            flush=True,
+        )
+        return True
+    except Exception as exc:
+        deadline_errors.append(f"attention-banner:{exc}")
 
     # 1) Combined EN/ES + raw slash-date wait (Spanish accounts often omit labels).
     try:
@@ -1583,6 +1626,9 @@ def collect_selling_listings(
             _ingest(row)
         for row in _extract_selling_cards_via_text_locators(page):
             _ingest(row)
+        # account_2: blocked duplicates under ``Requieren atención`` (no Listed-on).
+        for row in extract_requieren_atencion_cards(page):
+            _ingest(row)
 
         stagnant = 0
         for _ in range(max_scrolls):
@@ -1590,6 +1636,8 @@ def collect_selling_listings(
             for row in _extract_selling_cards_via_js(page):
                 _ingest(row)
             for row in _extract_selling_cards_via_text_locators(page):
+                _ingest(row)
+            for row in extract_requieren_atencion_cards(page):
                 _ingest(row)
 
             # Soft legacy pass: marketplace item anchors still help when present.
@@ -1913,6 +1961,515 @@ def _count_attention_ctas(page: Page) -> int:
         return n if isinstance(n, int) else 0
     except Exception:
         return 0
+
+
+_REQUIEREN_ATENCION_MORE_SEL = (
+    '[aria-label="More options"], [aria-label="Más opciones"], '
+    '[aria-label="More"], [aria-label="Más"], '
+    '[aria-label*="More options" i], [aria-label*="Más opciones" i], '
+    '[aria-label*="More options for" i], [aria-label*="Más opciones para" i], '
+    '[aria-label*="Options" i], [aria-label*="Opciones" i], '
+    '[aria-haspopup="menu"]'
+)
+
+
+def extract_requieren_atencion_cards(page: Page) -> list[dict[str, str]]:
+    """Parse title cards inside the ``Requieren atención`` / Requires attention block.
+
+    account_2 (ES) parks GraphQL-stuck duplicates under that Seller Hub section
+    with banner ``No se publicó porque parece un duplicado…``. Standard
+    Listed-on discovery misses these; GraphQL delete may return OK while the
+    card stays stuck here.
+    """
+    try:
+        raw = page.evaluate(
+            r"""() => {
+              const SECTION_RE =
+                /requieren\s+atenci[oó]n|requires?\s+attention|needs?\s+attention|necesitan\s+atenci[oó]n/i;
+              const BANNER_RE =
+                /no\s+se\s+public[oó]\s+porque\s+parece\s+un\s+duplicado|parece\s+un\s+duplicado|elim[ií]nala\s+y\s+vuelve\s+a\s+intentarlo|this\s+looks\s+like\s+a\s+duplicate|we\s+didn'?t\s+post\s+it|delete\s+(?:it\s+and\s+)?try\s+again/i;
+              const TITLE_RE =
+                /\b((?:19|20)\d{2}\s+[A-Za-zÁÉÍÓÚÑáéíóúñ][A-Za-zÁÉÍÓÚÑáéíóúñ0-9\-\s]{2,60})/;
+              const ID_RE = /\/marketplace\/item\/(\d{8,})/;
+              const root = document.querySelector('[role="main"]') || document.body;
+              const out = [];
+              const seen = new Set();
+
+              const norm = (t) => (t || '').replace(/\s+/g, ' ').trim();
+              const isVisible = (el) => {
+                if (!el || !el.getBoundingClientRect) return false;
+                const r = el.getBoundingClientRect();
+                return r.width > 2 && r.height > 2;
+              };
+
+              // Find the section heading node, then climb to its content container.
+              let heading = null;
+              const walk = document.createTreeWalker(
+                root, NodeFilter.SHOW_ELEMENT, null
+              );
+              let node = walk.currentNode;
+              while (node) {
+                if (node.nodeType === 1) {
+                  const own = Array.from(node.childNodes || [])
+                    .filter((c) => c.nodeType === 3)
+                    .map((c) => (c.textContent || '').trim())
+                    .join(' ');
+                  const direct = own || (
+                    (node.children && node.children.length === 0)
+                      ? (node.textContent || '').trim()
+                      : ''
+                  );
+                  const short = norm(direct || '');
+                  if (short && short.length < 80 && SECTION_RE.test(short)
+                      && isVisible(node)) {
+                    heading = node;
+                    break;
+                  }
+                  // Heading roles / aria often carry the section label.
+                  const role = (node.getAttribute && node.getAttribute('role')) || '';
+                  const al = (node.getAttribute && node.getAttribute('aria-label')) || '';
+                  if ((role === 'heading' || /^h[1-6]$/i.test(node.tagName || ''))
+                      && SECTION_RE.test(norm(node.innerText || al))
+                      && isVisible(node)) {
+                    heading = node;
+                    break;
+                  }
+                }
+                node = walk.nextNode();
+              }
+
+              let section = null;
+              if (heading) {
+                let n = heading;
+                for (let d = 0; d < 10 && n; d++) {
+                  const parent = n.parentElement;
+                  if (!parent || parent === root) break;
+                  const txt = norm(parent.innerText || '');
+                  // Prefer the smallest wrapper that holds the heading + at least
+                  // one duplicate banner / titled card (not the whole Seller Hub).
+                  if (txt.length > 40 && txt.length < 12000
+                      && (BANNER_RE.test(txt) || TITLE_RE.test(txt))) {
+                    section = parent;
+                    if (txt.length < 4000) break;
+                  }
+                  n = parent;
+                }
+              }
+              // Fallback: any main subtree that contains the duplicate banner.
+              if (!section) {
+                const banners = [];
+                root.querySelectorAll('span, div, p, button').forEach((el) => {
+                  const t = norm(el.innerText || el.textContent || '');
+                  if (t && t.length < 220 && BANNER_RE.test(t) && isVisible(el)) {
+                    banners.push(el);
+                  }
+                });
+                if (banners.length) {
+                  let n = banners[0];
+                  for (let d = 0; d < 12 && n; d++) {
+                    n = n.parentElement;
+                    if (!n || n === root) break;
+                    const txt = norm(n.innerText || '');
+                    if (txt.length > 40 && txt.length < 12000
+                        && TITLE_RE.test(txt)) {
+                      section = n;
+                      if (SECTION_RE.test(txt) || txt.length < 5000) break;
+                    }
+                  }
+                }
+              }
+              if (!section) {
+                return { cards: out, section_found: false, heading: '' };
+              }
+
+              const pushCard = (cardEl) => {
+                if (!cardEl || !isVisible(cardEl)) return;
+                const cardText = norm(cardEl.innerText || '');
+                if (cardText.length < 8 || cardText.length > 2500) return;
+                if (!TITLE_RE.test(cardText) && !BANNER_RE.test(cardText)) return;
+                const titleMatch = cardText.match(TITLE_RE);
+                const title = titleMatch
+                  ? titleMatch[1].replace(/\s+/g, ' ').trim().slice(0, 80)
+                  : '';
+                if (!title) return;
+                let item_id = '';
+                let href = '';
+                const anchors = cardEl.querySelectorAll
+                  ? cardEl.querySelectorAll('a[href], [href]')
+                  : [];
+                for (const a of anchors) {
+                  const h = a.href || a.getAttribute('href') || '';
+                  const m = h.match(ID_RE);
+                  if (m) {
+                    item_id = m[1];
+                    href = h;
+                    break;
+                  }
+                }
+                const key = item_id || title.toLowerCase();
+                if (seen.has(key)) return;
+                seen.add(key);
+                out.push({
+                  item_id: item_id || '',
+                  href: href || '',
+                  title,
+                  blob: cardText.slice(0, 900),
+                  has_duplicate_banner: BANNER_RE.test(cardText) ? '1' : '0',
+                  in_attention_section: '1',
+                });
+              };
+
+              // Prefer discrete cards: wrappers with title + more-menu / banner.
+              const candidates = [];
+              section.querySelectorAll('div, li, article').forEach((el) => {
+                if (!isVisible(el)) return;
+                const t = norm(el.innerText || '');
+                if (t.length < 12 || t.length > 1800) return;
+                if (!TITLE_RE.test(t)) return;
+                const hasChrome = !!(
+                  el.querySelector('[aria-haspopup="menu"]')
+                  || el.querySelector('[aria-label*="Más"]')
+                  || el.querySelector('[aria-label*="More"]')
+                  || el.querySelector('img')
+                  || BANNER_RE.test(t)
+                );
+                if (!hasChrome) return;
+                candidates.push(el);
+              });
+              // Smallest-first so nested wrappers don't swallow siblings.
+              candidates.sort((a, b) =>
+                norm(a.innerText || '').length - norm(b.innerText || '').length
+              );
+              for (const el of candidates) {
+                // Skip if an already-pushed ancestor would duplicate.
+                let skip = false;
+                for (const prev of out) {
+                  if (prev.title && norm(el.innerText || '').includes(prev.title)
+                      && norm(el.innerText || '').length
+                        > (prev.blob || '').length + 40) {
+                    // larger wrapper containing a prior card — skip
+                    skip = true;
+                    break;
+                  }
+                }
+                if (!skip) pushCard(el);
+              }
+              // Banner-anchored climb when structure is flat.
+              if (!out.length) {
+                section.querySelectorAll('span, div, p, button').forEach((el) => {
+                  const t = norm(el.innerText || el.textContent || '');
+                  if (!(t && t.length < 220 && BANNER_RE.test(t))) return;
+                  let n = el;
+                  for (let d = 0; d < 8 && n; d++) {
+                    n = n.parentElement;
+                    if (!n || n === section) break;
+                    const txt = norm(n.innerText || '');
+                    if (TITLE_RE.test(txt) && txt.length < 2000) {
+                      pushCard(n);
+                      break;
+                    }
+                  }
+                });
+              }
+              return {
+                cards: out,
+                section_found: true,
+                heading: norm(heading ? (heading.innerText || '') : 'Requieren atención'),
+              };
+            }"""
+        )
+    except Exception as exc:
+        print(f"  WARNING: Requieren atención extract failed: {exc}", flush=True)
+        return []
+
+    if not isinstance(raw, dict):
+        return []
+    section_found = bool(raw.get("section_found"))
+    heading = str(raw.get("heading") or "").strip()
+    rows = list(raw.get("cards") or [])
+    if section_found:
+        print(
+            f"  Requieren atención section found"
+            + (f" ({heading!r})" if heading else "")
+            + f" — {len(rows)} title card(s)",
+            flush=True,
+        )
+    elif rows:
+        print(
+            f"  Requieren atención: {len(rows)} duplicate-banner card(s) "
+            f"(section header not labeled)",
+            flush=True,
+        )
+    cleaned: list[dict[str, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title") or "").strip() or vehicle_title_from_card_text(
+            str(row.get("blob") or "")
+        )
+        if not title:
+            continue
+        cleaned.append(
+            {
+                "item_id": str(row.get("item_id") or "").strip(),
+                "href": str(row.get("href") or "").strip(),
+                "title": title,
+                "blob": str(row.get("blob") or title)[:900],
+                "has_duplicate_banner": str(row.get("has_duplicate_banner") or "0"),
+                "in_attention_section": "1",
+                "date_text": "",
+            }
+        )
+    return cleaned
+
+
+def _title_matches_needles(
+    title: str,
+    needles: list[str],
+    *,
+    require_year: bool = False,
+) -> bool:
+    """True when ``title`` fuzzy-matches any purge-queue needle."""
+    from src.facebook.remover import _normalize_title_needles
+
+    hay = re.sub(r"\s+", " ", (title or "").strip().lower())
+    if not hay:
+        return False
+    hay_year = re.search(r"\b((?:19|20)\d{2})\b", hay)
+    for needle in _normalize_title_needles(needles, require_year=require_year):
+        n = re.sub(r"\s+", " ", (needle or "").strip().lower())
+        if len(n) < 4:
+            continue
+        n_year = re.search(r"\b((?:19|20)\d{2})\b", n)
+        if require_year and hay_year and n_year and hay_year.group(1) != n_year.group(1):
+            continue
+        if n in hay or hay in n:
+            return True
+        hay_toks = {t for t in re.split(r"[^a-z0-9áéíóúñ]+", hay) if len(t) >= 2}
+        needle_toks = {t for t in re.split(r"[^a-z0-9áéíóúñ]+", n) if len(t) >= 2}
+        if not needle_toks:
+            continue
+        overlap = hay_toks & needle_toks
+        if len(overlap) >= min(2, len(needle_toks)) and (
+            not require_year
+            or (n_year and n_year.group(1) in overlap)
+            or not n_year
+        ):
+            return True
+    return False
+
+
+def force_delete_requieren_atencion_card(
+    page: Page,
+    title: str,
+    *,
+    timeout_ms: int = 8_000,
+) -> bool:
+    """Force-delete one attention-block card: ⋯ → Eliminar publicación → confirm.
+
+    Scoped to the Requieren atención / duplicate-banner UI so GraphQL-stuck
+    cards are removed even when standard shelf href matching fails.
+    """
+    title = re.sub(r"\s+", " ", (title or "").strip())
+    if len(title) < 4:
+        return False
+    ms = max(2_000, int(timeout_ms))
+
+    try:
+        page.goto(SELLING_URL, wait_until="domcontentloaded", timeout=90_000)
+        page.wait_for_timeout(1_500)
+    except Exception:
+        pass
+    try:
+        hydrate_selling_shelf_scrolls(page, scrolls=2)
+    except Exception:
+        pass
+
+    # 1) Prefer the explicit ES/EN attention CTA near this title.
+    try:
+        title_loc = page.get_by_text(re.compile(re.escape(title), re.I)).first
+        if title_loc.count() > 0:
+            try:
+                title_loc.scroll_into_view_if_needed(timeout=ms)
+                title_loc.hover(timeout=ms)
+            except Exception:
+                pass
+            card = None
+            for xpath in (
+                "xpath=ancestor::div[.//button or .//*[@aria-haspopup='menu']][1]",
+                "xpath=ancestor::div[5]",
+                "xpath=ancestor::div[4]",
+                "xpath=ancestor::div[3]",
+            ):
+                try:
+                    cand = title_loc.locator(xpath).first
+                    if cand.count() > 0:
+                        card = cand
+                        break
+                except Exception:
+                    continue
+            if card is not None and _click_attention_delete_cta(page, scope=card):
+                print(
+                    f"  Requieren atención: deleted via CTA title={title!r}",
+                    flush=True,
+                )
+                return True
+            # 2) ⋯ / Más opciones → Eliminar publicación / Delete listing → confirm.
+            if card is not None:
+                try:
+                    card.hover(timeout=ms)
+                except Exception:
+                    pass
+                more = card.locator(_REQUIEREN_ATENCION_MORE_SEL)
+                try:
+                    more_n = more.count()
+                except Exception:
+                    more_n = 0
+                if isinstance(more_n, int) and more_n > 0:
+                    for i in range(min(more_n, 6)):
+                        btn = more.nth(i)
+                        try:
+                            if not btn.is_visible():
+                                continue
+                            label = (btn.get_attribute("aria-label") or "").lower()
+                            if any(
+                                x in label
+                                for x in ("boost", "promote", "share", "compartir")
+                            ):
+                                continue
+                            if not _force_click(btn, timeout=ms):
+                                continue
+                            _dom_settle(page, lo_ms=1_000, hi_ms=1_500)
+                            if _click_menu_delete_bilingual(page):
+                                print(
+                                    f"  Requieren atención: deleted via ⋯ menu "
+                                    f"title={title!r}",
+                                    flush=True,
+                                )
+                                return True
+                            try:
+                                page.keyboard.press("Escape")
+                            except Exception:
+                                pass
+                        except Exception:
+                            continue
+    except Exception as exc:
+        print(f"  Requieren atención force-delete miss title={title!r}: {exc}", flush=True)
+
+    # 3) Title-menu aria path (Más opciones para {title}).
+    try:
+        if remove_from_selling_by_title(page, [title], action="delete"):
+            print(
+                f"  Requieren atención: deleted via title-menu title={title!r}",
+                flush=True,
+            )
+            return True
+    except Exception as exc:
+        print(f"  Requieren atención title-menu failed title={title!r}: {exc}", flush=True)
+
+    # 4) Page-level attention CTA as last resort when only one blocked card.
+    if _click_attention_delete_cta(page):
+        print(
+            f"  Requieren atención: deleted via page CTA (fallback) title={title!r}",
+            flush=True,
+        )
+        return True
+    return False
+
+
+def purge_requieren_atencion_matches(
+    page: Page,
+    *,
+    account_id: str,
+    queue_titles: list[str],
+    dry_run: bool = False,
+    delay_min_sec: float = 1.5,
+    delay_max_sec: float = 3.0,
+    also_purge_duplicate_banners: bool = True,
+) -> PurgeStats:
+    """Force-delete attention-block cards whose titles match the purge queue.
+
+    GraphQL delete often returns success while account_2 cards remain under
+    ``Requieren atención``. This pass uses Playwright ⋯ → Eliminar publicación.
+    """
+    stats = PurgeStats()
+    needles = [t for t in queue_titles if t and len(str(t).strip()) >= 4]
+    try:
+        page.goto(SELLING_URL, wait_until="domcontentloaded", timeout=90_000)
+        page.wait_for_timeout(2_000)
+    except Exception as exc:
+        print(
+            f"  [{account_id}] Requieren atención: cannot open selling ({exc})",
+            flush=True,
+        )
+        return stats
+    try:
+        wait_for_selling_shelf_cards(page, timeout_ms=8_000)
+    except Exception:
+        pass
+    try:
+        hydrate_selling_shelf_scrolls(page)
+    except Exception:
+        pass
+
+    cards = extract_requieren_atencion_cards(page)
+    stats.found = len(cards)
+    if not cards:
+        print(
+            f"  [{account_id}] Requieren atención: 0 blocked card(s)",
+            flush=True,
+        )
+        return stats
+
+    targets: list[dict[str, str]] = []
+    for card in cards:
+        title = str(card.get("title") or "").strip()
+        banner = str(card.get("has_duplicate_banner") or "") == "1"
+        matched = bool(needles) and _title_matches_needles(title, needles)
+        # Match purge-queue titles; also clear unmatched duplicate banners when
+        # also_purge_duplicate_banners (GraphQL OK leaves them stuck with no id).
+        if matched or (also_purge_duplicate_banners and banner):
+            targets.append(card)
+
+    # De-dupe by title.
+    seen_t: set[str] = set()
+    uniq: list[dict[str, str]] = []
+    for card in targets:
+        key = str(card.get("title") or "").strip().lower()
+        if not key or key in seen_t:
+            continue
+        seen_t.add(key)
+        uniq.append(card)
+    targets = uniq
+
+    print(
+        f"  [{account_id}] Requieren atención: {stats.found} card(s), "
+        f"{len(targets)} match purge queue / duplicate banner — "
+        f"{'dry-run' if dry_run else 'force-deleting via ⋯'}",
+        flush=True,
+    )
+    for card in targets:
+        title = str(card.get("title") or "").strip()
+        print(
+            f"  [{account_id}] ATTENTION PURGE title={title!r} "
+            f"banner={card.get('has_duplicate_banner')}",
+            flush=True,
+        )
+        if dry_run:
+            stats.dry_run_candidates += 1
+            continue
+        ok = force_delete_requieren_atencion_card(page, title)
+        if ok:
+            stats.deleted += 1
+            stats.ui_fallback_deletes += 1
+            random_delay(delay_min_sec, delay_max_sec)
+        else:
+            stats.failed += 1
+            print(
+                f"  [{account_id}] ATTENTION PURGE FAIL title={title!r}",
+                flush=True,
+            )
+    return stats
 
 
 def _delete_first_orphan_shelf_card(page: Page) -> bool:
