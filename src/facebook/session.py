@@ -343,8 +343,9 @@ def login_interactive(config: dict, account_id: str, *, root: Path) -> None:
     print("")
     print("1) A Chromium window will open.")
     print("2) Log into Facebook for this account (Marketplace access).")
-    print("3) Wait until you see your feed (or Marketplace) — stay logged in.")
-    print("4) Leave the browser open, come back HERE, and press Enter.")
+    print("3) Complete 2FA / checkpoint and click 'Trust this device' if shown.")
+    print("4) Leave the browser open — do NOT close it yourself.")
+    print("5) Come back HERE and press Enter only when that is fully done.")
     print("   (If you already closed it after login, we re-open the profile to verify.)")
     print("")
 
@@ -372,7 +373,22 @@ def login_interactive(config: dict, account_id: str, *, root: Path) -> None:
                     "continue logging in if the window is up."
                 )
 
-            input("Press Enter after you are logged in and can see Facebook...")
+            input(
+                "Press ENTER in terminal after completing 2FA / clicking "
+                "'Trust this device' (browser stays open until then)..."
+            )
+
+            # Second pause: cookies flush into the persistent profile only on
+            # context.close(); give one more chance if a Trust/2FA dialog
+            # appeared after the first Enter (e.g. mid-verify navigation).
+            print("")
+            print(
+                "Browser still open. Finish any remaining 2FA / "
+                "'Trust this device' prompts in the Chromium window now."
+            )
+            input(
+                "Press ENTER again to save the session and close the browser..."
+            )
 
             logged_in = False
             try:
@@ -388,19 +404,19 @@ def login_interactive(config: dict, account_id: str, *, root: Path) -> None:
             context = None
 
             if logged_in:
-                print("Login OK. Session saved.")
+                print(f"Login OK. Session saved → {session_dir}")
                 return
 
             print("Re-opening profile to verify cookies…")
             _clear_profile_locks(session_dir)
             context = launch_persistent_context(playwright, session_dir, headless=False)
             if _verify_marketplace_login(get_page(context)):
-                print("Login OK. Session saved (verified after relaunch).")
+                print(f"Login OK. Session saved (verified after relaunch) → {session_dir}")
                 return
             raise FacebookSessionError(
                 "Still not logged in — cookies not saved. "
-                "Keep browser open until after you press Enter; "
-                "finish any FB checkpoint/2FA first."
+                "Keep browser open until after both Enter prompts; "
+                "finish any FB checkpoint/2FA / Trust this device first."
             )
         finally:
             if context is not None:

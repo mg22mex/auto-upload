@@ -17,6 +17,7 @@ from src.facebook.errors import PreflightPurgeAborted
 from src.facebook.purge_old import (
     PurgeStats,
     collect_selling_listings,
+    extract_requieren_atencion_cards,
     purge_old_listings_on_page,
     purge_requieren_atencion_matches,
     vehicle_title_from_card_text,
@@ -185,6 +186,21 @@ def _preflight_queue_titles(
                 f"{getattr(vehicle, 'brand', '')} "
                 f"{getattr(vehicle, 'title', '')}".strip()
             )
+
+    # Always pull titles from the Requieren atención block itself — GraphQL
+    # "OK" leaves these stuck with no Listed-on / no reliable item_id.
+    try:
+        for attn in extract_requieren_atencion_cards(page):
+            _add(str(attn.get("title") or ""))
+            blob = str(attn.get("blob") or "")
+            hint = vehicle_title_from_card_text(blob)
+            if hint:
+                _add(hint)
+    except Exception as exc:
+        print(
+            f"  [{account_id}] preflight attention extract failed ({exc})",
+            flush=True,
+        )
 
     print(
         f"  [{account_id}] preflight attention queue titles: {len(titles)}",

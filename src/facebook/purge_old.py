@@ -930,7 +930,7 @@ def wait_for_selling_shelf_cards(
     *,
     timeout_ms: int | None = None,
 ) -> bool:
-    """Wait until Seller Hub shows EN/ES date labels or bare ``MM/DD``/``DD/MM``."""
+    """Wait until Seller Hub shows EN/ES date labels, bare dates, or attention cards."""
     ms = int(timeout_ms if timeout_ms is not None else _shelf_wait_timeout_ms())
     deadline_errors: list[str] = []
 
@@ -2245,6 +2245,7 @@ def _title_matches_needles(
             continue
         if n in hay or hay in n:
             return True
+        # Token overlap: year + ≥2 significant tokens.
         hay_toks = {t for t in re.split(r"[^a-z0-9áéíóúñ]+", hay) if len(t) >= 2}
         needle_toks = {t for t in re.split(r"[^a-z0-9áéíóúñ]+", n) if len(t) >= 2}
         if not needle_toks:
@@ -2358,7 +2359,9 @@ def force_delete_requieren_atencion_card(
 
     # 3) Title-menu aria path (Más opciones para {title}).
     try:
-        if remove_from_selling_by_title(page, [title], action="delete"):
+        if remove_from_selling_by_title(
+            page, [title], action="delete", require_year=True
+        ):
             print(
                 f"  Requieren atención: deleted via title-menu title={title!r}",
                 flush=True,

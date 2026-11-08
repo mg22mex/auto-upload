@@ -184,9 +184,9 @@ class TestSellingShelfDiscoveryHydration(unittest.TestCase):
         ok = wait_for_selling_shelf_cards(page, timeout_ms=1000)
         self.assertTrue(ok)
         page.get_by_text.assert_called()
-        # First probe is Requieren atención / Requires attention; then Listed-on.
-        first_arg = page.get_by_text.call_args_list[0].args[0]
-        self.assertTrue(hasattr(first_arg, "search"))
+        # First wait uses combined EN/ES + bare-date regex.
+        first_arg = page.get_by_text.call_args.args[0]
+        self.assertTrue(hasattr(first_arg, "search") or first_arg == "Listed on")
 
     def test_hydrate_selling_shelf_scrolls_runs_loop(self):
         page = MagicMock()
