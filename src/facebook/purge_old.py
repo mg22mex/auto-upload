@@ -1922,49 +1922,146 @@ def _wait_confirm_delete_modal(page: Page, *, timeout_ms: int = 5_000) -> bool:
 
 
 def _attention_title_still_visible(page: Page, title: str) -> bool:
-    """True when the attention-card title text is still on /you/selling."""
+    """True when at least one attention card still matches ``title``."""
+    return _count_attention_title_cards(page, title) > 0
+
+
+def _count_attention_title_cards(
+    page: Page,
+    title: str,
+    *,
+    cards: list[dict[str, str]] | None = None,
+) -> int:
+    """How many Requieren atención cards share this vehicle title.
+
+    When ``cards`` is provided (from a prior extract), count matches there.
+    Otherwise uses a quiet in-page scan so poll loops do not spam logs.
+    """
     title = re.sub(r"\s+", " ", (title or "").strip())
     if len(title) < 4:
-        return False
-    try:
-        loc = page.get_by_text(re.compile(re.escape(title), re.I))
-        n = loc.count()
-        if not isinstance(n, int) or n <= 0:
-            return False
-        for i in range(min(n, 6)):
-            try:
-                if loc.nth(i).is_visible():
-                    return True
-            except Exception:
+        return 0
+    if cards is not None:
+        matched = 0
+        for card in cards:
+            ct = str(card.get("title") or "").strip()
+            if not ct:
                 continue
-    except Exception:
-        pass
-    return False
-
-
-def _wait_attention_title_gone(page: Page, title: str, *, timeout_ms: int = 6_000) -> bool:
-    """Wait until the titled attention card disappears from the DOM."""
-    title = re.sub(r"\s+", " ", (title or "").strip())
-    if len(title) < 4:
-        return True
+            if title.lower() in ct.lower() or ct.lower() in title.lower():
+                matched += 1
+        return matched
     try:
-        page.get_by_text(re.compile(re.escape(title), re.I)).first.wait_for(
-            state="hidden", timeout=timeout_ms
+        n = page.evaluate(
+            r"""({ title }) => {
+              const TITLE = (title || '').replace(/\s+/g, ' ').trim().toLowerCase();
+              const YEAR = TITLE.match(/\b((?:19|20)\d{2})\b/);
+              const BANNER_RE =
+                /elim[ií]nala\s+y\s+vuelve|delete\s+and\s+try\s+again|parece\s+un\s+duplicado|looks\s+like\s+a\s+duplicate|requieren\s+atenci|needs?\s+attention|requires?\s+attention/i;
+              const root = document.querySelector('[role="main"]') || document.body;
+              const norm = (t) => (t || '').replace(/\s+/g, ' ').trim();
+              const isVis = (el) => {
+                if (!el || !el.getBoundingClientRect) return false;
+                const r = el.getBoundingClientRect();
+                return r.width > 2 && r.height > 2;
+              };
+              // Prefer previously marked attention roots.
+              const marked = Array.from(
+                root.querySelectorAll('[data-autosell-attention-card]')
+              ).filter((el) => {
+                if (!isVis(el)) return false;
+                const t = norm(el.innerText || '').toLowerCase();
+                if (!t.includes(TITLE)) return false;
+                if (YEAR && !t.includes(YEAR[1])) return false;
+                return true;
+              });
+              if (marked.length) return marked.length;
+
+              // Discrete card wrappers: title + (banner or action bar) — smallest first.
+              const candidates = [];
+              root.querySelectorAll('div, li, article').forEach((el) => {
+                if (!isVis(el)) return;
+                const t = norm(el.innerText || '');
+                if (t.length < 12 || t.length > 1800) return;
+                const low = t.toLowerCase();
+                if (!low.includes(TITLE)) return;
+                if (YEAR && !low.includes(YEAR[1])) return;
+                const hasChrome = !!(
+                  BANNER_RE.test(t)
+                  || el.querySelector('[aria-haspopup="menu"]')
+                  || el.querySelector('[aria-label*="More" i]')
+                  || el.querySelector('[aria-label*="Más" i]')
+                  || el.querySelector('[aria-label*="Share" i]')
+                  || el.querySelector('[aria-label*="Compartir" i]')
+                );
+                if (!hasChrome) return;
+                candidates.push(el);
+              });
+              candidates.sort(
+                (a, b) => norm(a.innerText).length - norm(b.innerText).length
+              );
+              const kept = [];
+              for (const el of candidates) {
+                const txt = norm(el.innerText || '');
+                // Skip wrappers that already contain a smaller kept card.
+                if (kept.some((k) => el.contains(k))) continue;
+                // Skip if this is ancestor of something we'll keep — prefer leaf.
+                if (candidates.some(
+                  (o) => o !== el && el.contains(o)
+                    && norm(o.innerText).length + 40 < txt.length
+                )) continue;
+                kept.push(el);
+              }
+              return kept.length;
+            }""",
+            {"title": title},
         )
-        return True
+        return int(n) if isinstance(n, (int, float)) else 0
     except Exception:
-        pass
-    # Soft poll — FB sometimes keeps a stale text node briefly.
-    deadline_ms = max(1_000, timeout_ms)
-    steps = max(2, deadline_ms // 400)
+        return 0
+
+
+def _wait_attention_title_count_drop(
+    page: Page,
+    title: str,
+    *,
+    count_before: int,
+    timeout_ms: int = 8_000,
+) -> int:
+    """Wait until attention-card count for ``title`` drops by ≥1. Return new count.
+
+    Identical duplicate titles (two ``2022 Toyota Corolla XLE`` cards) must not
+    require the title text to vanish — only that ``count_after <= count_before - 1``.
+    """
+    title = re.sub(r"\s+", " ", (title or "").strip())
+    if count_before <= 0:
+        return 0
+    target = max(0, count_before - 1)
+    deadline_ms = max(1_500, timeout_ms)
+    steps = max(3, deadline_ms // 400)
+    last = count_before
     for _ in range(steps):
-        if not _attention_title_still_visible(page, title):
-            return True
         try:
             page.wait_for_timeout(400)
         except Exception:
             break
-    return not _attention_title_still_visible(page, title)
+        last = _count_attention_title_cards(page, title)
+        if last <= target:
+            return last
+    return _count_attention_title_cards(page, title)
+
+
+def _wait_attention_title_gone(page: Page, title: str, *, timeout_ms: int = 6_000) -> bool:
+    """Wait until no attention cards remain for ``title`` (count → 0)."""
+    title = re.sub(r"\s+", " ", (title or "").strip())
+    if len(title) < 4:
+        return True
+    before = _count_attention_title_cards(page, title)
+    if before <= 0:
+        return True
+    after = _wait_attention_title_count_drop(
+        page, title, count_before=before, timeout_ms=timeout_ms
+    )
+    # Full gone only when count hits 0 (single-card case).
+    return after <= 0
 
 
 def _click_delete_text_direct(page: Page, *, scope=None) -> bool:
@@ -3024,29 +3121,40 @@ def force_delete_requieren_atencion_card(
     ms = max(2_000, int(timeout_ms))
     resolved_id = (item_id or "").strip()
     resolved_href = (href or "").strip()
+    count_before = 0
 
-    def _verified_gone(how: str) -> bool:
-        if _wait_attention_title_gone(page, title, timeout_ms=6_000):
-            try:
-                page.goto(SELLING_URL, wait_until="domcontentloaded", timeout=90_000)
-                page.wait_for_timeout(2_000)
-            except Exception:
-                pass
-            if not _attention_title_still_visible(page, title):
-                print(
-                    f"  Requieren atención: deleted via {how} title={title!r}",
-                    flush=True,
-                )
-                return True
+    def _snapshot_count() -> int:
+        return _count_attention_title_cards(page, title)
+
+    def _verified_one_removed(how: str) -> bool:
+        """Success when card count for this title drops by ≥1 (not full vanish).
+
+        Two identical ``2022 Toyota Corolla XLE`` cards: deleting one leaves the
+        title text in the DOM — that must still count as a confirmed delete.
+        """
+        nonlocal count_before
+        page.wait_for_timeout(800)
+        after = _wait_attention_title_count_drop(
+            page, title, count_before=count_before, timeout_ms=6_000
+        )
+        try:
+            page.goto(SELLING_URL, wait_until="domcontentloaded", timeout=90_000)
+            page.wait_for_timeout(1_800)
+            hydrate_selling_shelf_scrolls(page, scrolls=1)
+        except Exception:
+            pass
+        after = _snapshot_count()
+        if after <= max(0, count_before - 1):
             print(
-                f"  Requieren atención: {how} clicked but title still visible "
-                f"title={title!r} — trying next strategy",
+                f"  Requieren atención: deleted via {how} title={title!r} "
+                f"count {count_before}→{after}",
                 flush=True,
             )
-            return False
+            return True
         print(
-            f"  Requieren atención: {how} clicked; title still in DOM "
-            f"title={title!r} — trying next strategy",
+            f"  Requieren atención: {how} clicked but count unchanged "
+            f"title={title!r} count={after} (was {count_before}) "
+            f"— trying next strategy",
             flush=True,
         )
         return False
@@ -3064,22 +3172,8 @@ def force_delete_requieren_atencion_card(
             href=resolved_href,
             title=title,
         ):
-            try:
-                page.goto(SELLING_URL, wait_until="domcontentloaded", timeout=90_000)
-                page.wait_for_timeout(2_000)
-            except Exception:
-                pass
-            if not _attention_title_still_visible(page, title):
-                print(
-                    f"  Requieren atención: deleted via item URL title={title!r}",
-                    flush=True,
-                )
+            if _verified_one_removed("item URL"):
                 return True
-            print(
-                f"  Requieren atención: URL delete ran but title still visible "
-                f"title={title!r}",
-                flush=True,
-            )
         return False
 
     try:
@@ -3091,6 +3185,15 @@ def force_delete_requieren_atencion_card(
         hydrate_selling_shelf_scrolls(page, scrolls=2)
     except Exception:
         pass
+
+    count_before = _snapshot_count()
+    if count_before <= 0:
+        # Still try once — extract may lag; treat missing count as 1.
+        count_before = 1
+    print(
+        f"  Requieren atención: title={title!r} attention count_before={count_before}",
+        flush=True,
+    )
 
     card = _locate_attention_card_root(page, title, timeout_ms=ms)
     if card is None:
@@ -3113,7 +3216,7 @@ def force_delete_requieren_atencion_card(
         # 1) Direct Delete / banner CTA inside this card (no dropdown needed).
         try:
             if _click_card_direct_delete(page, card, timeout_ms=ms):
-                if _verified_gone("card direct Delete/banner"):
+                if _verified_one_removed("card direct Delete/banner"):
                     return True
         except Exception as exc:
             print(
@@ -3122,7 +3225,7 @@ def force_delete_requieren_atencion_card(
             )
         try:
             if _click_attention_delete_cta(page, scope=card):
-                if _verified_gone("card banner CTA"):
+                if _verified_one_removed("card banner CTA"):
                     return True
         except Exception as exc:
             print(
@@ -3145,9 +3248,8 @@ def force_delete_requieren_atencion_card(
             _dom_settle(page, lo_ms=500, hi_ms=900)
             deleted = _wait_dropdown_then_click_delete(page, timeout_ms=5_000)
             if deleted:
-                # Explicit confirmation wait: card must leave the DOM.
                 page.wait_for_timeout(1_200)
-                if _verified_gone("action-bar ⋯ → Delete listing"):
+                if _verified_one_removed("action-bar ⋯ → Delete listing"):
                     return True
             print(
                 f"  Requieren atención: Delete/Eliminar not clicked "
@@ -3162,7 +3264,7 @@ def force_delete_requieren_atencion_card(
                 page
             ):
                 _wait_confirm_delete_modal(page)
-                if _verified_gone("banner after menu miss"):
+                if _verified_one_removed("banner after menu miss"):
                     return True
             if _try_url_fallback("menu Delete miss after action-bar ⋯"):
                 return True
@@ -3176,7 +3278,7 @@ def force_delete_requieren_atencion_card(
                 page
             ):
                 _wait_confirm_delete_modal(page)
-                if _verified_gone("banner after no action-bar ⋯"):
+                if _verified_one_removed("banner after no action-bar ⋯"):
                     return True
             if _try_url_fallback("no action-bar ⋯ inside card"):
                 return True
@@ -3215,7 +3317,7 @@ def force_delete_requieren_atencion_card(
                     continue
                 if _force_click(item, timeout=ms):
                     _wait_confirm_delete_modal(page)
-                    if _verified_gone(f"banner text {label!r}"):
+                    if _verified_one_removed(f"banner text {label!r}"):
                         return True
             except Exception as exc:
                 print(
@@ -3241,13 +3343,17 @@ def force_delete_requieren_atencion_card(
             f"title={title!r}",
             flush=True,
         )
-        if remove_from_selling_by_title(
+        title_ok = remove_from_selling_by_title(
             page, [title], action="delete", require_year=True
-        ):
-            print(
-                f"  Requieren atención: deleted via title-menu title={title!r}",
-                flush=True,
-            )
+        )
+        # Duplicate titles: remover may report "still sees title" even when one
+        # card was removed — trust count drop.
+        if title_ok or _verified_one_removed("title-menu"):
+            if title_ok:
+                print(
+                    f"  Requieren atención: deleted via title-menu title={title!r}",
+                    flush=True,
+                )
             return True
         print(
             f"  Requieren atención: title-menu unconfirmed title={title!r}",
@@ -3277,7 +3383,8 @@ def purge_requieren_atencion_matches(
     """Force-delete attention-block cards whose titles match the purge queue.
 
     GraphQL delete often returns success while account_2 cards remain under
-    ``Requieren atención``. This pass uses Playwright ⋯ → Eliminar publicación.
+    ``Requieren atención``. Identical duplicate titles are purged in a loop
+    until the attention-card count for that title reaches 0.
     """
     stats = PurgeStats()
     needles = [t for t in queue_titles if t and len(str(t).strip()) >= 4]
@@ -3308,59 +3415,94 @@ def purge_requieren_atencion_matches(
         )
         return stats
 
-    targets: list[dict[str, str]] = []
+    # Unique titles to purge; each title may have N identical cards.
+    title_meta: dict[str, dict[str, str]] = {}
     for card in cards:
         title = str(card.get("title") or "").strip()
+        if not title:
+            continue
         banner = str(card.get("has_duplicate_banner") or "") == "1"
         matched = bool(needles) and _title_matches_needles(title, needles)
-        # Match purge-queue titles; also clear unmatched duplicate banners when
-        # also_purge_duplicate_banners (GraphQL OK leaves them stuck with no id).
-        if matched or (also_purge_duplicate_banners and banner):
-            targets.append(card)
-
-    # De-dupe by title.
-    seen_t: set[str] = set()
-    uniq: list[dict[str, str]] = []
-    for card in targets:
-        key = str(card.get("title") or "").strip().lower()
-        if not key or key in seen_t:
+        if not (matched or (also_purge_duplicate_banners and banner)):
             continue
-        seen_t.add(key)
-        uniq.append(card)
-    targets = uniq
+        key = title.lower()
+        # Keep first href/item_id; later duplicates are found by re-locate.
+        title_meta.setdefault(key, card)
 
     print(
         f"  [{account_id}] Requieren atención: {stats.found} card(s), "
-        f"{len(targets)} match purge queue / duplicate banner — "
-        f"{'dry-run' if dry_run else 'force-deleting via ⋯'}",
+        f"{len(title_meta)} unique title(s) to purge — "
+        f"{'dry-run' if dry_run else 'force-deleting until count=0'}",
         flush=True,
     )
-    for card in targets:
+
+    for key, card in title_meta.items():
         title = str(card.get("title") or "").strip()
-        print(
-            f"  [{account_id}] ATTENTION PURGE title={title!r} "
-            f"banner={card.get('has_duplicate_banner')}",
-            flush=True,
-        )
         if dry_run:
-            stats.dry_run_candidates += 1
-            continue
-        ok = force_delete_requieren_atencion_card(
-            page,
-            title,
-            item_id=str(card.get("item_id") or ""),
-            href=str(card.get("href") or ""),
-        )
-        if ok:
-            stats.deleted += 1
-            stats.ui_fallback_deletes += 1
-            random_delay(delay_min_sec, delay_max_sec)
-        else:
-            stats.failed += 1
+            n = _count_attention_title_cards(page, title, cards=cards)
+            stats.dry_run_candidates += max(1, n)
             print(
-                f"  [{account_id}] ATTENTION PURGE FAIL title={title!r}",
+                f"  [{account_id}] ATTENTION PURGE dry-run title={title!r} "
+                f"instances≈{max(1, n)}",
                 flush=True,
             )
+            continue
+
+        # Loop until every identical title instance is gone.
+        max_rounds = 8
+        rounds = 0
+        while rounds < max_rounds:
+            rounds += 1
+            remaining = _count_attention_title_cards(page, title)
+            if remaining <= 0:
+                print(
+                    f"  [{account_id}] ATTENTION PURGE done title={title!r} "
+                    f"(0 remaining after {rounds - 1} delete(s))",
+                    flush=True,
+                )
+                break
+            print(
+                f"  [{account_id}] ATTENTION PURGE title={title!r} "
+                f"remaining={remaining} round={rounds}/{max_rounds} "
+                f"banner={card.get('has_duplicate_banner')}",
+                flush=True,
+            )
+            ok = force_delete_requieren_atencion_card(
+                page,
+                title,
+                item_id=str(card.get("item_id") or "") if rounds == 1 else "",
+                href=str(card.get("href") or "") if rounds == 1 else "",
+            )
+            if ok:
+                stats.deleted += 1
+                stats.ui_fallback_deletes += 1
+                random_delay(delay_min_sec, delay_max_sec)
+                # Refresh shelf for next identical instance.
+                try:
+                    page.goto(
+                        SELLING_URL, wait_until="domcontentloaded", timeout=90_000
+                    )
+                    page.wait_for_timeout(1_500)
+                    hydrate_selling_shelf_scrolls(page, scrolls=1)
+                except Exception:
+                    pass
+                continue
+            stats.failed += 1
+            print(
+                f"  [{account_id}] ATTENTION PURGE FAIL title={title!r} "
+                f"remaining={_count_attention_title_cards(page, title)}",
+                flush=True,
+            )
+            break
+        else:
+            leftover = _count_attention_title_cards(page, title)
+            if leftover > 0:
+                stats.failed += leftover
+                print(
+                    f"  [{account_id}] ATTENTION PURGE INCOMPLETE title={title!r} "
+                    f"leftover={leftover} after {max_rounds} rounds",
+                    flush=True,
+                )
     return stats
 
 

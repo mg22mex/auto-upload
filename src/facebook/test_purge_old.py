@@ -921,6 +921,10 @@ class TestRequierenAtencion(unittest.TestCase):
                 "src.facebook.purge_old.force_delete_requieren_atencion_card",
                 return_value=True,
             ) as force,
+            patch(
+                "src.facebook.purge_old._count_attention_title_cards",
+                side_effect=[1, 0],
+            ),
             patch("src.facebook.purge_old.wait_for_selling_shelf_cards"),
             patch("src.facebook.purge_old.hydrate_selling_shelf_scrolls"),
             patch("src.facebook.purge_old.random_delay"),
@@ -973,12 +977,12 @@ class TestRequierenAtencion(unittest.TestCase):
                 return_value=True,
             ) as menu_del,
             patch(
-                "src.facebook.purge_old._wait_attention_title_gone",
-                return_value=True,
+                "src.facebook.purge_old._count_attention_title_cards",
+                side_effect=[2, 1, 1, 1, 1, 1],
             ),
             patch(
-                "src.facebook.purge_old._attention_title_still_visible",
-                return_value=False,
+                "src.facebook.purge_old._wait_attention_title_count_drop",
+                return_value=1,
             ),
         ):
             ok = force_delete_requieren_atencion_card(
@@ -1040,12 +1044,12 @@ class TestRequierenAtencion(unittest.TestCase):
                 "src.facebook.purge_old._click_card_scoped_more",
             ) as more,
             patch(
-                "src.facebook.purge_old._wait_attention_title_gone",
-                return_value=True,
+                "src.facebook.purge_old._count_attention_title_cards",
+                side_effect=[2, 1, 1, 1, 1, 1],
             ),
             patch(
-                "src.facebook.purge_old._attention_title_still_visible",
-                return_value=False,
+                "src.facebook.purge_old._wait_attention_title_count_drop",
+                return_value=1,
             ),
         ):
             ok = force_delete_requieren_atencion_card(
@@ -1096,21 +1100,59 @@ class TestRequierenAtencion(unittest.TestCase):
                 return_value=True,
             ),
             patch(
-                "src.facebook.purge_old._wait_attention_title_gone",
-                return_value=True,
-            ),
-            patch(
-                "src.facebook.purge_old._attention_title_still_visible",
-                return_value=False,
-            ),
-            patch(
                 "src.facebook.purge_old._delete_attention_via_item_url",
                 return_value=False,
+            ),
+            patch(
+                "src.facebook.purge_old._count_attention_title_cards",
+                side_effect=[2, 1, 1, 1, 1, 1],
+            ),
+            patch(
+                "src.facebook.purge_old._wait_attention_title_count_drop",
+                return_value=1,
             ),
         ):
             ok = force_delete_requieren_atencion_card(page, "2021 Audi Q5")
         self.assertTrue(ok)
         banner.assert_called()
+
+    def test_force_delete_ok_when_duplicate_title_still_visible(self):
+        """count 2→1 is success even though title text remains in the DOM."""
+        from src.facebook.purge_old import force_delete_requieren_atencion_card
+
+        page = MagicMock()
+        card = MagicMock()
+        with (
+            patch("src.facebook.purge_old.hydrate_selling_shelf_scrolls"),
+            patch(
+                "src.facebook.purge_old._locate_attention_card_root",
+                return_value=card,
+            ),
+            patch(
+                "src.facebook.purge_old._href_from_attention_card",
+                return_value=("", ""),
+            ),
+            patch(
+                "src.facebook.purge_old._click_card_direct_delete",
+                return_value=True,
+            ),
+            patch(
+                "src.facebook.purge_old._count_attention_title_cards",
+                side_effect=[2, 1],
+            ),
+            patch(
+                "src.facebook.purge_old._wait_attention_title_count_drop",
+                return_value=1,
+            ),
+            patch(
+                "src.facebook.purge_old._attention_title_still_visible",
+                return_value=True,
+            ),
+        ):
+            ok = force_delete_requieren_atencion_card(
+                page, "2022 Toyota Corolla XLE"
+            )
+        self.assertTrue(ok)
 
     def test_force_delete_url_fallback_when_menu_delete_misses(self):
         from src.facebook.purge_old import force_delete_requieren_atencion_card
@@ -1161,12 +1203,16 @@ class TestRequierenAtencion(unittest.TestCase):
                 return_value=True,
             ) as url_rm,
             patch(
-                "src.facebook.purge_old._attention_title_still_visible",
+                "src.facebook.purge_old.remove_from_selling_by_title",
                 return_value=False,
             ),
             patch(
-                "src.facebook.purge_old.remove_from_selling_by_title",
-                return_value=False,
+                "src.facebook.purge_old._count_attention_title_cards",
+                side_effect=[2, 1, 1, 1, 1, 1],
+            ),
+            patch(
+                "src.facebook.purge_old._wait_attention_title_count_drop",
+                return_value=1,
             ),
         ):
             ok = force_delete_requieren_atencion_card(
@@ -1178,6 +1224,54 @@ class TestRequierenAtencion(unittest.TestCase):
         self.assertTrue(ok)
         url_rm.assert_called()
         self.assertEqual(url_rm.call_args.kwargs.get("item_id"), "999")
+
+    def test_purge_loops_identical_duplicate_titles(self):
+        """Two cards with the same title → two successful force-deletes."""
+        from src.facebook.purge_old import purge_requieren_atencion_matches
+
+        page = MagicMock()
+        twin = {
+            "title": "2022 Toyota Corolla XLE",
+            "has_duplicate_banner": "1",
+            "blob": "2022 Toyota Corolla XLE parece un duplicado",
+            "item_id": "",
+            "href": "",
+        }
+        counts = iter([2, 1, 0])  # remaining before each round / after last
+
+        def _count(_page, title, cards=None):
+            try:
+                return next(counts)
+            except StopIteration:
+                return 0
+
+        with (
+            patch(
+                "src.facebook.purge_old.extract_requieren_atencion_cards",
+                return_value=[twin, dict(twin)],
+            ),
+            patch("src.facebook.purge_old.wait_for_selling_shelf_cards"),
+            patch("src.facebook.purge_old.hydrate_selling_shelf_scrolls"),
+            patch("src.facebook.purge_old.random_delay"),
+            patch(
+                "src.facebook.purge_old._count_attention_title_cards",
+                side_effect=_count,
+            ),
+            patch(
+                "src.facebook.purge_old.force_delete_requieren_atencion_card",
+                return_value=True,
+            ) as force,
+        ):
+            stats = purge_requieren_atencion_matches(
+                page,
+                account_id="account_1",
+                queue_titles=["2022 Toyota Corolla XLE"],
+                dry_run=False,
+            )
+        self.assertEqual(stats.found, 2)
+        self.assertEqual(stats.deleted, 2)
+        self.assertEqual(stats.failed, 0)
+        self.assertEqual(force.call_count, 2)
 
     def test_click_delete_text_direct_uses_get_by_text(self):
         from src.facebook.purge_old import _click_delete_text_direct
