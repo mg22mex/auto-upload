@@ -912,6 +912,8 @@ class TestRequierenAtencion(unittest.TestCase):
                         "title": "2019 Porsche Cayenne",
                         "has_duplicate_banner": "1",
                         "blob": "2019 Porsche Cayenne parece un duplicado",
+                        "item_id": "555",
+                        "href": "https://www.facebook.com/marketplace/item/555/",
                     }
                 ],
             ),
@@ -934,6 +936,125 @@ class TestRequierenAtencion(unittest.TestCase):
         self.assertEqual(stats.ui_fallback_deletes, 1)
         force.assert_called_once()
         self.assertEqual(force.call_args.args[1], "2019 Porsche Cayenne")
+        self.assertEqual(force.call_args.kwargs.get("item_id"), "555")
+
+    def test_force_delete_uses_card_scoped_more_then_delete_text(self):
+        from src.facebook.purge_old import force_delete_requieren_atencion_card
+
+        page = MagicMock()
+        card = MagicMock()
+        with (
+            patch("src.facebook.purge_old.hydrate_selling_shelf_scrolls"),
+            patch(
+                "src.facebook.purge_old._locate_attention_card_root",
+                return_value=card,
+            ),
+            patch(
+                "src.facebook.purge_old._href_from_attention_card",
+                return_value=("", ""),
+            ),
+            patch(
+                "src.facebook.purge_old._click_attention_delete_cta",
+                return_value=False,
+            ),
+            patch(
+                "src.facebook.purge_old._click_card_scoped_more",
+                return_value=True,
+            ) as more,
+            patch(
+                "src.facebook.purge_old._click_menu_delete_bilingual",
+                return_value=True,
+            ) as menu_del,
+            patch(
+                "src.facebook.purge_old._wait_attention_title_gone",
+                return_value=True,
+            ),
+            patch(
+                "src.facebook.purge_old._attention_title_still_visible",
+                return_value=False,
+            ),
+        ):
+            ok = force_delete_requieren_atencion_card(
+                page,
+                "2021 Audi Q3 Dinamyc",
+                item_id="",
+                href="",
+            )
+        self.assertTrue(ok)
+        more.assert_called_once()
+        menu_del.assert_called_once()
+
+    def test_force_delete_url_fallback_when_menu_delete_misses(self):
+        from src.facebook.purge_old import force_delete_requieren_atencion_card
+
+        page = MagicMock()
+        card = MagicMock()
+        page.get_by_text.return_value.first.count.return_value = 0
+        page.get_by_text.return_value.count.return_value = 0
+        with (
+            patch("src.facebook.purge_old.hydrate_selling_shelf_scrolls"),
+            patch(
+                "src.facebook.purge_old._locate_attention_card_root",
+                return_value=card,
+            ),
+            patch(
+                "src.facebook.purge_old._href_from_attention_card",
+                return_value=(
+                    "999",
+                    "https://www.facebook.com/marketplace/item/999/",
+                ),
+            ),
+            patch(
+                "src.facebook.purge_old._click_attention_delete_cta",
+                return_value=False,
+            ),
+            patch(
+                "src.facebook.purge_old._click_card_scoped_more",
+                return_value=True,
+            ),
+            patch(
+                "src.facebook.purge_old._click_menu_delete_bilingual",
+                return_value=False,
+            ),
+            patch(
+                "src.facebook.purge_old._delete_attention_via_item_url",
+                return_value=True,
+            ) as url_rm,
+            patch(
+                "src.facebook.purge_old._attention_title_still_visible",
+                return_value=False,
+            ),
+            patch(
+                "src.facebook.purge_old.remove_from_selling_by_title",
+                return_value=False,
+            ),
+        ):
+            ok = force_delete_requieren_atencion_card(
+                page,
+                "2022 Toyota Corolla XLE",
+                item_id="",
+                href="",
+            )
+        self.assertTrue(ok)
+        url_rm.assert_called()
+        self.assertEqual(url_rm.call_args.kwargs.get("item_id"), "999")
+
+    def test_click_delete_text_direct_uses_get_by_text(self):
+        from src.facebook.purge_old import _click_delete_text_direct
+
+        page = MagicMock()
+        loc = MagicMock()
+        loc.count.return_value = 1
+        item = MagicMock()
+        item.is_visible.return_value = True
+        loc.nth.return_value = item
+        page.get_by_text.return_value = loc
+        page.locator.return_value.count.return_value = 0
+        with patch("src.facebook.purge_old._force_click", return_value=True) as click:
+            ok = _click_delete_text_direct(page)
+        self.assertTrue(ok)
+        page.get_by_text.assert_any_call("Delete listing", exact=True)
+        click.assert_called()
 
     def test_collect_selling_includes_attention_extract(self):
         page = MagicMock()

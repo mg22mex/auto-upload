@@ -868,8 +868,9 @@ class TestRemoveFromSellingByTitle(unittest.TestCase):
                 "src.facebook.remover._click_menu_action",
                 return_value=True,
             ) as menu,
-            patch("src.facebook.remover._confirm_if_needed") as confirm,
+            patch("src.facebook.remover._confirm_if_needed", return_value=True) as confirm,
             patch("src.facebook.remover._dismiss_delete_survey_if_needed"),
+            patch("src.facebook.remover._wait_title_needles_hidden", return_value=True),
             patch(
                 "src.facebook.remover._title_still_on_selling_shelf",
                 return_value=False,
@@ -896,8 +897,9 @@ class TestRemoveFromSellingByTitle(unittest.TestCase):
             ),
             patch("src.facebook.remover._menu_open", return_value=True),
             patch("src.facebook.remover._click_menu_action", return_value=True),
-            patch("src.facebook.remover._confirm_if_needed"),
+            patch("src.facebook.remover._confirm_if_needed", return_value=True),
             patch("src.facebook.remover._dismiss_delete_survey_if_needed"),
+            patch("src.facebook.remover._wait_title_needles_hidden", return_value=False),
             patch(
                 "src.facebook.remover._title_still_on_selling_shelf",
                 return_value=True,
@@ -933,8 +935,9 @@ class TestRemoveFromSellingByTitle(unittest.TestCase):
                 return_value=more_btn,
             ),
             patch("src.facebook.remover._click_menu_action", return_value=True),
-            patch("src.facebook.remover._confirm_if_needed"),
+            patch("src.facebook.remover._confirm_if_needed", return_value=True),
             patch("src.facebook.remover._dismiss_delete_survey_if_needed"),
+            patch("src.facebook.remover._wait_title_needles_hidden", return_value=True),
             patch(
                 "src.facebook.remover._title_still_on_selling_shelf",
                 return_value=False,
@@ -945,6 +948,27 @@ class TestRemoveFromSellingByTitle(unittest.TestCase):
             )
         self.assertTrue(ok)
         more_btn.click.assert_called()
+
+    def test_confirm_if_needed_prefers_dialog_button(self):
+        from src.facebook.remover import _confirm_if_needed
+
+        page = MagicMock()
+        dialog = MagicMock()
+        btn = MagicMock()
+        btn.count.return_value = 1
+        btn.first.is_visible.return_value = True
+        dialog.count.return_value = 1
+        dialog.last.get_by_role.return_value = btn
+        dialog.last.locator.return_value.count.return_value = 0
+        page.locator.return_value = dialog
+        page.locator.return_value.first.wait_for = MagicMock()
+        # After confirm, hidden wait on dialog.
+        page.get_by_role.return_value.count.return_value = 0
+
+        with patch("src.facebook.remover._dismiss_delete_survey_if_needed"):
+            ok = _confirm_if_needed(page, prefer_delete=True)
+        self.assertTrue(ok)
+        btn.first.click.assert_called()
 
 
 if __name__ == "__main__":

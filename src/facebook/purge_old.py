@@ -1826,6 +1826,19 @@ _MENU_DELETE_LABEL = re.compile(
     r"borrar publicación|delete this listing",
     re.I,
 )
+# Literal strings for get_by_text / XPath (menu + banner) — prefer these over
+# global role scans that can hit Seller Hub header chrome.
+_DELETE_TEXT_LITERALS = (
+    "Delete listing",
+    "Eliminar publicación",
+    "Delete this listing",
+    "Eliminar esta publicación",
+    "Delete and try again",
+    "Elimínala y vuelve a intentarlo",
+    "Elimínalo y vuelve a intentarlo",
+    "Delete",
+    "Eliminar",
+)
 _DOM_SETTLE_MS = (1_200, 2_000)  # wait between card actions for DOM refresh
 
 
@@ -1884,29 +1897,414 @@ def _click_by_bilingual_label(page: Page, pattern: re.Pattern[str], *, scope=Non
     return False
 
 
+def _wait_confirm_delete_modal(page: Page, *, timeout_ms: int = 5_000) -> bool:
+    """Wait for secondary Delete/Eliminar modal, click it, wait until hidden."""
+    from src.facebook.remover import _confirm_if_needed
+
+    dialog_sel = '[role="dialog"], [role="alertdialog"]'
+    try:
+        page.locator(dialog_sel).first.wait_for(
+            state="visible", timeout=max(1_500, timeout_ms)
+        )
+    except Exception:
+        page.wait_for_timeout(500)
+    confirmed = bool(_confirm_if_needed(page, prefer_delete=True))
+    # Second attempt — attention confirm can lag the first click.
+    if not confirmed:
+        page.wait_for_timeout(700)
+        confirmed = bool(_confirm_if_needed(page, prefer_delete=True))
+    try:
+        page.locator(dialog_sel).first.wait_for(state="hidden", timeout=5_000)
+    except Exception:
+        page.wait_for_timeout(1_500)
+    _dom_settle(page, lo_ms=1_200, hi_ms=2_000)
+    return confirmed
+
+
+def _attention_title_still_visible(page: Page, title: str) -> bool:
+    """True when the attention-card title text is still on /you/selling."""
+    title = re.sub(r"\s+", " ", (title or "").strip())
+    if len(title) < 4:
+        return False
+    try:
+        loc = page.get_by_text(re.compile(re.escape(title), re.I))
+        n = loc.count()
+        if not isinstance(n, int) or n <= 0:
+            return False
+        for i in range(min(n, 6)):
+            try:
+                if loc.nth(i).is_visible():
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
+
+
+def _wait_attention_title_gone(page: Page, title: str, *, timeout_ms: int = 6_000) -> bool:
+    """Wait until the titled attention card disappears from the DOM."""
+    title = re.sub(r"\s+", " ", (title or "").strip())
+    if len(title) < 4:
+        return True
+    try:
+        page.get_by_text(re.compile(re.escape(title), re.I)).first.wait_for(
+            state="hidden", timeout=timeout_ms
+        )
+        return True
+    except Exception:
+        pass
+    # Soft poll — FB sometimes keeps a stale text node briefly.
+    deadline_ms = max(1_000, timeout_ms)
+    steps = max(2, deadline_ms // 400)
+    for _ in range(steps):
+        if not _attention_title_still_visible(page, title):
+            return True
+        try:
+            page.wait_for_timeout(400)
+        except Exception:
+            break
+    return not _attention_title_still_visible(page, title)
+
+
+def _click_delete_text_direct(page: Page, *, scope=None) -> bool:
+    """Click Delete listing / Eliminar publicación / banner CTA via text+XPath.
+
+    Prefer exact literals and XPath text nodes over global role scans that can
+    hit Seller Hub header chrome instead of the open menu / attention card.
+    """
+    root = scope if scope is not None else page
+    for label in _DELETE_TEXT_LITERALS:
+        # 1) Playwright text (menu items often render as plain span text).
+        for exact in (True, False):
+            try:
+                loc = root.get_by_text(label, exact=exact)
+                n = loc.count()
+            except Exception:
+                continue
+            if not isinstance(n, int) or n <= 0:
+                continue
+            for i in range(min(n, 8)):
+                item = loc.nth(i)
+                try:
+                    if not item.is_visible():
+                        continue
+                    if _force_click(item, timeout=6_000):
+                        print(
+                            f"  Requieren atención: clicked text={label!r} "
+                            f"exact={exact}",
+                            flush=True,
+                        )
+                        return True
+                except Exception:
+                    continue
+        # 2) XPath — menu/banner may not expose role=menuitem.
+        try:
+            xpath = (
+                f"xpath=//*[self::span or self::div or self::a or self::button]"
+                f"[contains(normalize-space(.), {label!r})]"
+            )
+            loc = root.locator(xpath)
+            n = loc.count()
+        except Exception:
+            continue
+        if not isinstance(n, int) or n <= 0:
+            continue
+        for i in range(min(n, 8)):
+            item = loc.nth(i)
+            try:
+                if not item.is_visible():
+                    continue
+                txt = re.sub(r"\s+", " ", (item.inner_text(timeout=800) or "")).strip()
+                # Avoid clicking a huge wrapper that merely contains the label.
+                if len(txt) > 120 and label.lower() not in txt.lower()[:80]:
+                    continue
+                if _force_click(item, timeout=6_000):
+                    print(
+                        f"  Requieren atención: clicked xpath text={label!r}",
+                        flush=True,
+                    )
+                    return True
+            except Exception:
+                continue
+    return False
+
+
+def _locate_attention_card_root(page: Page, title: str, *, timeout_ms: int = 5_000):
+    """Return a Locator for the card wrapper under Requieren atención for ``title``.
+
+    Prefer a container that owns both the vehicle title and a ⋯ / banner CTA —
+    never the global Seller Hub header. Marks the node with a data attribute so
+    Playwright can scope subsequent clicks to that card only.
+    """
+    title = re.sub(r"\s+", " ", (title or "").strip())
+    if len(title) < 4:
+        return None
+    token = f"attn-{hashlib.sha1(title.encode('utf-8', 'replace')).hexdigest()[:12]}"
+    try:
+        found = page.evaluate(
+            r"""({ title, token }) => {
+              document.querySelectorAll('[data-autosell-attention-card]')
+                .forEach((el) => el.removeAttribute('data-autosell-attention-card'));
+              const TITLE = (title || '').replace(/\s+/g, ' ').trim().toLowerCase();
+              const SECTION_RE =
+                /requieren\s+atenci[oó]n|requires?\s+attention|needs?\s+attention/i;
+              const BANNER_RE =
+                /elim[ií]nala\s+y\s+vuelve|delete\s+and\s+try\s+again|parece\s+un\s+duplicado|looks\s+like\s+a\s+duplicate/i;
+              const MORE_RE = /m[aá]s opciones|more options|options|opciones/i;
+              const root = document.querySelector('[role="main"]') || document.body;
+              const norm = (t) => (t || '').replace(/\s+/g, ' ').trim();
+              const isVis = (el) => {
+                if (!el || !el.getBoundingClientRect) return false;
+                const r = el.getBoundingClientRect();
+                return r.width > 2 && r.height > 2;
+              };
+              const candidates = [];
+              const walker = document.createTreeWalker(
+                root, NodeFilter.SHOW_ELEMENT, null
+              );
+              let node = walker.currentNode;
+              while (node) {
+                if (node.nodeType === 1 && isVis(node)) {
+                  const own = norm(node.innerText || '');
+                  if (own.toLowerCase().includes(TITLE)
+                      && own.length < 2500
+                      && own.length > TITLE.length) {
+                    candidates.push(node);
+                  }
+                }
+                node = walker.nextNode();
+              }
+              candidates.sort(
+                (a, b) => norm(a.innerText).length - norm(b.innerText).length
+              );
+              for (const el of candidates) {
+                let n = el;
+                for (let d = 0; d < 10 && n && n !== root; d++) {
+                  const txt = norm(n.innerText || '');
+                  const hasMore = !!(
+                    n.querySelector
+                    && (
+                      n.querySelector('[aria-haspopup="menu"]')
+                      || Array.from(
+                        n.querySelectorAll('[aria-label], [role="button"]')
+                      ).some((b) => MORE_RE.test(
+                        (b.getAttribute('aria-label') || b.innerText || '')
+                      ))
+                    )
+                  );
+                  const hasBanner = BANNER_RE.test(txt);
+                  if ((hasMore || hasBanner)
+                      && txt.toLowerCase().includes(TITLE)
+                      && txt.length < 4000) {
+                    if (txt.length > 3500 && !hasBanner) {
+                      n = n.parentElement;
+                      continue;
+                    }
+                    n.setAttribute('data-autosell-attention-card', token);
+                    return true;
+                  }
+                  n = n.parentElement;
+                }
+              }
+              return false;
+            }""",
+            {"title": title, "token": token},
+        )
+    except Exception as exc:
+        print(
+            f"  Requieren atención: card-root JS miss title={title!r}: {exc}",
+            flush=True,
+        )
+        found = False
+    if found:
+        loc = page.locator(f'[data-autosell-attention-card="{token}"]').first
+        try:
+            if loc.count() > 0:
+                return loc
+        except Exception:
+            pass
+    # Fallback: title text → nearest ancestor with menu/button.
+    try:
+        title_loc = page.get_by_text(re.compile(re.escape(title), re.I)).first
+        if title_loc.count() <= 0:
+            return None
+        title_loc.scroll_into_view_if_needed(timeout=timeout_ms)
+        for xpath in (
+            "xpath=ancestor::div[.//*[@aria-haspopup='menu']][1]",
+            "xpath=ancestor::div[.//button[@aria-label]][1]",
+            "xpath=ancestor::div[5]",
+            "xpath=ancestor::div[4]",
+        ):
+            cand = title_loc.locator(xpath).first
+            if cand.count() > 0:
+                return cand
+    except Exception as exc:
+        print(
+            f"  Requieren atención: card-root xpath miss title={title!r}: {exc}",
+            flush=True,
+        )
+    return None
+
+
+def _href_from_attention_card(card) -> tuple[str, str]:
+    """Return ``(item_id, href)`` scraped from a card locator/element."""
+    if card is None:
+        return "", ""
+    try:
+        info = card.evaluate(
+            """(el) => {
+              const ID_RE = /\\/marketplace\\/item\\/(\\d{8,})/;
+              const anchors = el.querySelectorAll
+                ? el.querySelectorAll('a[href], [href]')
+                : [];
+              for (const a of anchors) {
+                const h = a.href || a.getAttribute('href') || '';
+                const m = h.match(ID_RE);
+                if (m) return { item_id: m[1], href: h };
+              }
+              return { item_id: '', href: '' };
+            }"""
+        )
+        if isinstance(info, dict):
+            return str(info.get("item_id") or ""), str(info.get("href") or "")
+    except Exception:
+        pass
+    return "", ""
+
+
+def _click_card_scoped_more(page: Page, card, *, timeout_ms: int = 6_000) -> bool:
+    """Click the ⋯ / Más opciones control **inside** ``card`` only (not header)."""
+    if card is None:
+        return False
+    try:
+        card.scroll_into_view_if_needed(timeout=min(timeout_ms, 4_000))
+        card.hover(timeout=timeout_ms)
+    except Exception:
+        pass
+    # Prefer aria labels that include the vehicle title ("Más opciones para …").
+    selectors = (
+        '[aria-label*="Más opciones para" i]',
+        '[aria-label*="More options for" i]',
+        '[aria-label*="Más opciones" i]',
+        '[aria-label*="More options" i]',
+        '[aria-haspopup="menu"]',
+        '[aria-label*="Opciones" i]',
+        '[aria-label*="Options" i]',
+    )
+    for sel in selectors:
+        try:
+            loc = card.locator(sel)
+            n = loc.count()
+        except Exception:
+            continue
+        if not isinstance(n, int) or n <= 0:
+            continue
+        for i in range(min(n, 8)):
+            btn = loc.nth(i)
+            try:
+                if not btn.is_visible():
+                    continue
+                label = (btn.get_attribute("aria-label") or "").lower()
+                # Skip boost/share and anything that looks like top-nav.
+                if any(
+                    x in label
+                    for x in (
+                        "boost",
+                        "promote",
+                        "share",
+                        "compartir",
+                        "account",
+                        "cuenta",
+                        "messenger",
+                        "notification",
+                        "notificaci",
+                    )
+                ):
+                    continue
+                if _force_click(btn, timeout=timeout_ms):
+                    print(
+                        f"  Requieren atención: opened card ⋯ "
+                        f"aria={label[:60]!r}",
+                        flush=True,
+                    )
+                    return True
+            except Exception as exc:
+                print(
+                    f"  Requieren atención: card ⋯ click fail sel={sel!r}: {exc}",
+                    flush=True,
+                )
+                continue
+    print("  Requieren atención: no ⋯ inside card wrapper", flush=True)
+    return False
+
+
+def _click_attention_banner_text(page: Page, *, scope=None) -> bool:
+    """Click only the red duplicate banner CTA (not generic Delete/Eliminar)."""
+    root = scope if scope is not None else page
+    for label in (
+        "Elimínala y vuelve a intentarlo",
+        "Elimínalo y vuelve a intentarlo",
+        "Delete and try again",
+        "Eliminar y volver a intentar",
+    ):
+        for exact in (False, True):
+            try:
+                loc = root.get_by_text(label, exact=exact)
+                n = loc.count()
+            except Exception:
+                continue
+            if not isinstance(n, int) or n <= 0:
+                continue
+            for i in range(min(n, 6)):
+                item = loc.nth(i)
+                try:
+                    if not item.is_visible():
+                        continue
+                    if _force_click(item, timeout=6_000):
+                        print(
+                            f"  Requieren atención: clicked banner CTA={label!r}",
+                            flush=True,
+                        )
+                        return True
+                except Exception:
+                    continue
+    return False
+
+
 def _click_attention_delete_cta(page: Page, *, scope=None) -> bool:
     """Needs attention / Duplicates: 'Delete and try again' / 'Elimínala…'."""
+    if _click_attention_banner_text(page, scope=scope):
+        _dom_settle(page, lo_ms=800, hi_ms=1_200)
+        _wait_confirm_delete_modal(page)
+        return True
     if not _click_by_bilingual_label(page, _ATTENTION_DELETE_CTA, scope=scope):
         return False
-    _dom_settle(page)
-    _confirm_if_needed(page, prefer_delete=True)
-    _dom_settle(page)
+    _dom_settle(page, lo_ms=800, hi_ms=1_200)
+    _wait_confirm_delete_modal(page)
     return True
 
 
 def _click_menu_delete_bilingual(page: Page) -> bool:
-    """Menu: Eliminar publicación / Eliminar / Delete listing / Delete."""
+    """Menu: Eliminar publicación / Eliminar / Delete listing / Delete + confirm."""
+    # Direct text first — role=menuitem is often missing on attention menus.
+    if _click_delete_text_direct(page):
+        _dom_settle(page, lo_ms=600, hi_ms=1_000)
+        _wait_confirm_delete_modal(page)
+        return True
     if _click_by_bilingual_label(page, _MENU_DELETE_LABEL):
-        _dom_settle(page)
-        _confirm_if_needed(page, prefer_delete=True)
-        _dom_settle(page)
+        _dom_settle(page, lo_ms=600, hi_ms=1_000)
+        _wait_confirm_delete_modal(page)
         return True
     # Shared remover patterns (also EN+ES, includes attention CTA).
     if _click_menu_action(page, action="delete"):
-        _dom_settle(page)
-        _confirm_if_needed(page, prefer_delete=True)
-        _dom_settle(page)
+        _dom_settle(page, lo_ms=600, hi_ms=1_000)
+        _wait_confirm_delete_modal(page)
         return True
+    print(
+        "  Requieren atención: Delete/Eliminar text not found after ⋯ open",
+        flush=True,
+    )
     return False
 
 
@@ -2260,21 +2658,143 @@ def _title_matches_needles(
     return False
 
 
+def _delete_attention_via_item_url(
+    page: Page,
+    *,
+    item_id: str = "",
+    href: str = "",
+    title: str = "",
+) -> bool:
+    """Fallback: open listing detail / edit URL and hard-delete from there."""
+    from src.facebook.remover import remove_vehicle_listing
+
+    url = (href or "").strip()
+    if url and not url.startswith("http"):
+        url = f"https://www.facebook.com{url}"
+    if not url and item_id and str(item_id).isdigit():
+        url = f"https://www.facebook.com/marketplace/item/{item_id}/"
+    if not url:
+        return False
+    try:
+        print(
+            f"  Requieren atención: detail/URL fallback title={title!r} url={url}",
+            flush=True,
+        )
+        ok = bool(
+            remove_vehicle_listing(
+                page,
+                url,
+                autosell_id=title or item_id or "attention",
+                removal_action="delete",
+                log_dir=Path("data/logs/facebook/purge"),
+                require_verified=False,
+                skip_graphql=True,
+                title_needles=[title] if title else None,
+            )
+        )
+        if ok:
+            return True
+    except Exception as exc:
+        print(f"  Requieren atención URL fallback fail: {exc}", flush=True)
+    # Direct owner delete chrome on the detail page.
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+        page.wait_for_timeout(1_500)
+        if _click_menu_delete_bilingual(page) or _click_attention_delete_cta(page):
+            _wait_confirm_delete_modal(page)
+            return True
+        # ⋮ on detail → Delete → confirm.
+        more = page.locator(_REQUIEREN_ATENCION_MORE_SEL)
+        if more.count() > 0 and _force_click(more.first, timeout=5_000):
+            _dom_settle(page)
+            if _click_menu_delete_bilingual(page):
+                return True
+    except Exception as exc:
+        print(f"  Requieren atención detail chrome fail: {exc}", flush=True)
+    return False
+
+
 def force_delete_requieren_atencion_card(
     page: Page,
     title: str,
     *,
     timeout_ms: int = 8_000,
+    item_id: str = "",
+    href: str = "",
 ) -> bool:
-    """Force-delete one attention-block card: ⋯ → Eliminar publicación → confirm.
+    """Force-delete one attention-block card: card-scoped ⋯ → Eliminar → confirm.
 
-    Scoped to the Requieren atención / duplicate-banner UI so GraphQL-stuck
-    cards are removed even when standard shelf href matching fails.
+    Strategy (account_1 EN + account_2 ES):
+      1. Locate the card wrapper under ``Requieren atención`` for ``title``
+      2. Click red banner CTA text inside that card (``Elimínala…`` / Delete and try again)
+      3. Else open **card-scoped** ⋯ (never page header) → ``Delete listing`` /
+         ``Eliminar publicación`` via ``get_by_text`` / XPath → confirm modal
+      4. On menu miss: scrape href from the card and navigate to item URL
+      5. Last resort: global ``remove_from_selling_by_title``
     """
     title = re.sub(r"\s+", " ", (title or "").strip())
     if len(title) < 4:
         return False
     ms = max(2_000, int(timeout_ms))
+    resolved_id = (item_id or "").strip()
+    resolved_href = (href or "").strip()
+
+    def _verified_gone(how: str) -> bool:
+        if _wait_attention_title_gone(page, title, timeout_ms=6_000):
+            try:
+                page.goto(SELLING_URL, wait_until="domcontentloaded", timeout=90_000)
+                page.wait_for_timeout(2_000)
+            except Exception:
+                pass
+            if not _attention_title_still_visible(page, title):
+                print(
+                    f"  Requieren atención: deleted via {how} title={title!r}",
+                    flush=True,
+                )
+                return True
+            print(
+                f"  Requieren atención: {how} clicked but title still visible "
+                f"title={title!r} — trying next strategy",
+                flush=True,
+            )
+            return False
+        print(
+            f"  Requieren atención: {how} clicked; title still in DOM "
+            f"title={title!r} — trying next strategy",
+            flush=True,
+        )
+        return False
+
+    def _try_url_fallback(reason: str) -> bool:
+        nonlocal resolved_id, resolved_href
+        print(
+            f"  Requieren atención: {reason} — URL/banner fallback "
+            f"title={title!r} item_id={resolved_id!r} href={resolved_href!r}",
+            flush=True,
+        )
+        if _delete_attention_via_item_url(
+            page,
+            item_id=resolved_id,
+            href=resolved_href,
+            title=title,
+        ):
+            try:
+                page.goto(SELLING_URL, wait_until="domcontentloaded", timeout=90_000)
+                page.wait_for_timeout(2_000)
+            except Exception:
+                pass
+            if not _attention_title_still_visible(page, title):
+                print(
+                    f"  Requieren atención: deleted via item URL title={title!r}",
+                    flush=True,
+                )
+                return True
+            print(
+                f"  Requieren atención: URL delete ran but title still visible "
+                f"title={title!r}",
+                flush=True,
+            )
+        return False
 
     try:
         page.goto(SELLING_URL, wait_until="domcontentloaded", timeout=90_000)
@@ -2286,79 +2806,128 @@ def force_delete_requieren_atencion_card(
     except Exception:
         pass
 
-    # 1) Prefer the explicit ES/EN attention CTA near this title.
+    card = _locate_attention_card_root(page, title, timeout_ms=ms)
+    if card is None:
+        print(
+            f"  Requieren atención: card wrapper not found title={title!r}",
+            flush=True,
+        )
+    else:
+        scraped_id, scraped_href = _href_from_attention_card(card)
+        if scraped_id and not resolved_id:
+            resolved_id = scraped_id
+        if scraped_href and not resolved_href:
+            resolved_href = scraped_href
+        print(
+            f"  Requieren atención: card root ok title={title!r} "
+            f"item_id={resolved_id!r}",
+            flush=True,
+        )
+
+        # 1) Red banner CTA inside this card only.
+        try:
+            if _click_attention_delete_cta(page, scope=card):
+                if _verified_gone("card banner CTA"):
+                    return True
+        except Exception as exc:
+            print(
+                f"  Requieren atención: banner CTA error title={title!r}: {exc}",
+                flush=True,
+            )
+
+        # 2) Card-scoped ⋯ → Delete listing / Eliminar publicación (text locator).
+        menu_opened = False
+        try:
+            menu_opened = _click_card_scoped_more(page, card, timeout_ms=ms)
+        except Exception as exc:
+            print(
+                f"  Requieren atención: ⋯ open error title={title!r}: {exc}",
+                flush=True,
+            )
+        if menu_opened:
+            _dom_settle(page, lo_ms=700, hi_ms=1_200)
+            if _click_menu_delete_bilingual(page):
+                if _verified_gone("card ⋯ + Delete text"):
+                    return True
+            else:
+                print(
+                    f"  Requieren atención: Delete/Eliminar not clicked "
+                    f"after card ⋯ title={title!r}",
+                    flush=True,
+                )
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:
+                    pass
+                # Menu dropdown bug → jump to URL / edit delete immediately.
+                if _try_url_fallback("menu Delete miss after card ⋯"):
+                    return True
+        else:
+            print(
+                f"  Requieren atención: card ⋯ not opened title={title!r}",
+                flush=True,
+            )
+
+    # 3) Direct page-level banner text (still better than global header ⋯).
+    try:
+        page.goto(SELLING_URL, wait_until="domcontentloaded", timeout=90_000)
+        page.wait_for_timeout(1_200)
+        hydrate_selling_shelf_scrolls(page, scrolls=1)
+    except Exception:
+        pass
+    # Scroll the title into view then click nearby banner literal.
     try:
         title_loc = page.get_by_text(re.compile(re.escape(title), re.I)).first
         if title_loc.count() > 0:
+            title_loc.scroll_into_view_if_needed(timeout=ms)
+            title_loc.hover(timeout=ms)
+    except Exception:
+        pass
+    for label in (
+        "Elimínala y vuelve a intentarlo",
+        "Elimínalo y vuelve a intentarlo",
+        "Delete and try again",
+    ):
+        try:
+            loc = page.get_by_text(label, exact=False)
+            n = loc.count()
+        except Exception:
+            continue
+        if not isinstance(n, int) or n <= 0:
+            continue
+        for i in range(min(n, 6)):
+            item = loc.nth(i)
             try:
-                title_loc.scroll_into_view_if_needed(timeout=ms)
-                title_loc.hover(timeout=ms)
-            except Exception:
-                pass
-            card = None
-            for xpath in (
-                "xpath=ancestor::div[.//button or .//*[@aria-haspopup='menu']][1]",
-                "xpath=ancestor::div[5]",
-                "xpath=ancestor::div[4]",
-                "xpath=ancestor::div[3]",
-            ):
-                try:
-                    cand = title_loc.locator(xpath).first
-                    if cand.count() > 0:
-                        card = cand
-                        break
-                except Exception:
+                if not item.is_visible():
                     continue
-            if card is not None and _click_attention_delete_cta(page, scope=card):
+                if _force_click(item, timeout=ms):
+                    _wait_confirm_delete_modal(page)
+                    if _verified_gone(f"banner text {label!r}"):
+                        return True
+            except Exception as exc:
                 print(
-                    f"  Requieren atención: deleted via CTA title={title!r}",
+                    f"  Requieren atención: banner text click fail "
+                    f"label={label!r}: {exc}",
                     flush=True,
                 )
-                return True
-            # 2) ⋯ / Más opciones → Eliminar publicación / Delete listing → confirm.
-            if card is not None:
-                try:
-                    card.hover(timeout=ms)
-                except Exception:
-                    pass
-                more = card.locator(_REQUIEREN_ATENCION_MORE_SEL)
-                try:
-                    more_n = more.count()
-                except Exception:
-                    more_n = 0
-                if isinstance(more_n, int) and more_n > 0:
-                    for i in range(min(more_n, 6)):
-                        btn = more.nth(i)
-                        try:
-                            if not btn.is_visible():
-                                continue
-                            label = (btn.get_attribute("aria-label") or "").lower()
-                            if any(
-                                x in label
-                                for x in ("boost", "promote", "share", "compartir")
-                            ):
-                                continue
-                            if not _force_click(btn, timeout=ms):
-                                continue
-                            _dom_settle(page, lo_ms=1_000, hi_ms=1_500)
-                            if _click_menu_delete_bilingual(page):
-                                print(
-                                    f"  Requieren atención: deleted via ⋯ menu "
-                                    f"title={title!r}",
-                                    flush=True,
-                                )
-                                return True
-                            try:
-                                page.keyboard.press("Escape")
-                            except Exception:
-                                pass
-                        except Exception:
-                            continue
-    except Exception as exc:
-        print(f"  Requieren atención force-delete miss title={title!r}: {exc}", flush=True)
 
-    # 3) Title-menu aria path (Más opciones para {title}).
+    # 4) URL / edit navigation fallback (scrape again if needed).
+    if not resolved_href and not resolved_id:
+        card2 = _locate_attention_card_root(page, title, timeout_ms=ms)
+        if card2 is not None:
+            scraped_id, scraped_href = _href_from_attention_card(card2)
+            resolved_id = resolved_id or scraped_id
+            resolved_href = resolved_href or scraped_href
+    if _try_url_fallback("pre-title-menu fallback"):
+        return True
+
+    # 5) Last resort: global title-menu helper (may hit wrong ⋯ — logged).
     try:
+        print(
+            f"  Requieren atención: last-resort remove_from_selling_by_title "
+            f"title={title!r}",
+            flush=True,
+        )
         if remove_from_selling_by_title(
             page, [title], action="delete", require_year=True
         ):
@@ -2367,15 +2936,17 @@ def force_delete_requieren_atencion_card(
                 flush=True,
             )
             return True
-    except Exception as exc:
-        print(f"  Requieren atención title-menu failed title={title!r}: {exc}", flush=True)
-
-    # 4) Page-level attention CTA as last resort when only one blocked card.
-    if _click_attention_delete_cta(page):
         print(
-            f"  Requieren atención: deleted via page CTA (fallback) title={title!r}",
+            f"  Requieren atención: title-menu unconfirmed title={title!r}",
             flush=True,
         )
+    except Exception as exc:
+        print(
+            f"  Requieren atención title-menu failed title={title!r}: {exc}",
+            flush=True,
+        )
+
+    if _try_url_fallback("post-title-menu fallback"):
         return True
     return False
 
@@ -2461,7 +3032,12 @@ def purge_requieren_atencion_matches(
         if dry_run:
             stats.dry_run_candidates += 1
             continue
-        ok = force_delete_requieren_atencion_card(page, title)
+        ok = force_delete_requieren_atencion_card(
+            page,
+            title,
+            item_id=str(card.get("item_id") or ""),
+            href=str(card.get("href") or ""),
+        )
         if ok:
             stats.deleted += 1
             stats.ui_fallback_deletes += 1

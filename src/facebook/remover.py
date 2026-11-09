@@ -1884,15 +1884,26 @@ def remove_from_selling_by_title(
             flush=True,
         )
         return False
-    _confirm_if_needed(page, prefer_delete=(action == "delete"))
+    # Attention / duplicate cards open a secondary modal — wait + click Delete.
+    confirmed = _confirm_if_needed(page, prefer_delete=(action == "delete"))
     if action == "delete":
         _dismiss_delete_survey_if_needed(page)
-    page.wait_for_timeout(1_800)
+        # Retry confirm once if the dialog is still up / first click raced.
+        if not confirmed:
+            page.wait_for_timeout(800)
+            _confirm_if_needed(page, prefer_delete=True)
+            _dismiss_delete_survey_if_needed(page)
+        # Wait for FB to drop the card before reloading (avoids false "still sees").
+        _wait_title_needles_hidden(
+            page, needles, timeout_ms=6_000, require_year=require_year
+        )
+    else:
+        page.wait_for_timeout(1_800)
 
     # Confirm removal: titled card must vanish from the selling shelf.
     try:
         page.goto(SELLING_URL, wait_until="domcontentloaded", timeout=90_000)
-        page.wait_for_timeout(2_000)
+        page.wait_for_timeout(2_500)
     except Exception:
         pass
     if not _title_still_on_selling_shelf(
@@ -1907,6 +1918,23 @@ def remove_from_selling_by_title(
             flush=True,
         )
         return True
+    # Last-chance: confirm modal may still be open after reload race.
+    if action == "delete":
+        _confirm_if_needed(page, prefer_delete=True)
+        _dismiss_delete_survey_if_needed(page)
+        page.wait_for_timeout(2_000)
+        if not _title_still_on_selling_shelf(
+            page,
+            needles,
+            max_scrolls=min(max_scrolls, 8),
+            require_year=require_year,
+        ):
+            print(
+                f"  shelf title delete verified after modal retry "
+                f"(needles={needles[:2]!r})",
+                flush=True,
+            )
+            return True
     print(
         f"  shelf title action={action} clicked; post-check still sees title "
         f"(treating as unconfirmed)",
@@ -3217,10 +3245,52 @@ def _dismiss_delete_survey_if_needed(page: Page, *, timeout_ms: int = 2_500) -> 
     return clicked
 
 
-def _confirm_if_needed(page: Page, *, prefer_delete: bool = False) -> None:
+def _wait_title_needles_hidden(
+    page: Page,
+    needles: list[str],
+    *,
+    timeout_ms: int = 6_000,
+    require_year: bool = False,
+) -> bool:
+    """Best-effort wait until a matched shelf title node is gone (DOM settle)."""
+    from time import monotonic
+
+    deadline = monotonic() + max(1.0, timeout_ms / 1000.0)
+    norms = [
+        re.sub(r"\s+", " ", (n or "").strip())
+        for n in needles
+        if n and len(str(n).strip()) >= 4
+    ]
+    if not norms:
+        page.wait_for_timeout(min(timeout_ms, 2_000))
+        return True
+    # Prefer waiting on the longest (most specific) needle.
+    norms.sort(key=len, reverse=True)
+    needle = norms[0]
+    try:
+        loc = page.get_by_text(re.compile(re.escape(needle), re.I)).first
+        loc.wait_for(state="hidden", timeout=timeout_ms)
+        return True
+    except Exception:
+        pass
+    while monotonic() < deadline:
+        if not _title_still_on_selling_shelf(
+            page, needles, max_scrolls=2, require_year=require_year
+        ):
+            return True
+        try:
+            page.wait_for_timeout(400)
+        except Exception:
+            break
+    return False
+
+
+def _confirm_if_needed(page: Page, *, prefer_delete: bool = False) -> bool:
     """Click EN/ES confirmation modal (Delete / Eliminar / Confirm / Confirmar).
 
-    After confirm, dismisses the post-deletion survey if Facebook shows it.
+    Waits for the secondary dialog after ``Delete listing`` / ``Eliminar
+    publicación``, clicks the confirm button, then waits for the dialog to
+    hide. Returns True when a confirm click was performed.
     """
     patterns = (
         [
@@ -3246,8 +3316,35 @@ def _confirm_if_needed(page: Page, *, prefer_delete: bool = False) -> None:
             re.compile(r"yes|sí|ok|aceptar", re.I),
         ]
     )
+    dialog_sel = '[role="dialog"], [role="alertdialog"]'
+    # Attention cards: modal often appears 300–1500ms after menu Delete.
+    try:
+        page.locator(dialog_sel).first.wait_for(state="visible", timeout=3_500)
+    except Exception:
+        page.wait_for_timeout(600)
+
     confirmed = False
     for pattern in patterns:
+        # Dialog-scoped first — avoids re-clicking the menu Delete item.
+        try:
+            dlg = page.locator(dialog_sel)
+            if dlg.count() > 0:
+                scoped = dlg.last.get_by_role("button", name=pattern)
+                if scoped.count() and scoped.first.is_visible():
+                    try:
+                        scoped.first.scroll_into_view_if_needed(timeout=2_000)
+                    except Exception:
+                        pass
+                    scoped.first.click(timeout=5_000, force=True)
+                    confirmed = True
+                    break
+                scoped_alt = dlg.last.locator('[role="button"]').filter(has_text=pattern)
+                if scoped_alt.count() and scoped_alt.first.is_visible():
+                    scoped_alt.first.click(timeout=5_000, force=True)
+                    confirmed = True
+                    break
+        except Exception:
+            pass
         try:
             button = page.get_by_role("button", name=pattern)
             if button.count() and button.first.is_visible():
@@ -3256,7 +3353,6 @@ def _confirm_if_needed(page: Page, *, prefer_delete: bool = False) -> None:
                 except Exception:
                     pass
                 button.first.click(timeout=5_000, force=True)
-                page.wait_for_timeout(1_200)
                 confirmed = True
                 break
         except Exception:
@@ -3271,29 +3367,24 @@ def _confirm_if_needed(page: Page, *, prefer_delete: bool = False) -> None:
                 except Exception:
                     pass
                 alt.first.click(timeout=5_000, force=True)
-                page.wait_for_timeout(1_200)
                 confirmed = True
                 break
         except Exception:
             pass
         if confirmed:
             break
-        # Dialog / aria-label fallbacks (EN + ES).
+
+    if confirmed:
+        # Wait for modal to dismiss before any post-check reload.
         try:
-            dlg = page.locator('[role="dialog"], [role="alertdialog"]')
-            scoped = dlg.get_by_role("button", name=pattern)
-            if scoped.count() and scoped.first.is_visible():
-                try:
-                    scoped.first.scroll_into_view_if_needed(timeout=2_000)
-                except Exception:
-                    pass
-                scoped.first.click(timeout=5_000, force=True)
-                page.wait_for_timeout(1_200)
-                confirmed = True
-                break
+            page.locator(dialog_sel).first.wait_for(state="hidden", timeout=5_000)
         except Exception:
-            continue
+            page.wait_for_timeout(1_500)
+        page.wait_for_timeout(800)
+    else:
+        page.wait_for_timeout(400)
 
     # Always attempt survey dismiss after a delete confirm (or if already open).
     if prefer_delete or confirmed:
         _dismiss_delete_survey_if_needed(page)
+    return confirmed
