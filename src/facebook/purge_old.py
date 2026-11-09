@@ -2276,11 +2276,12 @@ def _click_card_direct_delete(page: Page, card, *, timeout_ms: int = 6_000) -> b
     return False
 
 
-def _click_card_scoped_more(page: Page, card, *, timeout_ms: int = 6_000) -> bool:
-    """Click any interactive action / menu control **inside** ``card`` (not header).
+def _click_card_action_bar_more(page: Page, card, *, timeout_ms: int = 6_000) -> bool:
+    """Click the horizontal ⋯ on the card action bar (next to Share / Compartir).
 
-    Attention/duplicate cards often omit the classic ``Más opciones`` ⋯ aria;
-    fall back to ``aria-haspopup``, svg/icon buttons, and secondary actions.
+    Needs-attention cards put Share + ⋯ in a bottom button group. Prefer:
+      • ``[aria-label*="More"]`` / ``[aria-label*="Más"]`` inside that bar
+      • small icon button containing an SVG, to the right of Share/Compartir
     """
     if card is None:
         return False
@@ -2290,25 +2291,200 @@ def _click_card_scoped_more(page: Page, card, *, timeout_ms: int = 6_000) -> boo
     except Exception:
         pass
 
-    # Prefer aria labels that include the vehicle title ("Más opciones para …").
+    # 1) Explicit More/Más aria inside the card (action-bar ⋯).
+    more_selectors = (
+        '[aria-label*="More options" i]',
+        '[aria-label*="Más opciones" i]',
+        '[aria-label*="See more" i]',
+        '[aria-label*="Ver más" i]',
+        '[aria-label^="More" i]',
+        '[aria-label^="Más" i]',
+        '[aria-label*="More" i]',
+        '[aria-label*="Más" i]',
+        '[aria-haspopup="menu"]',
+    )
+    for sel in more_selectors:
+        try:
+            loc = card.locator(sel)
+            n = loc.count()
+        except Exception:
+            continue
+        if not isinstance(n, int) or n <= 0:
+            continue
+        # Prefer the rightmost match (⋯ sits right of Share).
+        for i in range(min(n, 8) - 1, -1, -1):
+            btn = loc.nth(i)
+            try:
+                if not btn.is_visible():
+                    continue
+                label = _card_control_label(btn)
+                if any(x in label for x in _CARD_ACTION_SKIP):
+                    continue
+                if label and (
+                    _MENU_DELETE_LABEL.search(label)
+                    or _ATTENTION_DELETE_CTA.search(label)
+                ):
+                    continue
+                # Skip huge "Más información" style links.
+                if "inform" in label or "information" in label or "about" in label:
+                    continue
+                if _force_click(btn, timeout=timeout_ms):
+                    print(
+                        f"  Requieren atención: opened action-bar ⋯ "
+                        f"sel={sel!r} aria={label[:60]!r}",
+                        flush=True,
+                    )
+                    return True
+            except Exception as exc:
+                print(
+                    f"  Requieren atención: action-bar ⋯ fail sel={sel!r}: {exc}",
+                    flush=True,
+                )
+                continue
+
+    # 2) JS: find Share/Compartir in the bottom action bar, click ⋯ to its right.
+    try:
+        clicked = card.evaluate(
+            """(el) => {
+              const SKIP = /boost|promote|account|cuenta|messenger|notification|message|mensaje|like|comment|follow|seguir/i;
+              const SHARE = /^(share|compartir)$|\\bshare\\b|\\bcompartir\\b/i;
+              const MORE = /more options|m[aá]s opciones|see more|ver m[aá]s|^more$|^m[aá]s$|options|opciones|acciones|actions/i;
+              const controls = Array.from(
+                el.querySelectorAll(
+                  'button, [role="button"], [aria-haspopup="menu"], div[tabindex="0"], span[role="button"], a[role="button"]'
+                )
+              ).filter((n) => {
+                const r = n.getBoundingClientRect();
+                return r.width >= 6 && r.height >= 6 && r.width <= 160 && r.height <= 80;
+              });
+              if (!controls.length) return '';
+
+              const labelOf = (n) => (
+                (n.getAttribute('aria-label') || '') + ' ' +
+                (n.getAttribute('title') || '') + ' ' +
+                (n.innerText || '')
+              ).replace(/\\s+/g, ' ').trim();
+
+              // Bottom-most action row: controls near the card bottom.
+              const cardBox = el.getBoundingClientRect();
+              const bottomBand = controls.filter((n) => {
+                const r = n.getBoundingClientRect();
+                return r.top >= cardBox.top + cardBox.height * 0.45;
+              });
+              const pool = bottomBand.length ? bottomBand : controls;
+
+              // Prefer a More/Más control in that band.
+              const moreHits = pool.filter((n) => {
+                const lab = labelOf(n);
+                if (SKIP.test(lab) || SHARE.test(lab)) return false;
+                if (MORE.test(lab)) return true;
+                // Icon-only ⋯: tiny square with SVG, empty/short text.
+                const hasSvg = !!n.querySelector('svg');
+                const r = n.getBoundingClientRect();
+                return hasSvg && r.width <= 56 && r.height <= 56 && lab.length < 24;
+              });
+              moreHits.sort((a, b) =>
+                b.getBoundingClientRect().right - a.getBoundingClientRect().right
+              );
+              let target = moreHits[0] || null;
+
+              // Else: control immediately to the right of Share/Compartir.
+              if (!target) {
+                const share = pool.find((n) => SHARE.test(labelOf(n)));
+                if (share) {
+                  const sr = share.getBoundingClientRect();
+                  const rightOf = pool
+                    .filter((n) => {
+                      if (n === share) return false;
+                      const lab = labelOf(n);
+                      if (SKIP.test(lab) || SHARE.test(lab)) return false;
+                      const r = n.getBoundingClientRect();
+                      return r.left >= sr.right - 8
+                        && Math.abs(r.top - sr.top) < 40;
+                    })
+                    .sort((a, b) =>
+                      a.getBoundingClientRect().left - b.getBoundingClientRect().left
+                    );
+                  target = rightOf[0] || null;
+                }
+              }
+
+              // Last: rightmost small icon in the bottom band.
+              if (!target) {
+                const icons = pool
+                  .filter((n) => {
+                    const lab = labelOf(n);
+                    if (SKIP.test(lab) || SHARE.test(lab)) return false;
+                    const r = n.getBoundingClientRect();
+                    return r.width <= 56 && r.height <= 56;
+                  })
+                  .sort((a, b) =>
+                    b.getBoundingClientRect().right - a.getBoundingClientRect().right
+                  );
+                target = icons[0] || null;
+              }
+
+              if (!target) return '';
+              target.click();
+              return (labelOf(target) || '⋯').slice(0, 60);
+            }"""
+        )
+        if clicked:
+            print(
+                f"  Requieren atención: opened action-bar ⋯ via JS "
+                f"label={clicked!r}",
+                flush=True,
+            )
+            return True
+    except Exception as exc:
+        print(
+            f"  Requieren atención: action-bar ⋯ JS miss: {exc}",
+            flush=True,
+        )
+
+    print(
+        "  Requieren atención: no action-bar ⋯ (next to Share/Compartir)",
+        flush=True,
+    )
+    return False
+
+
+def _wait_dropdown_then_click_delete(page: Page, *, timeout_ms: int = 5_000) -> bool:
+    """After ⋯ click: wait for dropdown, then Delete listing / Eliminar publicación."""
+    # Wait for menu portal / menuitem to appear.
+    try:
+        page.locator(
+            '[role="menu"], [role="menuitem"], [role="dialog"]'
+        ).first.wait_for(state="visible", timeout=timeout_ms)
+    except Exception:
+        page.wait_for_timeout(800)
+    if _click_menu_delete_bilingual(page):
+        return True
+    if _click_delete_text_direct(page):
+        _wait_confirm_delete_modal(page)
+        return True
+    return False
+
+
+def _click_card_scoped_more(page: Page, card, *, timeout_ms: int = 6_000) -> bool:
+    """Click the Needs-attention card action-bar ⋯ (next to Share), else fallbacks."""
+    if card is None:
+        return False
+    if _click_card_action_bar_more(page, card, timeout_ms=timeout_ms):
+        return True
+
+    # Legacy fallbacks: title-scoped Más opciones / haspopup elsewhere on card.
+    try:
+        card.scroll_into_view_if_needed(timeout=min(timeout_ms, 4_000))
+        card.hover(timeout=timeout_ms)
+    except Exception:
+        pass
     selectors = (
         '[aria-label*="Más opciones para" i]',
         '[aria-label*="More options for" i]',
-        '[aria-label*="Más opciones" i]',
-        '[aria-label*="More options" i]',
-        '[aria-label*="See more options" i]',
-        '[aria-label*="Ver más opciones" i]',
         '[aria-label*="Administrar" i]',
         '[aria-label*="Manage" i]',
-        '[aria-label*="Actions" i]',
-        '[aria-label*="acciones" i]',
         '[aria-haspopup="menu"]',
-        '[aria-expanded][aria-haspopup]',
-        '[aria-label*="Opciones" i]',
-        '[aria-label*="Options" i]',
-        'div[role="button"][tabindex="0"]',
-        'span[role="button"]',
-        'button[type="button"]',
     )
     for sel in selectors:
         try:
@@ -2318,7 +2494,7 @@ def _click_card_scoped_more(page: Page, card, *, timeout_ms: int = 6_000) -> boo
             continue
         if not isinstance(n, int) or n <= 0:
             continue
-        for i in range(min(n, 12)):
+        for i in range(min(n, 8)):
             btn = loc.nth(i)
             try:
                 if not btn.is_visible():
@@ -2326,7 +2502,6 @@ def _click_card_scoped_more(page: Page, card, *, timeout_ms: int = 6_000) -> boo
                 label = _card_control_label(btn)
                 if any(x in label for x in _CARD_ACTION_SKIP):
                     continue
-                # Skip primary CTAs that are not menus (keep those for direct delete).
                 if label and (
                     _MENU_DELETE_LABEL.search(label)
                     or _ATTENTION_DELETE_CTA.search(label)
@@ -2334,68 +2509,13 @@ def _click_card_scoped_more(page: Page, card, *, timeout_ms: int = 6_000) -> boo
                     continue
                 if _force_click(btn, timeout=timeout_ms):
                     print(
-                        f"  Requieren atención: opened card action "
+                        f"  Requieren atención: opened card menu fallback "
                         f"sel={sel!r} aria={label[:60]!r}",
                         flush=True,
                     )
                     return True
-            except Exception as exc:
-                print(
-                    f"  Requieren atención: card action click fail "
-                    f"sel={sel!r}: {exc}",
-                    flush=True,
-                )
+            except Exception:
                 continue
-
-    # JS fallback: click the rightmost small clickable in the card (⋯ stand-in).
-    try:
-        clicked = card.evaluate(
-            """(el) => {
-              const SKIP = /boost|promote|share|compartir|account|cuenta|messenger|notification|message|mensaje|like|comment|follow|seguir/i;
-              const MORE = /m[aá]s opciones|more options|see more|ver m[aá]s|administrar|manage|acciones|actions|opciones|options/i;
-              const nodes = Array.from(
-                el.querySelectorAll(
-                  'button, [role="button"], [aria-haspopup="menu"], div[tabindex="0"], span[role="button"]'
-                )
-              ).filter((n) => {
-                const r = n.getBoundingClientRect();
-                if (r.width < 8 || r.height < 8 || r.width > 120 || r.height > 80)
-                  return false;
-                const label = (
-                  (n.getAttribute('aria-label') || '') + ' ' +
-                  (n.getAttribute('title') || '') + ' ' +
-                  (n.innerText || '')
-                ).trim();
-                if (SKIP.test(label)) return false;
-                return true;
-              });
-              // Prefer explicit more/options labels, else rightmost small control.
-              nodes.sort((a, b) => {
-                const la = (a.getAttribute('aria-label') || '') + (a.innerText || '');
-                const lb = (b.getAttribute('aria-label') || '') + (b.innerText || '');
-                const sa = MORE.test(la) ? 0 : 1;
-                const sb = MORE.test(lb) ? 0 : 1;
-                if (sa !== sb) return sa - sb;
-                return b.getBoundingClientRect().right - a.getBoundingClientRect().right;
-              });
-              if (!nodes.length) return '';
-              const n = nodes[0];
-              n.click();
-              return (n.getAttribute('aria-label') || n.innerText || 'icon').slice(0, 60);
-            }"""
-        )
-        if clicked:
-            print(
-                f"  Requieren atención: opened card action via JS "
-                f"label={clicked!r}",
-                flush=True,
-            )
-            return True
-    except Exception as exc:
-        print(
-            f"  Requieren atención: card JS action miss: {exc}",
-            flush=True,
-        )
 
     print(
         "  Requieren atención: no interactive action/menu inside card wrapper",
@@ -3010,45 +3130,45 @@ def force_delete_requieren_atencion_card(
                 flush=True,
             )
 
-        # 2) Flexible card action/menu icon → Delete listing / Eliminar.
+        # 2) Action-bar ⋯ (next to Share/Compartir) → wait dropdown → Delete.
         menu_opened = False
         try:
-            menu_opened = _click_card_scoped_more(page, card, timeout_ms=ms)
+            menu_opened = _click_card_action_bar_more(
+                page, card, timeout_ms=ms
+            ) or _click_card_scoped_more(page, card, timeout_ms=ms)
         except Exception as exc:
             print(
-                f"  Requieren atención: action/menu open error title={title!r}: {exc}",
+                f"  Requieren atención: action-bar ⋯ open error title={title!r}: {exc}",
                 flush=True,
             )
         if menu_opened:
-            _dom_settle(page, lo_ms=700, hi_ms=1_200)
-            # Menu portal often renders outside the card — search page-level text.
-            deleted = _click_menu_delete_bilingual(page)
-            if not deleted and _click_delete_text_direct(page):
-                _wait_confirm_delete_modal(page)
-                deleted = True
-            if deleted and _verified_gone("card action + Delete text"):
-                return True
+            _dom_settle(page, lo_ms=500, hi_ms=900)
+            deleted = _wait_dropdown_then_click_delete(page, timeout_ms=5_000)
+            if deleted:
+                # Explicit confirmation wait: card must leave the DOM.
+                page.wait_for_timeout(1_200)
+                if _verified_gone("action-bar ⋯ → Delete listing"):
+                    return True
             print(
                 f"  Requieren atención: Delete/Eliminar not clicked "
-                f"after card action title={title!r}",
+                f"after action-bar ⋯ title={title!r}",
                 flush=True,
             )
             try:
                 page.keyboard.press("Escape")
             except Exception:
                 pass
-            # Menu/dropdown miss → URL or banner immediately.
             if _click_attention_banner_text(page, scope=card) or _click_attention_banner_text(
                 page
             ):
                 _wait_confirm_delete_modal(page)
                 if _verified_gone("banner after menu miss"):
                     return True
-            if _try_url_fallback("menu Delete miss after card action"):
+            if _try_url_fallback("menu Delete miss after action-bar ⋯"):
                 return True
         else:
             print(
-                f"  Requieren atención: no card action control title={title!r} "
+                f"  Requieren atención: no action-bar ⋯ title={title!r} "
                 f"— trying banner/URL",
                 flush=True,
             )
@@ -3056,9 +3176,9 @@ def force_delete_requieren_atencion_card(
                 page
             ):
                 _wait_confirm_delete_modal(page)
-                if _verified_gone("banner after no action control"):
+                if _verified_gone("banner after no action-bar ⋯"):
                     return True
-            if _try_url_fallback("no interactive action inside card"):
+            if _try_url_fallback("no action-bar ⋯ inside card"):
                 return True
 
     # 3) Direct page-level banner text (still better than global header ⋯).

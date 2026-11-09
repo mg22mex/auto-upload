@@ -938,7 +938,7 @@ class TestRequierenAtencion(unittest.TestCase):
         self.assertEqual(force.call_args.args[1], "2019 Porsche Cayenne")
         self.assertEqual(force.call_args.kwargs.get("item_id"), "555")
 
-    def test_force_delete_uses_card_scoped_more_then_delete_text(self):
+    def test_force_delete_uses_action_bar_more_then_delete_text(self):
         from src.facebook.purge_old import force_delete_requieren_atencion_card
 
         page = MagicMock()
@@ -962,11 +962,14 @@ class TestRequierenAtencion(unittest.TestCase):
                 return_value=False,
             ),
             patch(
-                "src.facebook.purge_old._click_card_scoped_more",
+                "src.facebook.purge_old._click_card_action_bar_more",
                 return_value=True,
             ) as more,
             patch(
-                "src.facebook.purge_old._click_menu_delete_bilingual",
+                "src.facebook.purge_old._click_card_scoped_more",
+            ) as scoped,
+            patch(
+                "src.facebook.purge_old._wait_dropdown_then_click_delete",
                 return_value=True,
             ) as menu_del,
             patch(
@@ -986,7 +989,33 @@ class TestRequierenAtencion(unittest.TestCase):
             )
         self.assertTrue(ok)
         more.assert_called_once()
+        scoped.assert_not_called()
         menu_del.assert_called_once()
+
+    def test_click_card_action_bar_more_prefers_more_aria(self):
+        from src.facebook.purge_old import _click_card_action_bar_more
+
+        page = MagicMock()
+        card = MagicMock()
+        btn = MagicMock()
+        btn.is_visible.return_value = True
+        btn.get_attribute.side_effect = lambda name: (
+            "More options" if name == "aria-label" else ""
+        )
+        btn.inner_text.return_value = ""
+        loc = MagicMock()
+        loc.count.return_value = 1
+        loc.nth.return_value = btn
+        card.locator.return_value = loc
+        with patch("src.facebook.purge_old._force_click", return_value=True) as click:
+            ok = _click_card_action_bar_more(page, card)
+        self.assertTrue(ok)
+        click.assert_called()
+        # First preferred selector should include More options.
+        self.assertTrue(
+            any("More options" in str(c) for c in card.locator.call_args_list)
+            or card.locator.called
+        )
 
     def test_force_delete_direct_delete_without_menu(self):
         from src.facebook.purge_old import force_delete_requieren_atencion_card
@@ -1051,6 +1080,10 @@ class TestRequierenAtencion(unittest.TestCase):
                 return_value=False,
             ),
             patch(
+                "src.facebook.purge_old._click_card_action_bar_more",
+                return_value=False,
+            ),
+            patch(
                 "src.facebook.purge_old._click_card_scoped_more",
                 return_value=False,
             ),
@@ -1108,15 +1141,15 @@ class TestRequierenAtencion(unittest.TestCase):
                 return_value=False,
             ),
             patch(
-                "src.facebook.purge_old._click_card_scoped_more",
+                "src.facebook.purge_old._click_card_action_bar_more",
                 return_value=True,
             ),
             patch(
-                "src.facebook.purge_old._click_menu_delete_bilingual",
+                "src.facebook.purge_old._click_card_scoped_more",
                 return_value=False,
             ),
             patch(
-                "src.facebook.purge_old._click_delete_text_direct",
+                "src.facebook.purge_old._wait_dropdown_then_click_delete",
                 return_value=False,
             ),
             patch(
