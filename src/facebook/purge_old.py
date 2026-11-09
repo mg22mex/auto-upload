@@ -1897,28 +1897,143 @@ def _click_by_bilingual_label(page: Page, pattern: re.Pattern[str], *, scope=Non
     return False
 
 
-def _wait_confirm_delete_modal(page: Page, *, timeout_ms: int = 5_000) -> bool:
-    """Wait for secondary Delete/Eliminar modal, click it, wait until hidden."""
+_CONFIRM_DIALOG_SEL = '[role="dialog"], [role="alertdialog"]'
+# Primary button on the "Delete listing?" / "¿Eliminar publicación?" modal.
+_CONFIRM_PRIMARY_LITERALS = (
+    "Delete",
+    "Eliminar",
+    "Delete listing",
+    "Eliminar publicación",
+    "Confirm",
+    "Confirmar",
+)
+
+
+def _attention_delete_dialog_visible(page: Page) -> bool:
+    """True when a Marketplace confirm dialog is currently on screen."""
+    try:
+        dlg = page.locator(_CONFIRM_DIALOG_SEL)
+        n = dlg.count()
+        if not isinstance(n, int) or n <= 0:
+            return False
+        return bool(dlg.last.is_visible())
+    except Exception:
+        return False
+
+
+def _click_delete_confirm_in_dialog(page: Page) -> bool:
+    """Click the primary Delete / Eliminar button inside the confirm dialog."""
+    try:
+        dlg = page.locator(_CONFIRM_DIALOG_SEL).last
+        if not dlg.is_visible():
+            return False
+    except Exception:
+        return False
+
+    # Exact primary labels first (FB modal button is usually just Delete/Eliminar).
+    for label in _CONFIRM_PRIMARY_LITERALS:
+        for exact in (True, False):
+            try:
+                btn = dlg.get_by_role("button", name=label, exact=exact)
+                if btn.count() > 0 and btn.first.is_visible():
+                    if _force_click(btn.first, timeout=5_000):
+                        print(
+                            f"  Requieren atención: confirm modal → {label!r}",
+                            flush=True,
+                        )
+                        return True
+            except Exception:
+                pass
+            try:
+                btn = dlg.get_by_text(label, exact=exact)
+                if btn.count() > 0 and btn.first.is_visible():
+                    if _force_click(btn.first, timeout=5_000):
+                        print(
+                            f"  Requieren atención: confirm modal text → {label!r}",
+                            flush=True,
+                        )
+                        return True
+            except Exception:
+                pass
+            try:
+                btn = dlg.locator('[role="button"]').filter(
+                    has_text=re.compile(rf"^\s*{re.escape(label)}\s*$", re.I)
+                )
+                if btn.count() > 0 and btn.first.is_visible():
+                    if _force_click(btn.first, timeout=5_000):
+                        print(
+                            f"  Requieren atención: confirm modal role → {label!r}",
+                            flush=True,
+                        )
+                        return True
+            except Exception:
+                pass
+
     from src.facebook.remover import _confirm_if_needed
 
-    dialog_sel = '[role="dialog"], [role="alertdialog"]'
+    return bool(_confirm_if_needed(page, prefer_delete=True))
+
+
+def _wait_confirm_delete_modal(page: Page, *, timeout_ms: int = 5_000) -> bool:
+    """After a Delete action: confirm ``Delete listing?`` modal, wait until gone.
+
+    Returns True when the dialog is clear (confirmed or never appeared).
+    Returns False when a dialog remains visible — callers must NOT run
+    count verification / selling reload yet (goto would cancel the delete).
+    """
+    wait_ms = max(1_500, int(timeout_ms))
     try:
-        page.locator(dialog_sel).first.wait_for(
-            state="visible", timeout=max(1_500, timeout_ms)
+        page.locator(_CONFIRM_DIALOG_SEL).first.wait_for(
+            state="visible", timeout=wait_ms
         )
     except Exception:
-        page.wait_for_timeout(500)
-    confirmed = bool(_confirm_if_needed(page, prefer_delete=True))
-    # Second attempt — attention confirm can lag the first click.
-    if not confirmed:
-        page.wait_for_timeout(700)
-        confirmed = bool(_confirm_if_needed(page, prefer_delete=True))
+        try:
+            page.wait_for_timeout(500)
+        except Exception:
+            pass
+    # Re-check with a real visibility probe — wait_for alone can no-op on mocks.
+    appeared = _attention_delete_dialog_visible(page)
+
+    if not appeared:
+        # Already dismissed by a prior confirm, or UI skipped the modal.
+        return True
+
+    print(
+        "  Requieren atención: confirm dialog visible — clicking Delete/Eliminar",
+        flush=True,
+    )
+    clicked = _click_delete_confirm_in_dialog(page)
+    if not clicked:
+        try:
+            page.wait_for_timeout(800)
+        except Exception:
+            pass
+        clicked = _click_delete_confirm_in_dialog(page)
+
     try:
-        page.locator(dialog_sel).first.wait_for(state="hidden", timeout=5_000)
+        page.locator(_CONFIRM_DIALOG_SEL).first.wait_for(
+            state="hidden", timeout=5_000
+        )
     except Exception:
-        page.wait_for_timeout(1_500)
+        try:
+            page.wait_for_timeout(1_500)
+        except Exception:
+            pass
+
+    if _attention_delete_dialog_visible(page):
+        print(
+            "  Requieren atención: confirm dialog still open after Delete/Eliminar",
+            flush=True,
+        )
+        return False
+
+    if clicked:
+        print(
+            "  Requieren atención: confirm dialog dismissed",
+            flush=True,
+        )
     _dom_settle(page, lo_ms=1_200, hi_ms=2_000)
-    return confirmed
+    return True
 
 
 def _attention_title_still_visible(page: Page, title: str) -> bool:
@@ -3127,13 +3242,26 @@ def force_delete_requieren_atencion_card(
         return _count_attention_title_cards(page, title)
 
     def _verified_one_removed(how: str) -> bool:
-        """Success when card count for this title drops by ≥1 (not full vanish).
+        """Confirm ``Delete listing?`` modal first, then require count drop ≥1.
 
-        Two identical ``2022 Toyota Corolla XLE`` cards: deleting one leaves the
-        title text in the DOM — that must still count as a confirmed delete.
+        Never reload / count-check while the confirm dialog is still open —
+        that cancels the delete. Identical duplicate titles only need
+        ``count_after <= count_before - 1`` (title text may remain).
         """
         nonlocal count_before
-        page.wait_for_timeout(800)
+        # 1) Modal confirm — required before any count evaluation.
+        if not _wait_confirm_delete_modal(page, timeout_ms=6_000):
+            print(
+                f"  Requieren atención: {how} — confirm modal not cleared "
+                f"title={title!r}; skip count check",
+                flush=True,
+            )
+            return False
+        # 2) Count drop only after dialog is gone.
+        try:
+            page.wait_for_timeout(600)
+        except Exception:
+            pass
         after = _wait_attention_title_count_drop(
             page, title, count_before=count_before, timeout_ms=6_000
         )
@@ -3147,12 +3275,12 @@ def force_delete_requieren_atencion_card(
         if after <= max(0, count_before - 1):
             print(
                 f"  Requieren atención: deleted via {how} title={title!r} "
-                f"count {count_before}→{after}",
+                f"count {count_before}→{after} (after confirm modal)",
                 flush=True,
             )
             return True
         print(
-            f"  Requieren atención: {how} clicked but count unchanged "
+            f"  Requieren atención: {how} confirmed but count unchanged "
             f"title={title!r} count={after} (was {count_before}) "
             f"— trying next strategy",
             flush=True,

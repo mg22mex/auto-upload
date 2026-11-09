@@ -1137,13 +1137,17 @@ class TestRequierenAtencion(unittest.TestCase):
                 return_value=True,
             ),
             patch(
+                "src.facebook.purge_old._wait_confirm_delete_modal",
+                return_value=True,
+            ) as confirm,
+            patch(
                 "src.facebook.purge_old._count_attention_title_cards",
                 side_effect=[2, 1],
             ),
             patch(
                 "src.facebook.purge_old._wait_attention_title_count_drop",
                 return_value=1,
-            ),
+            ) as drop,
             patch(
                 "src.facebook.purge_old._attention_title_still_visible",
                 return_value=True,
@@ -1153,6 +1157,136 @@ class TestRequierenAtencion(unittest.TestCase):
                 page, "2022 Toyota Corolla XLE"
             )
         self.assertTrue(ok)
+        confirm.assert_called()
+        drop.assert_called()
+
+    def test_force_delete_confirms_modal_before_count_check(self):
+        """Delete listing? must be confirmed before count_after is evaluated."""
+        from src.facebook.purge_old import force_delete_requieren_atencion_card
+
+        page = MagicMock()
+        card = MagicMock()
+        order: list[str] = []
+
+        def _confirm(*_a, **_k):
+            order.append("confirm")
+            return True
+
+        def _drop(*_a, **_k):
+            order.append("count")
+            return 1
+
+        with (
+            patch("src.facebook.purge_old.hydrate_selling_shelf_scrolls"),
+            patch(
+                "src.facebook.purge_old._locate_attention_card_root",
+                return_value=card,
+            ),
+            patch(
+                "src.facebook.purge_old._href_from_attention_card",
+                return_value=("", ""),
+            ),
+            patch(
+                "src.facebook.purge_old._click_card_direct_delete",
+                return_value=True,
+            ),
+            patch(
+                "src.facebook.purge_old._wait_confirm_delete_modal",
+                side_effect=_confirm,
+            ),
+            patch(
+                "src.facebook.purge_old._count_attention_title_cards",
+                side_effect=[2, 1, 1],
+            ),
+            patch(
+                "src.facebook.purge_old._wait_attention_title_count_drop",
+                side_effect=_drop,
+            ),
+        ):
+            ok = force_delete_requieren_atencion_card(
+                page, "2022 Toyota Corolla XLE"
+            )
+        self.assertTrue(ok)
+        self.assertEqual(order[:2], ["confirm", "count"])
+
+    def test_force_delete_skips_count_when_confirm_modal_stuck(self):
+        """Stuck Delete listing? dialog → no success / no count-based OK."""
+        from src.facebook.purge_old import force_delete_requieren_atencion_card
+
+        page = MagicMock()
+        card = MagicMock()
+        with (
+            patch("src.facebook.purge_old.hydrate_selling_shelf_scrolls"),
+            patch(
+                "src.facebook.purge_old._locate_attention_card_root",
+                return_value=card,
+            ),
+            patch(
+                "src.facebook.purge_old._href_from_attention_card",
+                return_value=("", ""),
+            ),
+            patch(
+                "src.facebook.purge_old._click_card_direct_delete",
+                return_value=True,
+            ),
+            patch(
+                "src.facebook.purge_old._click_attention_delete_cta",
+                return_value=False,
+            ),
+            patch(
+                "src.facebook.purge_old._click_card_action_bar_more",
+                return_value=False,
+            ),
+            patch(
+                "src.facebook.purge_old._click_card_scoped_more",
+                return_value=False,
+            ),
+            patch(
+                "src.facebook.purge_old._click_attention_banner_text",
+                return_value=False,
+            ),
+            patch(
+                "src.facebook.purge_old._delete_attention_via_item_url",
+                return_value=False,
+            ),
+            patch(
+                "src.facebook.purge_old.remove_from_selling_by_title",
+                return_value=False,
+            ),
+            patch(
+                "src.facebook.purge_old._wait_confirm_delete_modal",
+                return_value=False,
+            ),
+            patch(
+                "src.facebook.purge_old._count_attention_title_cards",
+                return_value=2,
+            ),
+            patch(
+                "src.facebook.purge_old._wait_attention_title_count_drop",
+            ) as drop,
+        ):
+            ok = force_delete_requieren_atencion_card(
+                page, "2022 Toyota Corolla XLE"
+            )
+        self.assertFalse(ok)
+        drop.assert_not_called()
+
+    def test_click_delete_confirm_in_dialog_clicks_primary_delete(self):
+        from src.facebook.purge_old import _click_delete_confirm_in_dialog
+
+        page = MagicMock()
+        dlg = MagicMock()
+        dlg.is_visible.return_value = True
+        btn = MagicMock()
+        btn.count.return_value = 1
+        btn.first.is_visible.return_value = True
+        dlg.get_by_role.return_value = btn
+        page.locator.return_value.last = dlg
+        with patch("src.facebook.purge_old._force_click", return_value=True) as click:
+            ok = _click_delete_confirm_in_dialog(page)
+        self.assertTrue(ok)
+        dlg.get_by_role.assert_any_call("button", name="Delete", exact=True)
+        click.assert_called()
 
     def test_force_delete_url_fallback_when_menu_delete_misses(self):
         from src.facebook.purge_old import force_delete_requieren_atencion_card
