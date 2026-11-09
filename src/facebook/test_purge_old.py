@@ -954,6 +954,10 @@ class TestRequierenAtencion(unittest.TestCase):
                 return_value=("", ""),
             ),
             patch(
+                "src.facebook.purge_old._click_card_direct_delete",
+                return_value=False,
+            ),
+            patch(
                 "src.facebook.purge_old._click_attention_delete_cta",
                 return_value=False,
             ),
@@ -984,6 +988,97 @@ class TestRequierenAtencion(unittest.TestCase):
         more.assert_called_once()
         menu_del.assert_called_once()
 
+    def test_force_delete_direct_delete_without_menu(self):
+        from src.facebook.purge_old import force_delete_requieren_atencion_card
+
+        page = MagicMock()
+        card = MagicMock()
+        with (
+            patch("src.facebook.purge_old.hydrate_selling_shelf_scrolls"),
+            patch(
+                "src.facebook.purge_old._locate_attention_card_root",
+                return_value=card,
+            ),
+            patch(
+                "src.facebook.purge_old._href_from_attention_card",
+                return_value=("", ""),
+            ),
+            patch(
+                "src.facebook.purge_old._click_card_direct_delete",
+                return_value=True,
+            ) as direct,
+            patch(
+                "src.facebook.purge_old._click_card_scoped_more",
+            ) as more,
+            patch(
+                "src.facebook.purge_old._wait_attention_title_gone",
+                return_value=True,
+            ),
+            patch(
+                "src.facebook.purge_old._attention_title_still_visible",
+                return_value=False,
+            ),
+        ):
+            ok = force_delete_requieren_atencion_card(
+                page,
+                "2022 Toyota Corolla XLE",
+            )
+        self.assertTrue(ok)
+        direct.assert_called_once()
+        more.assert_not_called()
+
+    def test_force_delete_banner_when_no_action_control(self):
+        from src.facebook.purge_old import force_delete_requieren_atencion_card
+
+        page = MagicMock()
+        card = MagicMock()
+        with (
+            patch("src.facebook.purge_old.hydrate_selling_shelf_scrolls"),
+            patch(
+                "src.facebook.purge_old._locate_attention_card_root",
+                return_value=card,
+            ),
+            patch(
+                "src.facebook.purge_old._href_from_attention_card",
+                return_value=("", ""),
+            ),
+            patch(
+                "src.facebook.purge_old._click_card_direct_delete",
+                return_value=False,
+            ),
+            patch(
+                "src.facebook.purge_old._click_attention_delete_cta",
+                return_value=False,
+            ),
+            patch(
+                "src.facebook.purge_old._click_card_scoped_more",
+                return_value=False,
+            ),
+            patch(
+                "src.facebook.purge_old._click_attention_banner_text",
+                return_value=True,
+            ) as banner,
+            patch(
+                "src.facebook.purge_old._wait_confirm_delete_modal",
+                return_value=True,
+            ),
+            patch(
+                "src.facebook.purge_old._wait_attention_title_gone",
+                return_value=True,
+            ),
+            patch(
+                "src.facebook.purge_old._attention_title_still_visible",
+                return_value=False,
+            ),
+            patch(
+                "src.facebook.purge_old._delete_attention_via_item_url",
+                return_value=False,
+            ),
+        ):
+            ok = force_delete_requieren_atencion_card(page, "2021 Audi Q5")
+        self.assertTrue(ok)
+        banner.assert_called()
+
     def test_force_delete_url_fallback_when_menu_delete_misses(self):
         from src.facebook.purge_old import force_delete_requieren_atencion_card
 
@@ -1005,6 +1100,10 @@ class TestRequierenAtencion(unittest.TestCase):
                 ),
             ),
             patch(
+                "src.facebook.purge_old._click_card_direct_delete",
+                return_value=False,
+            ),
+            patch(
                 "src.facebook.purge_old._click_attention_delete_cta",
                 return_value=False,
             ),
@@ -1014,6 +1113,14 @@ class TestRequierenAtencion(unittest.TestCase):
             ),
             patch(
                 "src.facebook.purge_old._click_menu_delete_bilingual",
+                return_value=False,
+            ),
+            patch(
+                "src.facebook.purge_old._click_delete_text_direct",
+                return_value=False,
+            ),
+            patch(
+                "src.facebook.purge_old._click_attention_banner_text",
                 return_value=False,
             ),
             patch(

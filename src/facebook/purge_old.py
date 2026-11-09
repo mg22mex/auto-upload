@@ -2173,8 +2173,46 @@ def _href_from_attention_card(card) -> tuple[str, str]:
     return "", ""
 
 
-def _click_card_scoped_more(page: Page, card, *, timeout_ms: int = 6_000) -> bool:
-    """Click the ⋯ / Más opciones control **inside** ``card`` only (not header)."""
+_CARD_ACTION_SKIP = (
+    "boost",
+    "promote",
+    "share",
+    "compartir",
+    "account",
+    "cuenta",
+    "messenger",
+    "notification",
+    "notificaci",
+    "message",
+    "mensaje",
+    "chat",
+    "like",
+    "me gusta",
+    "comment",
+    "comentario",
+    "follow",
+    "seguir",
+)
+
+
+def _card_control_label(btn) -> str:
+    try:
+        parts = [
+            btn.get_attribute("aria-label") or "",
+            btn.get_attribute("title") or "",
+            btn.inner_text(timeout=600) or "",
+        ]
+        return re.sub(r"\s+", " ", " ".join(parts)).strip().lower()
+    except Exception:
+        return ""
+
+
+def _click_card_direct_delete(page: Page, card, *, timeout_ms: int = 6_000) -> bool:
+    """Click Delete listing / Eliminar / banner CTA **inside the card** (no ⋯).
+
+    Duplicate / Needs-attention cards often expose the delete action as a plain
+    button or text link without a three-dots menu.
+    """
     if card is None:
         return False
     try:
@@ -2182,15 +2220,95 @@ def _click_card_scoped_more(page: Page, card, *, timeout_ms: int = 6_000) -> boo
         card.hover(timeout=timeout_ms)
     except Exception:
         pass
+    # 1) Banner / delete literals scoped to the card.
+    if _click_delete_text_direct(page, scope=card):
+        _dom_settle(page, lo_ms=600, hi_ms=1_000)
+        _wait_confirm_delete_modal(page)
+        return True
+    if _click_attention_banner_text(page, scope=card):
+        _dom_settle(page, lo_ms=600, hi_ms=1_000)
+        _wait_confirm_delete_modal(page)
+        return True
+    # 2) aria-label / role buttons that already say Delete / Eliminar.
+    for pattern in (_MENU_DELETE_LABEL, _ATTENTION_DELETE_CTA):
+        if _click_by_bilingual_label(page, pattern, scope=card):
+            _dom_settle(page, lo_ms=600, hi_ms=1_000)
+            _wait_confirm_delete_modal(page)
+            return True
+    # 3) Any visible button/link whose accessible name matches delete.
+    try:
+        buttons = card.locator(
+            'button, [role="button"], a, [role="link"], div[tabindex="0"]'
+        )
+        n = buttons.count()
+    except Exception:
+        n = 0
+    if isinstance(n, int) and n > 0:
+        for i in range(min(n, 20)):
+            btn = buttons.nth(i)
+            try:
+                if not btn.is_visible():
+                    continue
+                label = _card_control_label(btn)
+                if not label or len(label) > 80:
+                    continue
+                if any(x in label for x in _CARD_ACTION_SKIP):
+                    continue
+                if not (
+                    _MENU_DELETE_LABEL.search(label)
+                    or _ATTENTION_DELETE_CTA.search(label)
+                    or "delete" in label
+                    or "eliminar" in label
+                    or "borrar" in label
+                ):
+                    continue
+                if _force_click(btn, timeout=timeout_ms):
+                    print(
+                        f"  Requieren atención: direct card delete "
+                        f"label={label[:60]!r}",
+                        flush=True,
+                    )
+                    _dom_settle(page, lo_ms=600, hi_ms=1_000)
+                    _wait_confirm_delete_modal(page)
+                    return True
+            except Exception:
+                continue
+    return False
+
+
+def _click_card_scoped_more(page: Page, card, *, timeout_ms: int = 6_000) -> bool:
+    """Click any interactive action / menu control **inside** ``card`` (not header).
+
+    Attention/duplicate cards often omit the classic ``Más opciones`` ⋯ aria;
+    fall back to ``aria-haspopup``, svg/icon buttons, and secondary actions.
+    """
+    if card is None:
+        return False
+    try:
+        card.scroll_into_view_if_needed(timeout=min(timeout_ms, 4_000))
+        card.hover(timeout=timeout_ms)
+    except Exception:
+        pass
+
     # Prefer aria labels that include the vehicle title ("Más opciones para …").
     selectors = (
         '[aria-label*="Más opciones para" i]',
         '[aria-label*="More options for" i]',
         '[aria-label*="Más opciones" i]',
         '[aria-label*="More options" i]',
+        '[aria-label*="See more options" i]',
+        '[aria-label*="Ver más opciones" i]',
+        '[aria-label*="Administrar" i]',
+        '[aria-label*="Manage" i]',
+        '[aria-label*="Actions" i]',
+        '[aria-label*="acciones" i]',
         '[aria-haspopup="menu"]',
+        '[aria-expanded][aria-haspopup]',
         '[aria-label*="Opciones" i]',
         '[aria-label*="Options" i]',
+        'div[role="button"][tabindex="0"]',
+        'span[role="button"]',
+        'button[type="button"]',
     )
     for sel in selectors:
         try:
@@ -2200,42 +2318,89 @@ def _click_card_scoped_more(page: Page, card, *, timeout_ms: int = 6_000) -> boo
             continue
         if not isinstance(n, int) or n <= 0:
             continue
-        for i in range(min(n, 8)):
+        for i in range(min(n, 12)):
             btn = loc.nth(i)
             try:
                 if not btn.is_visible():
                     continue
-                label = (btn.get_attribute("aria-label") or "").lower()
-                # Skip boost/share and anything that looks like top-nav.
-                if any(
-                    x in label
-                    for x in (
-                        "boost",
-                        "promote",
-                        "share",
-                        "compartir",
-                        "account",
-                        "cuenta",
-                        "messenger",
-                        "notification",
-                        "notificaci",
-                    )
+                label = _card_control_label(btn)
+                if any(x in label for x in _CARD_ACTION_SKIP):
+                    continue
+                # Skip primary CTAs that are not menus (keep those for direct delete).
+                if label and (
+                    _MENU_DELETE_LABEL.search(label)
+                    or _ATTENTION_DELETE_CTA.search(label)
                 ):
                     continue
                 if _force_click(btn, timeout=timeout_ms):
                     print(
-                        f"  Requieren atención: opened card ⋯ "
-                        f"aria={label[:60]!r}",
+                        f"  Requieren atención: opened card action "
+                        f"sel={sel!r} aria={label[:60]!r}",
                         flush=True,
                     )
                     return True
             except Exception as exc:
                 print(
-                    f"  Requieren atención: card ⋯ click fail sel={sel!r}: {exc}",
+                    f"  Requieren atención: card action click fail "
+                    f"sel={sel!r}: {exc}",
                     flush=True,
                 )
                 continue
-    print("  Requieren atención: no ⋯ inside card wrapper", flush=True)
+
+    # JS fallback: click the rightmost small clickable in the card (⋯ stand-in).
+    try:
+        clicked = card.evaluate(
+            """(el) => {
+              const SKIP = /boost|promote|share|compartir|account|cuenta|messenger|notification|message|mensaje|like|comment|follow|seguir/i;
+              const MORE = /m[aá]s opciones|more options|see more|ver m[aá]s|administrar|manage|acciones|actions|opciones|options/i;
+              const nodes = Array.from(
+                el.querySelectorAll(
+                  'button, [role="button"], [aria-haspopup="menu"], div[tabindex="0"], span[role="button"]'
+                )
+              ).filter((n) => {
+                const r = n.getBoundingClientRect();
+                if (r.width < 8 || r.height < 8 || r.width > 120 || r.height > 80)
+                  return false;
+                const label = (
+                  (n.getAttribute('aria-label') || '') + ' ' +
+                  (n.getAttribute('title') || '') + ' ' +
+                  (n.innerText || '')
+                ).trim();
+                if (SKIP.test(label)) return false;
+                return true;
+              });
+              // Prefer explicit more/options labels, else rightmost small control.
+              nodes.sort((a, b) => {
+                const la = (a.getAttribute('aria-label') || '') + (a.innerText || '');
+                const lb = (b.getAttribute('aria-label') || '') + (b.innerText || '');
+                const sa = MORE.test(la) ? 0 : 1;
+                const sb = MORE.test(lb) ? 0 : 1;
+                if (sa !== sb) return sa - sb;
+                return b.getBoundingClientRect().right - a.getBoundingClientRect().right;
+              });
+              if (!nodes.length) return '';
+              const n = nodes[0];
+              n.click();
+              return (n.getAttribute('aria-label') || n.innerText || 'icon').slice(0, 60);
+            }"""
+        )
+        if clicked:
+            print(
+                f"  Requieren atención: opened card action via JS "
+                f"label={clicked!r}",
+                flush=True,
+            )
+            return True
+    except Exception as exc:
+        print(
+            f"  Requieren atención: card JS action miss: {exc}",
+            flush=True,
+        )
+
+    print(
+        "  Requieren atención: no interactive action/menu inside card wrapper",
+        flush=True,
+    )
     return False
 
 
@@ -2722,14 +2887,15 @@ def force_delete_requieren_atencion_card(
     item_id: str = "",
     href: str = "",
 ) -> bool:
-    """Force-delete one attention-block card: card-scoped ⋯ → Eliminar → confirm.
+    """Force-delete one attention-block card (duplicate / Needs attention).
 
     Strategy (account_1 EN + account_2 ES):
       1. Locate the card wrapper under ``Requieren atención`` for ``title``
-      2. Click red banner CTA text inside that card (``Elimínala…`` / Delete and try again)
-      3. Else open **card-scoped** ⋯ (never page header) → ``Delete listing`` /
-         ``Eliminar publicación`` via ``get_by_text`` / XPath → confirm modal
-      4. On menu miss: scrape href from the card and navigate to item URL
+      2. Click red banner CTA / Delete text **inside the card** (no dropdown)
+      3. Else click any card-scoped action/menu icon → Delete listing /
+         Eliminar publicación via text → confirm modal
+      4. On miss: scrape listing id / href and navigate to item URL, or re-click
+         the red warning banner
       5. Last resort: global ``remove_from_selling_by_title``
     """
     title = re.sub(r"\s+", " ", (title or "").strip())
@@ -2824,7 +2990,16 @@ def force_delete_requieren_atencion_card(
             flush=True,
         )
 
-        # 1) Red banner CTA inside this card only.
+        # 1) Direct Delete / banner CTA inside this card (no dropdown needed).
+        try:
+            if _click_card_direct_delete(page, card, timeout_ms=ms):
+                if _verified_gone("card direct Delete/banner"):
+                    return True
+        except Exception as exc:
+            print(
+                f"  Requieren atención: direct delete error title={title!r}: {exc}",
+                flush=True,
+            )
         try:
             if _click_attention_delete_cta(page, scope=card):
                 if _verified_gone("card banner CTA"):
@@ -2835,38 +3010,56 @@ def force_delete_requieren_atencion_card(
                 flush=True,
             )
 
-        # 2) Card-scoped ⋯ → Delete listing / Eliminar publicación (text locator).
+        # 2) Flexible card action/menu icon → Delete listing / Eliminar.
         menu_opened = False
         try:
             menu_opened = _click_card_scoped_more(page, card, timeout_ms=ms)
         except Exception as exc:
             print(
-                f"  Requieren atención: ⋯ open error title={title!r}: {exc}",
+                f"  Requieren atención: action/menu open error title={title!r}: {exc}",
                 flush=True,
             )
         if menu_opened:
             _dom_settle(page, lo_ms=700, hi_ms=1_200)
-            if _click_menu_delete_bilingual(page):
-                if _verified_gone("card ⋯ + Delete text"):
-                    return True
-            else:
-                print(
-                    f"  Requieren atención: Delete/Eliminar not clicked "
-                    f"after card ⋯ title={title!r}",
-                    flush=True,
-                )
-                try:
-                    page.keyboard.press("Escape")
-                except Exception:
-                    pass
-                # Menu dropdown bug → jump to URL / edit delete immediately.
-                if _try_url_fallback("menu Delete miss after card ⋯"):
-                    return True
-        else:
+            # Menu portal often renders outside the card — search page-level text.
+            deleted = _click_menu_delete_bilingual(page)
+            if not deleted and _click_delete_text_direct(page):
+                _wait_confirm_delete_modal(page)
+                deleted = True
+            if deleted and _verified_gone("card action + Delete text"):
+                return True
             print(
-                f"  Requieren atención: card ⋯ not opened title={title!r}",
+                f"  Requieren atención: Delete/Eliminar not clicked "
+                f"after card action title={title!r}",
                 flush=True,
             )
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+            # Menu/dropdown miss → URL or banner immediately.
+            if _click_attention_banner_text(page, scope=card) or _click_attention_banner_text(
+                page
+            ):
+                _wait_confirm_delete_modal(page)
+                if _verified_gone("banner after menu miss"):
+                    return True
+            if _try_url_fallback("menu Delete miss after card action"):
+                return True
+        else:
+            print(
+                f"  Requieren atención: no card action control title={title!r} "
+                f"— trying banner/URL",
+                flush=True,
+            )
+            if _click_attention_banner_text(page, scope=card) or _click_attention_banner_text(
+                page
+            ):
+                _wait_confirm_delete_modal(page)
+                if _verified_gone("banner after no action control"):
+                    return True
+            if _try_url_fallback("no interactive action inside card"):
+                return True
 
     # 3) Direct page-level banner text (still better than global header ⋯).
     try:
