@@ -1,6 +1,7 @@
 """Unit tests — Marketplace listing age parse + purge candidate selection."""
 from __future__ import annotations
 
+import sqlite3
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
@@ -790,6 +791,46 @@ class TestPurgeOldListingsOnPage(unittest.TestCase):
         gone.assert_called_once()
         clear.assert_called_once()
         self.assertEqual(clear.call_args.kwargs.get("autosell_id"), "obj1025")
+
+    def test_row_as_dict_supports_sqlite_row_get(self):
+        """sqlite3.Row has no .get(); _row_as_dict must make .get() safe."""
+        from src.facebook.purge_old import (
+            _lookup_db_row,
+            _posted_at_age_days,
+            _row_as_dict,
+        )
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            "CREATE TABLE fb_listings ("
+            "autosell_id TEXT, account_id TEXT, fb_listing_url TEXT, posted_at TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO fb_listings VALUES (?,?,?,?)",
+            (
+                "obj1025",
+                "account_2",
+                "https://www.facebook.com/marketplace/item/555/",
+                "2026-10-01T00:00:00+00:00",
+            ),
+        )
+        raw = conn.execute("SELECT * FROM fb_listings").fetchone()
+        self.assertIsInstance(raw, sqlite3.Row)
+        with self.assertRaises(AttributeError):
+            raw.get("autosell_id")  # type: ignore[attr-defined]
+
+        data = _row_as_dict(raw)
+        self.assertEqual(data.get("autosell_id"), "obj1025")
+        self.assertEqual(data.get("missing", "x"), "x")
+        self.assertGreaterEqual(_posted_at_age_days(raw) or 0.0, 7.0)
+
+        store = MagicMock()
+        store.get_live_listings.return_value = [raw]
+        found = _lookup_db_row(store, "account_2", "555")
+        self.assertIsNotNone(found)
+        self.assertEqual(found.get("autosell_id"), "obj1025")
+        conn.close()
 
     def test_db_fallback_purge_clears_already_removed_without_fail(self):
         """Empty DOM shelf + dead sync.db row → deleted, not failed."""

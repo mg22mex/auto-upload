@@ -1753,20 +1753,42 @@ def _title_needles_for_row(
     return []
 
 
+def _row_as_dict(row: Any) -> dict[str, Any]:
+    """Cast ``sqlite3.Row`` / mapping-like DB rows to a plain ``dict``.
+
+    ``sqlite3.Row`` supports ``row['key']`` and ``key in row.keys()`` but not
+    ``row.get()`` — callers must convert before using ``.get()``.
+    """
+    if row is None:
+        return {}
+    if isinstance(row, dict):
+        return row
+    try:
+        return dict(row)
+    except Exception:
+        try:
+            keys = list(row.keys())  # type: ignore[attr-defined]
+            return {str(k): row[k] for k in keys}
+        except Exception:
+            return {}
+
+
 def _lookup_db_row(
     store: SyncStore, account_id: str, item_id: str
-) -> Any | None:
+) -> dict[str, Any] | None:
     for row in store.get_live_listings():
-        if row["account_id"] != account_id:
+        data = _row_as_dict(row)
+        if data.get("account_id") != account_id:
             continue
-        url = row["fb_listing_url"] or ""
-        if item_id and item_id in url:
-            return row
+        url = data.get("fb_listing_url") or ""
+        if item_id and item_id in str(url):
+            return data
     return None
 
 
 def _posted_at_age_days(row: Any) -> float | None:
-    raw = row["posted_at"] if row is not None and "posted_at" in row.keys() else None
+    data = _row_as_dict(row) if row is not None else {}
+    raw = data.get("posted_at")
     if not raw:
         return None
     try:
@@ -4464,13 +4486,14 @@ def purge_old_listings_on_page(
         used_db_fallback = True
         db_cards: list[ShelfListing] = []
         for row in store.get_live_listings():
-            if row["account_id"] != account_id:
+            data = _row_as_dict(row)
+            if data.get("account_id") != account_id:
                 continue
-            url = row["fb_listing_url"] or ""
+            url = str(data.get("fb_listing_url") or "")
             item_id = extract_item_id(url)
             if not item_id:
                 continue
-            age = _posted_at_age_days(row)
+            age = _posted_at_age_days(data)
             db_cards.append(
                 ShelfListing(
                     item_id=item_id,
@@ -4481,7 +4504,7 @@ def purge_old_listings_on_page(
                         if age is not None
                         else "sync.db (no posted_at)"
                     ),
-                    card_text=f"{row['autosell_id']} {url}",
+                    card_text=f"{data.get('autosell_id') or ''} {url}",
                 )
             )
         listings = db_cards

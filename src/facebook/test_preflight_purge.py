@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from src.facebook.errors import PreflightPurgeAborted
 from src.facebook.preflight_purge import (
+    _preflight_queue_titles,
     preflight_purge_config,
     run_preflight_shelf_purge,
 )
@@ -222,6 +224,57 @@ class TestRunPreflightShelfPurge(unittest.TestCase):
             )
         self.assertEqual(result.failed, 2)
         self.assertFalse(result.aborted)
+
+
+class TestPreflightQueueTitlesSqliteRow(unittest.TestCase):
+    def test_queue_titles_accepts_sqlite_row_without_get(self):
+        """sync.db fallback rows are sqlite3.Row — must not call .get() raw."""
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            "CREATE TABLE t (autosell_id TEXT, account_id TEXT, "
+            "fb_listing_url TEXT, posted_at TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO t VALUES (?,?,?,?)",
+            (
+                "obj1025",
+                "account_2",
+                "https://www.facebook.com/marketplace/item/555/",
+                "2026-10-01T00:00:00+00:00",
+            ),
+        )
+        raw = conn.execute("SELECT * FROM t").fetchone()
+        store = MagicMock()
+        store.get_live_listings.return_value = [raw]
+        vehicle = MagicMock()
+        vehicle.marketplace_title = "2019 Porsche Cayenne"
+        vehicle.title = "Porsche Cayenne"
+        vehicle.year = "2019"
+        vehicle.brand = "Porsche"
+        page = MagicMock()
+        with (
+            patch(
+                "src.facebook.preflight_purge.collect_selling_listings",
+                return_value=[],
+            ),
+            patch(
+                "src.facebook.purge_old._catalog_by_autosell_id",
+                return_value={"obj1025": vehicle},
+            ),
+            patch(
+                "src.facebook.preflight_purge.extract_requieren_atencion_cards",
+                return_value=[],
+            ),
+        ):
+            titles = _preflight_queue_titles(
+                page,
+                store,
+                account_id="account_2",
+                max_days=7.0,
+            )
+        self.assertTrue(any("Porsche" in t for t in titles))
+        conn.close()
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ from src.facebook.purge_old import (
     _catalog_by_autosell_id,
     _lookup_db_row,
     _posted_at_age_days,
+    _row_as_dict,
     _should_keep_listing,
     hard_delete_listing_via_playwright,
     is_purge_age_eligible,
@@ -566,16 +567,17 @@ def _merge_with_sync_db_all(
     except Exception:
         rows = []
     for row in rows:
-        url = row["fb_listing_url"] or ""
+        data = _row_as_dict(row)
+        url = str(data.get("fb_listing_url") or "")
         item_id = extract_item_id(url)
         if not item_id or item_id in by_id:
             continue
-        age = _posted_at_age_days(row)
+        age = _posted_at_age_days(data)
         by_id[item_id] = ActiveListing(
             item_id=item_id,
-            title=str(row["autosell_id"]),
+            title=str(data.get("autosell_id") or ""),
             age_days=age,
-            age_text=f"sync.db status={row['status']}",
+            age_text=f"sync.db status={data.get('status') or ''}",
             href=url
             if url.startswith("http")
             else f"https://www.facebook.com/marketplace/item/{item_id}/",
@@ -610,18 +612,19 @@ def _merge_with_sync_db(
 ) -> list[ActiveListing]:
     by_id = {item.item_id: item for item in listings}
     for row in store.get_live_listings():
-        if row["account_id"] != account_id:
+        data = _row_as_dict(row)
+        if data.get("account_id") != account_id:
             continue
-        url = row["fb_listing_url"] or ""
+        url = str(data.get("fb_listing_url") or "")
         item_id = extract_item_id(url)
         if not item_id:
             continue
-        age = _posted_at_age_days(row)
+        age = _posted_at_age_days(data)
         existing = by_id.get(item_id)
         if existing is None:
             by_id[item_id] = ActiveListing(
                 item_id=item_id,
-                title=str(row["autosell_id"]),
+                title=str(data.get("autosell_id") or ""),
                 age_days=age,
                 age_text=(
                     f"sync.db posted_at age={age:.1f}d"

@@ -87,6 +87,7 @@ def _preflight_queue_titles(
         _catalog_by_autosell_id,
         _lookup_db_row,
         _posted_at_age_days,
+        _row_as_dict,
         _should_keep_listing,
         is_purge_age_eligible,
         purge_unknown_age_when_total,
@@ -152,7 +153,8 @@ def _preflight_queue_titles(
         )[:80]
         _add(title)
         if row is not None:
-            autosell_id = str(row.get("autosell_id") or "")
+            data = _row_as_dict(row)
+            autosell_id = str(data.get("autosell_id") or "")
             vehicle = catalog.get(autosell_id) if autosell_id else None
             if vehicle is not None:
                 _add(getattr(vehicle, "marketplace_title", "") or "")
@@ -165,16 +167,17 @@ def _preflight_queue_titles(
 
     # sync.db live rows (covers GraphQL-only ids before DOM attention merge).
     for row in store.get_live_listings():
-        if row["account_id"] != account_id:
+        data = _row_as_dict(row)
+        if data.get("account_id") != account_id:
             continue
-        age = _posted_at_age_days(row)
+        age = _posted_at_age_days(data)
         if age is None or not is_purge_age_eligible(age, max_days):
             if not purge_unknown_age_when_total(max_days):
                 continue
-        autosell_id = str(row.get("autosell_id") or "")
+        autosell_id = str(data.get("autosell_id") or "")
         if keep_autosell_ids and autosell_id in keep_autosell_ids:
             continue
-        item_id = extract_item_id(row.get("fb_listing_url") or "") or ""
+        item_id = extract_item_id(data.get("fb_listing_url") or "") or ""
         if keep_item_ids and item_id and item_id in keep_item_ids:
             continue
         vehicle = catalog.get(autosell_id) if autosell_id else None
