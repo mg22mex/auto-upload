@@ -32,6 +32,11 @@ on:
 # autosell.mx blocks or ignores GitHub-hosted runner IP ranges (connect timeout).
 # Scrape + diff + Facebook all run on the self-hosted fb-worker.
 
+# Queue vs relist/bump on the same FB account — never overlap Playwright sessions.
+concurrency:
+  group: fb-marketplace-${{ matrix.account || 'autosell' }}
+  cancel-in-progress: false
+
 jobs:
   sync:
     name: Scrape + diff (+ Facebook on Phase 2)

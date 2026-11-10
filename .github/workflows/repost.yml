@@ -59,6 +59,11 @@ on:
         type: boolean
         default: true
 
+# Queue vs sync/purge on the same FB account — never overlap Playwright sessions.
+concurrency:
+  group: fb-marketplace-${{ matrix.account || 'autosell' }}
+  cancel-in-progress: false
+
 jobs:
   listing-bump:
     name: Incremental bump (3/account every 3h)
@@ -67,9 +72,6 @@ jobs:
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, fb-worker]
-    concurrency:
-      group: facebook-bump
-      cancel-in-progress: false
     timeout-minutes: 90
 
     steps:
