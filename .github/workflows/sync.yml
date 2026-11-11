@@ -34,7 +34,7 @@ on:
 
 # Queue vs relist/bump on the same FB account — never overlap Playwright sessions.
 concurrency:
-  group: fb-marketplace-${{ matrix.account || 'autosell' }}
+  group: fb-marketplace-autosell
   cancel-in-progress: false
 
 jobs:
