@@ -1893,9 +1893,11 @@ def remove_from_selling_by_title(
             page.wait_for_timeout(800)
             _confirm_if_needed(page, prefer_delete=True)
             _dismiss_delete_survey_if_needed(page)
-        # Wait for FB to drop the card before reloading (avoids false "still sees").
+        # FB keeps the card in the DOM briefly after Delete confirm — wait for
+        # detach / settle BEFORE any shelf reload post-check (false-negative abort).
+        _wait_deleted_card_settle(page, matched, settle_ms=2_800)
         _wait_title_needles_hidden(
-            page, needles, timeout_ms=6_000, require_year=require_year
+            page, needles, timeout_ms=8_000, require_year=require_year
         )
     else:
         page.wait_for_timeout(1_800)
@@ -1918,8 +1920,22 @@ def remove_from_selling_by_title(
             flush=True,
         )
         return True
-    # Last-chance: confirm modal may still be open after reload race.
+    # DOM lag after reload: one more settle before treating as unconfirmed.
     if action == "delete":
+        page.wait_for_timeout(2_800)
+        if not _title_still_on_selling_shelf(
+            page,
+            needles,
+            max_scrolls=min(max_scrolls, 8),
+            require_year=require_year,
+        ):
+            print(
+                f"  shelf title delete verified after settle "
+                f"(needles={needles[:2]!r})",
+                flush=True,
+            )
+            return True
+        # Last-chance: confirm modal may still be open after reload race.
         _confirm_if_needed(page, prefer_delete=True)
         _dismiss_delete_survey_if_needed(page)
         page.wait_for_timeout(2_000)
@@ -3245,16 +3261,63 @@ def _dismiss_delete_survey_if_needed(page: Page, *, timeout_ms: int = 2_500) -> 
     return clicked
 
 
+def _wait_deleted_card_settle(
+    page: Page,
+    card_locator=None,
+    *,
+    settle_ms: int = 2_800,
+) -> None:
+    """Wait for the deleted shelf card to detach, else a fixed DOM settle.
+
+    Immediate post-checks race Facebook's shelf refresh and falsely report
+    ``post-check still sees title`` after a successful Delete/Eliminar.
+    """
+    wait_ms = max(2_500, int(settle_ms))
+    if card_locator is not None:
+        try:
+            card_locator.wait_for(state="detached", timeout=wait_ms)
+            print(
+                f"  shelf title: deleted card detached ({wait_ms}ms budget)",
+                flush=True,
+            )
+            return
+        except Exception:
+            pass
+        try:
+            card_locator.wait_for(state="hidden", timeout=min(1_500, wait_ms))
+            print(
+                "  shelf title: deleted card hidden before post-check",
+                flush=True,
+            )
+            return
+        except Exception:
+            pass
+    try:
+        page.wait_for_timeout(wait_ms)
+    except Exception:
+        pass
+    print(
+        f"  shelf title: settled {wait_ms}ms after Delete confirm "
+        f"(before post-check)",
+        flush=True,
+    )
+
+
 def _wait_title_needles_hidden(
     page: Page,
     needles: list[str],
     *,
-    timeout_ms: int = 6_000,
+    timeout_ms: int = 8_000,
     require_year: bool = False,
 ) -> bool:
     """Best-effort wait until a matched shelf title node is gone (DOM settle)."""
     from time import monotonic
 
+    # Always allow FB a short lag before the first visibility probe.
+    try:
+        page.wait_for_timeout(800)
+    except Exception:
+        pass
     deadline = monotonic() + max(1.0, timeout_ms / 1000.0)
     norms = [
         re.sub(r"\s+", " ", (n or "").strip())

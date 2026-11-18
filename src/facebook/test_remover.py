@@ -870,6 +870,7 @@ class TestRemoveFromSellingByTitle(unittest.TestCase):
             ) as menu,
             patch("src.facebook.remover._confirm_if_needed", return_value=True) as confirm,
             patch("src.facebook.remover._dismiss_delete_survey_if_needed"),
+            patch("src.facebook.remover._wait_deleted_card_settle") as settle,
             patch("src.facebook.remover._wait_title_needles_hidden", return_value=True),
             patch(
                 "src.facebook.remover._title_still_on_selling_shelf",
@@ -883,6 +884,7 @@ class TestRemoveFromSellingByTitle(unittest.TestCase):
         more_btn.click.assert_called()
         menu.assert_called_with(page, action="delete")
         confirm.assert_called()
+        settle.assert_called()
 
     def test_unconfirmed_when_title_still_visible(self):
         from src.facebook.remover import remove_from_selling_by_title
@@ -899,6 +901,7 @@ class TestRemoveFromSellingByTitle(unittest.TestCase):
             patch("src.facebook.remover._click_menu_action", return_value=True),
             patch("src.facebook.remover._confirm_if_needed", return_value=True),
             patch("src.facebook.remover._dismiss_delete_survey_if_needed"),
+            patch("src.facebook.remover._wait_deleted_card_settle"),
             patch("src.facebook.remover._wait_title_needles_hidden", return_value=False),
             patch(
                 "src.facebook.remover._title_still_on_selling_shelf",
@@ -909,6 +912,62 @@ class TestRemoveFromSellingByTitle(unittest.TestCase):
                 page, ["2018 Audi Q5"], action="delete"
             )
         self.assertFalse(ok)
+
+    def test_settle_before_post_check_after_delete_confirm(self):
+        """Detach/settle must run before shelf reload post-check."""
+        from src.facebook.remover import remove_from_selling_by_title
+
+        page = MagicMock()
+        more_btn = MagicMock()
+        order: list[str] = []
+
+        def _settle(*_a, **_k):
+            order.append("settle")
+
+        def _hidden(*_a, **_k):
+            order.append("hidden")
+            return True
+
+        def _still(*_a, **_k):
+            order.append("postcheck")
+            return False
+
+        with (
+            patch("src.facebook.remover._sort_selling_oldest_first"),
+            patch(
+                "src.facebook.remover._find_selling_title_more_button",
+                return_value=more_btn,
+            ),
+            patch("src.facebook.remover._menu_open", return_value=True),
+            patch("src.facebook.remover._click_menu_action", return_value=True),
+            patch("src.facebook.remover._confirm_if_needed", return_value=True),
+            patch("src.facebook.remover._dismiss_delete_survey_if_needed"),
+            patch(
+                "src.facebook.remover._wait_deleted_card_settle",
+                side_effect=_settle,
+            ),
+            patch(
+                "src.facebook.remover._wait_title_needles_hidden",
+                side_effect=_hidden,
+            ),
+            patch(
+                "src.facebook.remover._title_still_on_selling_shelf",
+                side_effect=_still,
+            ),
+        ):
+            ok = remove_from_selling_by_title(
+                page, ["2018 Audi Q5"], action="delete"
+            )
+        self.assertTrue(ok)
+        self.assertEqual(order[:3], ["settle", "hidden", "postcheck"])
+
+    def test_wait_deleted_card_settle_waits_detached(self):
+        from src.facebook.remover import _wait_deleted_card_settle
+
+        page = MagicMock()
+        card = MagicMock()
+        _wait_deleted_card_settle(page, card, settle_ms=2_800)
+        card.wait_for.assert_any_call(state="detached", timeout=2_800)
 
     def test_card_root_opens_more_when_first_click_misses(self):
         from src.facebook.remover import remove_from_selling_by_title
@@ -937,6 +996,7 @@ class TestRemoveFromSellingByTitle(unittest.TestCase):
             patch("src.facebook.remover._click_menu_action", return_value=True),
             patch("src.facebook.remover._confirm_if_needed", return_value=True),
             patch("src.facebook.remover._dismiss_delete_survey_if_needed"),
+            patch("src.facebook.remover._wait_deleted_card_settle"),
             patch("src.facebook.remover._wait_title_needles_hidden", return_value=True),
             patch(
                 "src.facebook.remover._title_still_on_selling_shelf",
