@@ -31,7 +31,7 @@ Sync [autosell.mx](https://www.autosell.mx) public catalog to **Facebook Marketp
 | **Target FB listings** | ≤ **80** live tracked (`40` × 2); waitlist rotates via FIFO |
 | **Odoo CRM** | `MG Quote Lead` + UTM; XML-RPC as `contabilidad@autosell.mx` |
 | **Gerencia BI** | Streamlit Cloud + local `dashboard/app.py` (active leads only) |
-| **Schedule** | 2× daily scrape + diff-only Odoo inventory + FB sync; daily relist (≥2d age) |
+| **Schedule** | Scrape/FB sync every 3h (`sync.yml`); Odoo inventory 2×/day; listing bump every 3h (`repost.yml`); shared `fb-marketplace-autosell` concurrency |
 
 ## System overview
 
@@ -91,7 +91,7 @@ The FB planner only manages listings in **`sync.db`**. It does not scan Facebook
 | **Catalog scrape** | GitHub Actions / `fb-worker` | `autosell.mx` → `catalog_latest.json` |
 | **Odoo inventory** | CI step / `fb-worker` | `sync_odoo_inventory.py` → upsert `product.template` |
 | **FB sync** | Self-hosted `fb-worker` | Diff → create / update / remove on active accounts |
-| **Repost / relist** | Daily cron / `fb-worker` | Listings ≥3d: mark sold → create new URL (default). Optional `--mode renew` |
+| **Repost / relist** | every 3h / `fb-worker` | Eligible listings: hard-delete → create new URL (default). Optional `--mode renew`. Queued vs sync via concurrency group |
 
 ## Key scripts
 

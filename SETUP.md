@@ -43,12 +43,22 @@ The workflow symlinks `data/` and `sessions/` to `~/auto-upload-data/` so `sync.
 
 **Not suitable:** Hugging Face Spaces, Streamlit Cloud, Render/Railway free tiers — they sleep and cannot keep Facebook browser sessions.
 
-**Scheduling:** GitHub Actions cron triggers sync (2× daily) and listing bump (Wed + Sun — default **repost/relist** for listings ≥3 days old). You do not need cron on the worker itself.
+**Scheduling:** GitHub Actions cron triggers scrape/FB sync and listing bump on `fb-worker`. You do not need cron on the worker itself.
 
-| Workflow | Schedule (Chihuahua) | Purpose |
-|----------|----------------------|---------|
-| `sync.yml` | 08:00 & 12:00 daily | New cars, price updates, removals |
-| `repost.yml` (listing bump) | **Wed + Sun 09:00** | Full **relist/repost** (≥3d; default). Optional `--mode renew` |
+| Workflow | Schedule (UTC) | Purpose |
+|----------|----------------|---------|
+| `sync.yml` | every 3h + 14:00 | Scrape → preflight purge → create/update/remove; Odoo inventory gated 2×/day |
+| `repost.yml` (listing bump) | every 3h | Incremental **relist/repost** (default ≥7d / config; batches of 3/account) |
+
+Both workflows share a top-level concurrency group so Playwright never overlaps:
+
+```yaml
+concurrency:
+  group: fb-marketplace-autosell
+  cancel-in-progress: false
+```
+
+Incoming sync/relist runs **queue** until the active one finishes (`cancel-in-progress: false`).
 
 ---
 
@@ -255,9 +265,18 @@ Copy sessions to fb-worker if login was local. Prefer a **lean tarball** (skip b
 cd sessions
 tar --exclude='*/Cache' --exclude='*/Code Cache' --exclude='*/GPUCache' \
     --exclude='*/Service Worker' --exclude='*/BrowserMetrics' \
+    --exclude='*/GPUPersistentCache' --exclude='*/ShaderCache' \
+    --exclude='*/GraphiteDawnCache' --exclude='*/GrShaderCache' \
     -czf /tmp/account_N-session.tgz account_N
 scp -i YOUR_KEY /tmp/account_N-session.tgz ubuntu@YOUR_VPS_IP:/tmp/
 ssh ubuntu@YOUR_VPS_IP 'tar -xzf /tmp/account_N-session.tgz -C ~/auto-upload-data/sessions'
+```
+
+Or use the helpers (headed login + pack + scp + remote verify):
+
+```bash
+./scripts/refresh_account1_to_worker.sh
+./scripts/refresh_account2_to_worker.sh   # personal Marco profile
 ```
 
 Repeat for `account_1`, `account_2`, and `account_3`. Verify on the VM:

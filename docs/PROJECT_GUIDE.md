@@ -272,7 +272,8 @@ flowchart TD
 |------|----------|-------|
 | Enable **account_3** in scheduled sync | High | After operator clears old FB listings; add to `active_accounts` |
 | **Repost with holds** | Done | `run_repost.py`, `fb_repost_hold.py`, `repost_holds` table |
-| Scheduled listing repost/relist | Done | `.github/workflows/repost.yml` — Wed+Sun 09:00 Chihuahua; default repost ≥3d |
+| Scheduled listing repost/relist | Done | `.github/workflows/repost.yml` — every 3h UTC; shared `fb-marketplace-autosell` concurrency with `sync.yml` |
+| Preflight 7-day hard purge | Done | `preflight_purge.py` + `purge_old.py` before creates; Requieren atención force-delete; title-match settle after Delete |
 | Sales rep Round Robin + Evolution notify | Done | `data/rr_cursor.db`, `REPS_*` (PE: Ivan/Alfonso/Veronica/Karen; SF: Francisco/Aaron/Charly/Loreto); Irving + Gonzalo Bernal archived (2026-09-29) |
 | Richer **update** (photos, title, mileage) | Medium | Today: price + description only |
 | Inventory FB dashboard (discover untracked listings) | Low | Avoids manual wipe; complex / fragile |
@@ -524,7 +525,8 @@ Scaffolded modules under `src/` for lead-to-quote-to-message automation. They do
 | **pdf_engine** | `src/pdf_engine/` | ReportLab vehicle quote / spec PDF. Optional save under `PDF_OUTPUT_DIR` and attach to `crm.lead` via `ir.attachment`. |
 | **meta_gateway** | `src/meta_gateway/` | Official Facebook Page Messenger webhook: verify token, parse events, quote via `quote_engine`, upsert Odoo lead + chatter, reply via Graph API `/me/messages`. **Status:** `[WIP - Paused awaiting Fanpage Administrator permissions]` — implementation complete; Meta Page subscription pending admin rights. |
 | **pipeline** | `src/pipeline.py` | Orchestrates trade-in → Scotiabank quote → Odoo (`channel` e.g. Voice / Phone) → test-drive calendar when requested → **fleet VIN on lead** → PDF attach → WhatsApp (external worker). Soft-capture path for degraded STT. |
-| **weekly_bump** | `src/sync/weekly_bump.py` + `scripts/run_weekly_bump.py` | Wed+Sun cron: default **full repost/relist** for listings ≥3 days (`posted_at`). Optional `renew` via force mode / config. |
+| **weekly_bump** | `src/sync/weekly_bump.py` + `scripts/run_weekly_bump.py` | Every-3h `repost.yml`: default **full repost/relist** for eligible listings (`posted_at` / `min_age_days`). Optional `renew` via force mode / config. Queued with sync via `fb-marketplace-autosell`. |
+| **preflight_purge** | `src/facebook/preflight_purge.py` + `purge_old.py` | Before slot allocation: hard-delete listings older than ~7d (DOM Listed-on preferred; `sync.db` fallback via `_row_as_dict`). **Requieren atención / Needs attention:** action-bar ⋯ → Delete → confirm modal → count drop (`count_after == count_before−1`); loops identical duplicate titles; title-match path settles ~2.8s / card detach before post-check. |
 
 ### `src/odoo_sync/` modular layout
 
@@ -609,7 +611,7 @@ flowchart LR
 6. **Spec sheet** — Stage `quoted`/`cotizado` → `QuotePDFManager` → `ir.attachment` + chatter.
 7. **WhatsApp** — Native Odoo templates **queued, not sent** until Meta Manager + `ODOO_WA_ACCOUNT_*`. Optional `whatsapp_worker` (Evolution) remains separate.
 
-Facebook Marketplace sync remains independent: `sync.db` + Playwright on `sessions/account_*`. Listing bump: default full repost/relist (`min_age_days: 3`) via `run_weekly_bump.py` (optional `--mode renew`).
+Facebook Marketplace sync remains independent: `sync.db` + Playwright on `sessions/account_*`. Listing bump: default full repost/relist via `run_weekly_bump.py` (optional `--mode renew`). `sync.yml` and `repost.yml` share concurrency group `fb-marketplace-autosell` (`cancel-in-progress: false`) so purge/sync/relist never run Playwright on the same worker at once.
 
 **Catalog branch markers** (`*` Periférico, `+` San Felipe, `-` consignment) are part of autosell titles and must remain on `Vehicle`, snapshots, `sync.db`, and create/sync logs. With `FB_USE_GRAPHQL=1`, only `src/facebook/graphql/create_fill.py` maps markers out of the **mutation** title/model strings (and writes `Sucursal: …` in the description). Do not strip markers from inventory scrape, catalog JSON, or DB upserts.
 
